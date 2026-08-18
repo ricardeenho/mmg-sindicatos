@@ -130,8 +130,105 @@ function Curva({ dados, primeiro, ultimo }) {
   );
 }
 
+
 /* ------------------------------------------------------------------ */
-function Lista({ token, grupo, locais, aoVoltar, diasPorMes }) {
+function Ficha({ token, codigo, aoFechar }) {
+  const [t, setT] = useState(null);
+  const [erro, setErro] = useState("");
+
+  useEffect(() => {
+    setT(null); setErro("");
+    pedir(`/painel/trabalhador/${codigo}`, token).then(setT).catch((e) => setErro(e.message));
+  }, [codigo, token]);
+
+  return (
+    <div className="fixed inset-0 bg-slate-900/50 z-30 flex items-start justify-center p-4 overflow-y-auto"
+         onClick={aoFechar}>
+      <div className="bg-white rounded-xl w-full max-w-2xl mt-10 mb-10" onClick={(e) => e.stopPropagation()}>
+        <div className="px-5 py-4 border-b border-slate-100 flex items-start gap-3">
+          <div className="flex-1">
+            <p className="text-sm font-semibold">{t?.nome || `Código ${codigo}`}</p>
+            <p className="text-[11px] text-slate-500">{codigo}{t?.local_base ? ` · base em ${t.local_base}` : ""}</p>
+          </div>
+          <button onClick={aoFechar} className="text-slate-400 text-lg leading-none">×</button>
+        </div>
+
+        {erro && <p className="p-5 text-sm text-rose-600">{erro}</p>}
+        {!t && !erro && <p className="p-5 text-sm text-slate-400">Carregando…</p>}
+
+        {t && (
+          <div className="p-5 space-y-4">
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+              {[["Dias na janela", t.dias], ["Entressafra", t.dias_entressafra],
+                ["Dias fora da base", t.dias_fora], ["Meta", t.meta]].map(([r, v]) => (
+                <div key={r} className="bg-slate-50 rounded-lg p-3">
+                  <p className="text-[10.5px] text-slate-500">{r}</p>
+                  <p className="text-xl font-semibold tabular-nums">{v}</p>
+                </div>
+              ))}
+            </div>
+
+            <div className="flex gap-2 flex-wrap text-[11px]">
+              <span className="px-2 py-1 rounded bg-slate-100 text-slate-700">{t.situacao}</span>
+              <span className="px-2 py-1 rounded bg-slate-100 text-slate-700">{t.perfil}</span>
+              <span className="px-2 py-1 rounded bg-slate-100 text-slate-700">
+                {Math.round(t.pct_no_local_base)}% no local-base
+              </span>
+              {t.falta > 0 && (
+                <span className="px-2 py-1 rounded bg-amber-100 text-amber-800">
+                  faltam {t.falta} dias
+                </span>
+              )}
+            </div>
+
+            <div>
+              <p className="text-[13px] font-medium mb-2">
+                Por onde passou · {t.historico?.length || 0} setores em todo o histórico
+              </p>
+              <div className="border border-slate-200 rounded-lg overflow-hidden">
+                <table className="w-full text-[12px]">
+                  <thead className="bg-slate-50 text-slate-500">
+                    <tr>
+                      <th className="text-left px-3 py-2">Local</th>
+                      <th className="text-left px-3 py-2">Setor</th>
+                      <th className="text-right px-3 py-2">Dias</th>
+                      <th className="text-left px-3 py-2">Período</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(t.historico || []).map((h, i) => (
+                      <tr key={i} className={`border-t border-slate-50 ${
+                        h.local === t.local_base ? "bg-slate-50" : ""}`}>
+                        <td className="px-3 py-2">
+                          {h.local}
+                          {h.local === t.local_base && (
+                            <span className="ml-1 text-[10px] text-slate-400">base</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-slate-600">{h.setor} · {h.unidade}</td>
+                        <td className="px-3 py-2 text-right tabular-nums font-medium">{h.dias}</td>
+                        <td className="px-3 py-2 text-slate-500 text-[11px]">
+                          {new Date(h.primeiro).toLocaleDateString("pt-BR")} a{" "}
+                          {new Date(h.ultimo).toLocaleDateString("pt-BR")}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="text-[11px] text-slate-400 mt-2">
+                Este histórico é de todo o arquivo, não só da janela de 12 meses.
+              </p>
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+function Lista({ token, grupo, locais, aoVoltar, diasPorMes, aoAbrirFicha }) {
   const [linhas, setLinhas] = useState(null);
   const [erro, setErro] = useState("");
   const [busca, setBusca] = useState("");
@@ -189,7 +286,8 @@ function Lista({ token, grupo, locais, aoVoltar, diasPorMes }) {
             </thead>
             <tbody>
               {filtradas.map((t) => (
-                <tr key={t.codigo} className="border-t border-slate-50">
+                <tr key={t.codigo} onClick={() => aoAbrirFicha(t.codigo)}
+                    className="border-t border-slate-50 hover:bg-slate-50 cursor-pointer">
                   <td className="px-3 py-2 font-medium">{t.codigo}</td>
                   <td className="px-3 py-2">
                     {t.nome || <span className="text-amber-700 text-[11px]">sem cadastro no MMG+</span>}
@@ -325,6 +423,7 @@ function Painel({ token, sair }) {
   const [erro, setErro] = useState("");
   const [aba, setAba] = useState("painel");
   const [grupo, setGrupo] = useState(null);
+  const [ficha, setFicha] = useState(null);
   const [buscaFila, setBuscaFila] = useState("");
   const [filtroLocal, setFiltroLocal] = useState("");
   const [soSemNivel1, setSoSemNivel1] = useState(false);
@@ -410,8 +509,10 @@ function Painel({ token, sair }) {
           ))}
         </div>
 
+        {ficha && <Ficha token={token} codigo={ficha} aoFechar={() => setFicha(null)} />}
+
         {aba === "lista" && (
-          <Lista token={token} grupo={grupo} locais={locais}
+          <Lista token={token} grupo={grupo} locais={locais} aoAbrirFicha={setFicha}
                  aoVoltar={() => setAba("painel")} diasPorMes={r.dias_por_mes} />
         )}
 
@@ -533,7 +634,8 @@ function Painel({ token, sair }) {
                   </thead>
                   <tbody>
                     {filaFiltrada.map((t) => (
-                      <tr key={t.codigo} className="border-t border-slate-50">
+                      <tr key={t.codigo} onClick={() => setFicha(t.codigo)}
+                        className="border-t border-slate-50 hover:bg-slate-50 cursor-pointer">
                         <td className="px-3 py-2 font-medium">{t.codigo}</td>
                         <td className="px-3 py-2">
                           {t.nome || <span className="text-amber-700 text-[11px]">sem cadastro no MMG+</span>}

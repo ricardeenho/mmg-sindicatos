@@ -89,6 +89,16 @@ router.get('/trabalhadores', async (req, res, next) => {
 });
 
 /* ------------------------------------------------------------------
+ * POST /painel/recalcular — refaz o relogio guardado
+ * ---------------------------------------------------------------- */
+router.post('/recalcular', async (req, res, next) => {
+  try {
+    await consulta('select recalcular_relogio()');
+    res.json({ recalculado: true, em: new Date().toISOString() });
+  } catch (e) { next(e); }
+});
+
+/* ------------------------------------------------------------------
  * GET /painel/curva
  * ---------------------------------------------------------------- */
 router.get('/curva', async (req, res, next) => {
@@ -160,6 +170,7 @@ router.put('/safra', async (req, res, next) => {
          set em_safra = (mes = any($1::int[])), origem = 'manual'
        where local_id is null
     `, [meses]);
+    await consulta('select recalcular_relogio()');
     res.json({ meses, gravado: true });
   } catch (e) { next(e); }
 });
@@ -301,6 +312,7 @@ router.patch('/regra', async (req, res, next) => {
       returning percentual, isencao_dias, teto_dias, congelado
     `, [percentual, isencao_dias, teto_dias]);
     if (!p) return res.status(409).json({ error: 'Janela congelada — regra nao pode ser alterada' });
+    await consulta('select recalcular_relogio()');
     res.json(p);
   } catch (e) { next(e); }
 });
