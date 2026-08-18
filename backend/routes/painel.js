@@ -8,6 +8,8 @@ router.use(autenticar);
 const DIAS_ATIVO = 14;   // ativo = teve movimento nas ultimas duas semanas
 const DIAS_POR_MES = 6;  // permanencia maxima fora da base, por mes
 
+const ATIVO = `ultimo_dia > (select janela_fim from v_janela limit 1) - ${DIAS_ATIVO}`;
+
 /* ------------------------------------------------------------------
  * GET /painel/resumo
  * ---------------------------------------------------------------- */
@@ -19,28 +21,22 @@ router.get('/resumo', async (req, res, next) => {
         from v_janela limit 1
     `);
 
-    const { rows: perfis } = await consulta(`
-      select perfil, count(*)::int as pessoas from v_situacao group by perfil
-    `);
-
     const { rows: [ativos] } = await consulta(`
-      select count(*)::int                                                   as ativos,
-             count(*) filter (where perfil = 'permanente')::int              as obrigados,
+      select count(*)::int                                                    as ativos,
+             count(*) filter (where perfil = 'permanente')::int               as obrigados,
              count(*) filter (where perfil = 'permanente' and falta > 0)::int as precisam,
              count(*) filter (where perfil = 'permanente' and falta = 0)::int as em_dia,
              coalesce(sum(falta) filter (where perfil = 'permanente'),0)::int as dias_a_cumprir
-        from v_situacao
-       where ultimo_dia > (select janela_fim from v_janela limit 1) - $1::int
-    `, [DIAS_ATIVO]);
+        from v_situacao where ${ATIVO}
+    `);
 
     const { rows: [fixos] } = await consulta(`
       select count(*)::int as pessoas,
              coalesce(sum(falta),0)::int as dias_a_cumprir,
-             coalesce(sum(ceil(falta::numeric / $1)),0)::int as semanas,
+             coalesce(sum(ceil(falta::numeric / ${DIAS_POR_MES})),0)::int as semanas,
              count(*) filter (where setores_no_local > 1)::int as com_nivel_1
-        from v_fila_fixos
-       where ultimo_dia > (select janela_fim from v_janela limit 1) - $2::int
-    `, [DIAS_POR_MES, DIAS_ATIVO]);
+        from v_fila_fixos where ${ATIVO}
+    `);
 
     const { rows: [base] } = await consulta(`
       select (select count(*) from trabalhadores)::int                    as cadastrados,
@@ -53,9 +49,42 @@ router.get('/resumo', async (req, res, next) => {
     `);
 
     res.json({
-      janela, perfis, ativos, fixos, base,
+      janela, ativos, fixos, base,
       regras: { dias_ativo: DIAS_ATIVO, dias_por_mes: DIAS_POR_MES },
     });
+  } catch (e) { next(e); }
+});
+
+/* ------------------------------------------------------------------
+ * GET /painel/trabalhadores?grupo=...
+ * Alimenta o clique nos cartoes do painel.
+ * ---------------------------------------------------------------- */
+router.get('/trabalhadores', async (req, res, next) => {
+  const filtros = {
+    ativos:      ATIVO,
+    obrigados:   `${ATIVO} and perfil = 'permanente'`,
+    precisam:    `${ATIVO} and perfil = 'permanente' and falta > 0`,
+    em_dia:      `${ATIVO} and perfil = 'permanente' and falta = 0`,
+    safristas:   `${ATIVO} and perfil = 'safrista'`,
+    isentos:     `${ATIVO} and perfil = 'isento'`,
+    cadastrados: 'true',
+  };
+  const onde = filtros[req.query.grupo];
+  if (!onde) return res.status(400).json({ error: 'Grupo desconhecido' });
+
+  try {
+    const { rows } = await consulta(`
+      select codigo, nome, local_base, dias, dias_entressafra, dias_fora,
+             meta, falta, perfil, situacao, ultimo_dia,
+             round(pct_no_local_base)::int as pct_no_local_base,
+             meses_com_movimento,
+             ceil(falta::numeric / ${DIAS_POR_MES})::int as semanas
+        from v_situacao
+       where ${onde}
+       order by dias desc
+       limit 2000
+    `);
+    res.json(rows);
   } catch (e) { next(e); }
 });
 
@@ -105,7 +134,6 @@ router.get('/safra', async (req, res, next) => {
         left join observado o on o.mes = b.mes
        order by b.mes
     `);
-
     const media = rows.reduce((a, r) => a + r.media_pessoas, 0) / 12;
     res.json({
       meses: rows.map((r) => ({
@@ -137,21 +165,21 @@ router.put('/safra', async (req, res, next) => {
 });
 
 /* ------------------------------------------------------------------
- * GET /painel/fila — só ativos, com as semanas de rodízio
+ * GET /painel/fila
  * ---------------------------------------------------------------- */
 router.get('/fila', async (req, res, next) => {
   try {
     const { rows } = await consulta(`
       select codigo, nome, local_base, dias, dias_entressafra, dias_fora,
-             meta, falta, pct_no_local_base, meses_com_movimento,
-             setores_no_local, ultimo_dia,
-             ceil(falta::numeric / $1)::int as semanas,
-             (setores_no_local > 1)         as tem_nivel_1
+             meta, falta, round(pct_no_local_base)::int as pct_no_local_base,
+             meses_com_movimento, setores_no_local, ultimo_dia,
+             ceil(falta::numeric / ${DIAS_POR_MES})::int as semanas,
+             (setores_no_local > 1)                     as tem_nivel_1
         from v_fila_fixos
-       where ultimo_dia > (select janela_fim from v_janela limit 1) - $2::int
+       where ${ATIVO}
        order by dias desc
        limit 500
-    `, [DIAS_POR_MES, DIAS_ATIVO]);
+    `);
     res.json(rows);
   } catch (e) { next(e); }
 });
@@ -166,20 +194,18 @@ router.get('/locais', async (req, res, next) => {
              count(*)::int                          as pessoas,
              sum(f.falta)::int                      as dias_a_cumprir,
              max(f.setores_no_local)::int           as setores,
-             sum(ceil(f.falta::numeric / $1))::int  as semanas
+             sum(ceil(f.falta::numeric / ${DIAS_POR_MES}))::int as semanas
         from v_fila_fixos f
-       where f.ultimo_dia > (select janela_fim from v_janela limit 1) - $2::int
+       where f.${ATIVO}
        group by 1
        order by 2 desc, 3 desc
-    `, [DIAS_POR_MES, DIAS_ATIVO]);
+    `);
     res.json(rows);
   } catch (e) { next(e); }
 });
 
 /* ------------------------------------------------------------------
  * GET /painel/safristas-fixos
- * Safristas que voltam sempre ao mesmo local ha 2 anos ou mais.
- * Nao entram na obrigacao, mas constroem habitualidade sazonal.
  * ---------------------------------------------------------------- */
 router.get('/safristas-fixos', async (req, res, next) => {
   try {
@@ -197,7 +223,7 @@ router.get('/safristas-fixos', async (req, res, next) => {
       ),
       dominante as (
         select distinct on (a.trabalhador_id)
-               a.trabalhador_id, u.local_id, count(*) as n
+               a.trabalhador_id, u.local_id
           from apuracao_dia a
           join unidades u on u.id = a.unidade_id
          group by a.trabalhador_id, u.local_id
@@ -210,9 +236,7 @@ router.get('/safristas-fixos', async (req, res, next) => {
         join trabalhadores t on t.id = h.trabalhador_id
         left join dominante d on d.trabalhador_id = h.trabalhador_id
         left join locais l    on l.id = d.local_id
-       where h.locais = 1
-         and h.meses >= 24
-         and s.perfil = 'safrista'
+       where h.locais = 1 and h.meses >= 24 and s.perfil = 'safrista'
        order by h.dias desc
     `);
     res.json(rows);

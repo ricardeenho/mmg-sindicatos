@@ -3,6 +3,16 @@ import { useState, useEffect, useMemo } from "react";
 const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
 const MESES = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
 
+const GRUPOS = {
+  ativos:      "Ativos",
+  obrigados:   "Obrigados ao rodízio",
+  precisam:    "Precisam rodar",
+  em_dia:      "Em dia",
+  cadastrados: "Cadastrados",
+  safristas:   "Safristas",
+  isentos:     "Isentos",
+};
+
 async function pedir(caminho, token) {
   const r = await fetch(API + caminho, { headers: { Authorization: `Bearer ${token}` } });
   if (!r.ok) throw new Error((await r.json()).error || "Falha na consulta");
@@ -67,12 +77,15 @@ function Login({ aoEntrar }) {
 }
 
 /* ------------------------------------------------------------------ */
-const Cartao = ({ rotulo, valor, sub, cor = "text-slate-900" }) => (
-  <div className="bg-white rounded-xl border border-slate-200 p-4">
+const Cartao = ({ rotulo, valor, sub, cor = "text-slate-900", aoClicar }) => (
+  <button onClick={aoClicar} disabled={!aoClicar}
+    className={`text-left bg-white rounded-xl border border-slate-200 p-4 w-full transition ${
+      aoClicar ? "hover:border-slate-400 hover:shadow-sm cursor-pointer" : "cursor-default"}`}>
     <p className="text-xs text-slate-500">{rotulo}</p>
     <p className={`text-3xl font-semibold mt-1 tabular-nums ${cor}`}>{valor}</p>
     {sub && <p className="text-[11px] text-slate-500 mt-1 leading-tight">{sub}</p>}
-  </div>
+    {aoClicar && <p className="text-[10px] text-teal-600 mt-1.5">ver a lista →</p>}
+  </button>
 );
 
 const Busca = ({ valor, aoMudar, dica }) => (
@@ -113,6 +126,102 @@ function Curva({ dados, primeiro, ultimo }) {
           );
         })}
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+function Lista({ token, grupo, locais, aoVoltar, diasPorMes }) {
+  const [linhas, setLinhas] = useState(null);
+  const [erro, setErro] = useState("");
+  const [busca, setBusca] = useState("");
+  const [local, setLocal] = useState("");
+
+  useEffect(() => {
+    setLinhas(null); setErro("");
+    pedir(`/painel/trabalhadores?grupo=${grupo}`, token).then(setLinhas).catch((e) => setErro(e.message));
+  }, [grupo, token]);
+
+  const filtradas = useMemo(() => {
+    if (!linhas) return [];
+    const t = busca.trim().toLowerCase();
+    return linhas.filter((x) =>
+      (!t || (x.nome || "").toLowerCase().includes(t) || x.codigo.includes(t)) &&
+      (!local || x.local_base === local)
+    );
+  }, [linhas, busca, local]);
+
+  if (erro) return <p className="text-sm text-rose-600">{erro}</p>;
+  if (!linhas) return <p className="text-sm text-slate-400">Carregando…</p>;
+
+  return (
+    <div className="space-y-4">
+      <div className="flex gap-2 items-center flex-wrap">
+        <button onClick={aoVoltar} className="text-[13px] text-slate-600 underline">← Painel</button>
+        <span className="text-sm font-medium">{GRUPOS[grupo]}</span>
+        <Busca valor={busca} aoMudar={setBusca} dica="Buscar nome ou código…" />
+        <select value={local} onChange={(e) => setLocal(e.target.value)}
+          className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
+          <option value="">Todos os locais</option>
+          {locais.map((l) => <option key={l.local_base} value={l.local_base}>{l.local_base}</option>)}
+        </select>
+        <span className="text-[12px] text-slate-500">{filtradas.length} de {linhas.length}</span>
+      </div>
+
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12px]">
+            <thead className="bg-slate-50 text-slate-500">
+              <tr>
+                <th className="text-left px-3 py-2">Código</th>
+                <th className="text-left px-3 py-2">Nome</th>
+                <th className="text-left px-3 py-2">Local-base</th>
+                <th className="text-left px-3 py-2">Situação</th>
+                <th className="text-right px-3 py-2">Dias</th>
+                <th className="text-right px-3 py-2">Entressafra</th>
+                <th className="text-right px-3 py-2">Fora</th>
+                <th className="text-right px-3 py-2">Meta</th>
+                <th className="text-right px-3 py-2">Falta</th>
+                <th className="text-right px-3 py-2">Semanas</th>
+                <th className="text-right px-3 py-2">% no local</th>
+                <th className="text-left px-3 py-2">Último dia</th>
+              </tr>
+            </thead>
+            <tbody>
+              {filtradas.map((t) => (
+                <tr key={t.codigo} className="border-t border-slate-50">
+                  <td className="px-3 py-2 font-medium">{t.codigo}</td>
+                  <td className="px-3 py-2">
+                    {t.nome || <span className="text-amber-700 text-[11px]">sem cadastro no MMG+</span>}
+                  </td>
+                  <td className="px-3 py-2 text-slate-600">{t.local_base}</td>
+                  <td className="px-3 py-2">
+                    <span className={`text-[11px] px-1.5 py-0.5 rounded ${
+                      t.situacao === "Em dia" ? "bg-emerald-50 text-emerald-700"
+                      : t.situacao === "Precisa rodar" ? "bg-amber-50 text-amber-700"
+                      : t.situacao === "Safrista" ? "bg-sky-50 text-sky-700"
+                      : "bg-slate-100 text-slate-600"}`}>{t.situacao}</span>
+                  </td>
+                  <td className="px-3 py-2 text-right tabular-nums">{t.dias}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.dias_entressafra}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.dias_fora}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{t.meta}</td>
+                  <td className={`px-3 py-2 text-right tabular-nums font-semibold ${
+                    t.falta > 0 ? "text-amber-600" : "text-emerald-600"}`}>{t.falta}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.semanas}</td>
+                  <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.pct_no_local_base}%</td>
+                  <td className="px-3 py-2 text-slate-500">
+                    {t.ultimo_dia && new Date(t.ultimo_dia).toLocaleDateString("pt-BR")}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p className="text-[11px] text-slate-400">
+        Semanas = dias que faltam divididos por {diasPorMes}, a permanência máxima fora da base por mês.
+      </p>
     </div>
   );
 }
@@ -215,6 +324,7 @@ function Painel({ token, sair }) {
   const [d, setD] = useState(null);
   const [erro, setErro] = useState("");
   const [aba, setAba] = useState("painel");
+  const [grupo, setGrupo] = useState(null);
   const [buscaFila, setBuscaFila] = useState("");
   const [filtroLocal, setFiltroLocal] = useState("");
   const [soSemNivel1, setSoSemNivel1] = useState(false);
@@ -250,6 +360,8 @@ function Painel({ token, sair }) {
     return d.locais.filter((l) => !t || l.local_base.toLowerCase().includes(t));
   }, [d, buscaLocal]);
 
+  function abrirGrupo(g) { setGrupo(g); setAba("lista"); }
+
   if (erro) return (
     <div className="min-h-screen grid place-items-center p-6">
       <div className="text-center">
@@ -261,9 +373,7 @@ function Painel({ token, sair }) {
   if (!d) return <div className="min-h-screen grid place-items-center text-slate-400 text-sm">Carregando…</div>;
 
   const { resumo, curva, locais, fila, semCadastro, safristas } = d;
-  const j = resumo.janela;
-  const a = resumo.ativos;
-  const r = resumo.regras;
+  const j = resumo.janela, a = resumo.ativos, r = resumo.regras;
   const semNivel1 = resumo.fixos.pessoas - resumo.fixos.com_nivel_1;
 
   return (
@@ -300,18 +410,25 @@ function Painel({ token, sair }) {
           ))}
         </div>
 
+        {aba === "lista" && (
+          <Lista token={token} grupo={grupo} locais={locais}
+                 aoVoltar={() => setAba("painel")} diasPorMes={r.dias_por_mes} />
+        )}
+
         {aba === "painel" && (
           <>
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-              <Cartao rotulo="Ativos" valor={a.ativos}
+              <Cartao rotulo="Ativos" valor={a.ativos} aoClicar={() => abrirGrupo("ativos")}
                       sub={`com movimento nos últimos ${r.dias_ativo} dias`} />
-              <Cartao rotulo="Obrigados" valor={a.obrigados}
+              <Cartao rotulo="Obrigados" valor={a.obrigados} aoClicar={() => abrirGrupo("obrigados")}
                       sub={`${j.isencao_dias}+ dias trabalhados na entressafra`} />
               <Cartao rotulo="Precisam rodar" valor={a.precisam} cor="text-amber-600"
+                      aoClicar={() => abrirGrupo("precisam")}
                       sub={`meta não cumprida · ${a.dias_a_cumprir} dias-pessoa`} />
               <Cartao rotulo="Em dia" valor={a.em_dia} cor="text-emerald-600"
-                      sub="já cumprem sem intervenção" />
+                      aoClicar={() => abrirGrupo("em_dia")} sub="já cumprem sem intervenção" />
               <Cartao rotulo="Cadastrados" valor={resumo.base.cadastrados}
+                      aoClicar={() => abrirGrupo("cadastrados")}
                       sub={`${resumo.base.locais} locais · ${resumo.base.unidades} unidades`} />
             </div>
 
@@ -323,6 +440,7 @@ function Painel({ token, sair }) {
                 <li><b>Precisam rodar</b> — obrigados cuja meta ainda não foi cumprida. A meta é {j.percentual}% dos dias de entressafra de cada um, com teto de {j.teto_dias}.</li>
                 <li><b>Em dia</b> — obrigados que já acumularam dias fora da unidade-base suficientes.</li>
               </ul>
+              <p className="text-[11px] text-teal-700 mt-2">Clique em qualquer cartão para ver quem são.</p>
             </div>
 
             <Curva dados={curva} primeiro={resumo.base.primeiro_mes} ultimo={resumo.base.ultimo_mes} />
@@ -439,10 +557,6 @@ function Painel({ token, sair }) {
                 </table>
               </div>
             </div>
-            <p className="text-[11px] text-slate-400">
-              Semanas = dias que faltam divididos por {r.dias_por_mes}, que é a permanência máxima
-              fora da base por mês. Cada bloco vai de segunda a sábado.
-            </p>
           </>
         )}
 
