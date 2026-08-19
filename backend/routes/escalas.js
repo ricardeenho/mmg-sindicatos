@@ -1,348 +1,616 @@
-const express = require('express');
-const { consulta } = require('../db');
-const { autenticar, autorizar } = require('../middlewares/auth');
+import { useState, useEffect, useMemo } from "react";
 
-const router = express.Router();
-router.use(autenticar);
+const DIAS_POR_MES = 5;
 
-const DIAS_ATIVO = 14;
-const DIAS_POR_MES = 5;        // bloco de segunda a sexta
-const DIAS_UNIDADE_ATIVA = 5;
-const ANC = '(select max(data) from apuracao_dia)';
+const dataBR = (d) => {
+  if (!d) return "";
+  const [a, m, dia] = String(d).slice(0, 10).split("-");
+  return a && m && dia ? `${dia}/${m}/${a}` : "";
+};
+const horaBR = (d) => (d ? new Date(d).toLocaleString("pt-BR") : "");
+const iso = (d) => d.toISOString().slice(0, 10);
 
-const podeEscrever = autorizar('admin', 'gestor');
-const quem = (req) => req.usuario.nome || req.usuario.usuario;
+/* Proxima segunda-feira, que e onde todo bloco de rodizio comeca */
+function proximaSegunda() {
+  const d = new Date();
+  d.setDate(d.getDate() + ((8 - d.getDay()) % 7 || 7));
+  return d;
+}
+function somaDias(texto, n) {
+  const d = new Date(texto + "T12:00:00");
+  d.setDate(d.getDate() + n);
+  return iso(d);
+}
+function diasEntre(a, b) {
+  return Math.round((new Date(b + "T12:00:00") - new Date(a + "T12:00:00")) / 86400000) + 1;
+}
 
-async function registrar(escalaId, tipo, descricao, autor) {
-  await consulta(
-    'insert into escala_eventos (escala_id, tipo, descricao, quem) values ($1,$2,$3,$4)',
-    [escalaId, tipo, descricao, autor]
+const Selo = ({ status }) => {
+  const cor =
+    status === "publicada" ? "bg-emerald-50 text-emerald-700"
+    : status === "rascunho" ? "bg-amber-50 text-amber-700"
+    : "bg-slate-100 text-slate-500";
+  return <span className={`text-[11px] px-2 py-1 rounded ${cor}`}>{status}</span>;
+};
+
+/* ================================================================== */
+export default function Escalas({ token, podeEditar, pedir, gravar }) {
+  const [lista, setLista] = useState(null);
+  const [aberta, setAberta] = useState(null);   // id da escala aberta
+  const [erro, setErro] = useState("");
+
+  async function carregarLista() {
+    try { setLista(await pedir("/escalas", token)); }
+    catch (e) { setErro(e.message); }
+  }
+  useEffect(() => { carregarLista(); }, [token]);
+
+  if (aberta) {
+    return (
+      <Detalhe token={token} id={aberta} podeEditar={podeEditar}
+        pedir={pedir} gravar={gravar}
+        aoVoltar={() => { setAberta(null); carregarLista(); }} />
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <Nova token={token} podeEditar={podeEditar} gravar={gravar}
+        aoCriar={(e) => { carregarLista(); setAberta(e.id); }} />
+
+      {erro && <p className="text-[13px] text-rose-600">{erro}</p>}
+      {!lista && <p className="text-sm text-slate-400">Carregando…</p>}
+
+      {lista && lista.length === 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 p-6 text-center">
+          <p className="text-[13px] text-slate-500">
+            Nenhuma escala ainda. A primeira publicada vira a Escala 001 do ano.
+          </p>
+        </div>
+      )}
+
+      <div className="space-y-2">
+        {(lista || []).map((e) => (
+          <button key={e.id} onClick={() => setAberta(e.id)}
+            className="w-full text-left bg-white rounded-xl border border-slate-200 p-4 hover:border-slate-400">
+            <div className="flex items-start gap-3 flex-wrap">
+              <div className="flex-1 min-w-[200px]">
+                <p className="text-[14px] font-semibold">
+                  {e.numero ? `Escala ${String(e.numero).padStart(3, "0")}/${e.ano}` : "Rascunho sem número"}
+                  {e.titulo && <span className="font-normal text-slate-600"> · {e.titulo}</span>}
+                </p>
+                <p className="text-[12px] text-slate-600 mt-0.5">
+                  {dataBR(e.periodo_inicio)} a {dataBR(e.periodo_fim)} ·{" "}
+                  {e.pessoas} {e.pessoas === 1 ? "pessoa" : "pessoas"} · {e.dias_pessoa} dias-pessoa
+                  {e.destinos > 0 && ` · ${e.destinos} destinos`}
+                </p>
+                {e.publicada_em && (
+                  <p className="text-[11px] text-slate-500 mt-0.5">
+                    publicada em {horaBR(e.publicada_em)} por {e.publicada_por}
+                  </p>
+                )}
+                {e.retifica_numero && (
+                  <p className="text-[11px] text-sky-700 mt-0.5">
+                    retifica a Escala {String(e.retifica_numero).padStart(3, "0")}/{e.retifica_ano}
+                  </p>
+                )}
+                {e.retificacoes > 0 && (
+                  <p className="text-[11px] text-amber-700 mt-0.5">
+                    esta escala foi retificada {e.retificacoes === 1 ? "uma vez" : `${e.retificacoes} vezes`}
+                  </p>
+                )}
+                {e.motivo_cancelamento && (
+                  <p className="text-[11px] text-slate-500 mt-0.5 italic">"{e.motivo_cancelamento}"</p>
+                )}
+              </div>
+              <Selo status={e.status} />
+            </div>
+          </button>
+        ))}
+      </div>
+    </div>
   );
 }
 
-/* ------------------------------------------------------------------
- * GET /escalas — lista
- * ---------------------------------------------------------------- */
-router.get('/', async (req, res, next) => {
-  try {
-    const { rows } = await consulta(`
-      select e.id, e.ano, e.numero, e.titulo, e.periodo_inicio, e.periodo_fim,
-             e.status, e.criado_por, e.criado_em, e.publicada_em, e.publicada_por,
-             e.cancelada_em, e.cancelada_por, e.motivo_cancelamento,
-             e.retifica_id, e.hash_publicacao,
-             e.pessoas, e.destinos, e.dias_pessoa, e.retificacoes,
-             r.numero as retifica_numero, r.ano as retifica_ano
-        from v_escalas e
-        left join escalas r on r.id = e.retifica_id
-       order by (e.status = 'rascunho') desc, e.periodo_inicio desc, e.criado_em desc
-       limit 200
-    `);
-    res.json(rows);
-  } catch (e) { next(e); }
-});
+/* ================================================================== */
+function Nova({ token, podeEditar, gravar, aoCriar }) {
+  const seg = proximaSegunda();
+  const [aberto, setAberto] = useState(false);
+  const [inicio, setInicio] = useState(iso(seg));
+  const [fim, setFim] = useState(somaDias(iso(seg), 4));
+  const [titulo, setTitulo] = useState("");
+  const [erro, setErro] = useState("");
+  const [criando, setCriando] = useState(false);
 
-/* ------------------------------------------------------------------
- * GET /escalas/candidatos — a fila, na ordem de quem esta ha mais
- * tempo sem sair. Este e o primeiro criterio, sempre.
- * ---------------------------------------------------------------- */
-router.get('/candidatos', async (req, res, next) => {
-  try {
-    const { rows } = await consulta(`
-      with anc as (select max(data) as fim from apuracao_dia),
-      ult_unidade as (
-        select u.id, u.local_id, max(a.data) as ultimo
-          from unidades u
-          left join apuracao_dia a on a.unidade_id = u.id
-         group by u.id, u.local_id
-      ),
-      setores_vivos as (
-        select local_id, count(*)::int as n from ult_unidade
-         where ultimo > (select fim from anc) - ${DIAS_UNIDADE_ATIVA}
-         group by local_id
-      ),
-      ja_escalado as (
-        select i.trabalhador_id, min(i.data_inicio) as proxima
-          from escala_itens i
-          join escalas e on e.id = i.escala_id
-         where e.status = 'publicada' and i.data_fim >= (select fim from anc)
-         group by i.trabalhador_id
-      )
-      select f.trabalhador_id, f.codigo, f.nome, f.local_base, f.local_base_id,
-             f.dias, f.dias_entressafra, f.dias_fora, f.meta, f.falta,
-             round(f.pct_no_local_base)::int as pct_no_local_base,
-             f.setores_no_local,
-             coalesce(sv.n, 0)::int          as setores_vivos,
-             l.cidade                        as cidade,
-             ceil(f.falta::numeric / ${DIAS_POR_MES})::int as semanas,
-             ja.proxima                      as ja_escalado_em
-        from v_fila_fixos f
-        left join locais        l  on l.id = f.local_base_id
-        left join setores_vivos sv on sv.local_id = f.local_base_id
-        left join ja_escalado   ja on ja.trabalhador_id = f.trabalhador_id
-       where f.ultimo_dia > (select fim from anc) - ${DIAS_ATIVO}
-       order by f.dias_fora asc, f.falta desc, f.dias desc
-       limit 300
-    `);
-    res.json(rows);
-  } catch (e) { next(e); }
-});
+  if (!podeEditar) return null;
 
-/* ------------------------------------------------------------------
- * GET /escalas/destinos/:localId — para onde esta pessoa pode ir.
- * Ordena por natureza do movimento, do mais barato ao mais caro:
- * outro setor no mesmo local, outro local na mesma cidade, fora.
- * So aparece unidade VIVA.
- * ---------------------------------------------------------------- */
-router.get('/destinos/:localId', async (req, res, next) => {
-  try {
-    const { rows } = await consulta(`
-      with anc as (select max(data) as fim from apuracao_dia),
-      viva as (
-        select u.id, u.codigo, u.nome_completo, u.setor, u.local_id,
-               max(a.data) as ultimo
-          from unidades u
-          left join apuracao_dia a on a.unidade_id = u.id
-         group by u.id
-        having max(a.data) > (select fim from anc) - ${DIAS_UNIDADE_ATIVA}
-      ),
-      base as (select id, cidade from locais where id = $1)
-      select v.id, v.codigo, v.nome_completo, v.setor,
-             l.nome as local, l.cidade,
-             (select count(distinct a.trabalhador_id)
-                from apuracao_dia a
-               where a.unidade_id = v.id
-                 and a.data > (select fim from anc) - 30)::int as gente_no_mes,
-             jo.dias_bloco,
-             case
-               when v.local_id = (select id from base)                            then 1
-               when l.cidade is not distinct from (select cidade from base)        then 2
-               else 3
-             end as nivel,
-             case
-               when v.local_id = (select id from base)                     then 'outro setor, mesmo local'
-               when l.cidade is not distinct from (select cidade from base) then 'outro local, mesma cidade'
-               else 'outra cidade'
-             end as tipo_movimento,
-             d.km, d.km_aproximado
-        from viva v
-        left join locais l on l.id = v.local_id
-        left join v_local_jornada jo on jo.local_id = v.local_id
-        left join v_local_distancia d
-               on d.local_id = $1 and d.destino_id = v.local_id
-       where v.local_id is distinct from $1
-          or v.local_id = $1
-       order by nivel, d.km nulls last, v.codigo
-       limit 60
-    `, [req.params.localId]);
-    res.json(rows);
-  } catch (e) { next(e); }
-});
-
-/* ------------------------------------------------------------------
- * GET /escalas/:id — a escala com as linhas e a trilha
- * ---------------------------------------------------------------- */
-router.get('/:id', async (req, res, next) => {
-  try {
-    const { rows: [e] } = await consulta(`
-      select e.*, r.numero as retifica_numero, r.ano as retifica_ano
-        from v_escalas e
-        left join escalas r on r.id = e.retifica_id
-       where e.id = $1
-    `, [req.params.id]);
-    if (!e) return res.status(404).json({ error: 'Escala nao encontrada' });
-
-    const { rows: itens } = await consulta(
-      'select * from v_escala_itens where escala_id = $1 order by ordem nulls last, trabalhador_nome',
-      [req.params.id]);
-    const { rows: eventos } = await consulta(
-      'select tipo, descricao, quem, quando from escala_eventos where escala_id = $1 order by quando',
-      [req.params.id]);
-
-    res.json({ ...e, itens, eventos });
-  } catch (e) { next(e); }
-});
-
-/* ------------------------------------------------------------------
- * POST /escalas — abre um rascunho (ainda sem numero)
- * ---------------------------------------------------------------- */
-router.post('/', podeEscrever, async (req, res, next) => {
-  const { periodo_inicio, periodo_fim, titulo, retifica_id } = req.body || {};
-  if (!periodo_inicio || !periodo_fim) {
-    return res.status(400).json({ error: 'Informe o periodo da escala' });
+  async function criar() {
+    setCriando(true); setErro("");
+    try {
+      const e = await gravar("/escalas", token,
+        { periodo_inicio: inicio, periodo_fim: fim, titulo }, "POST");
+      setAberto(false); setTitulo(""); aoCriar(e);
+    } catch (e) { setErro(e.message); } finally { setCriando(false); }
   }
-  if (periodo_fim < periodo_inicio) {
-    return res.status(400).json({ error: 'O fim do periodo vem antes do inicio' });
+
+  if (!aberto) {
+    return (
+      <button onClick={() => setAberto(true)}
+        className="w-full bg-slate-900 text-white rounded-xl py-3 text-[14px] font-medium">
+        Nova escala
+      </button>
+    );
   }
-  try {
-    const { rows: [e] } = await consulta(`
-      insert into escalas (sindicato_id, ano, periodo_inicio, periodo_fim,
-                           titulo, retifica_id, criado_por)
-      values ((select id from sindicatos order by criado_em limit 1),
-              extract(year from $1::date)::int, $1, $2, $3, $4, $5)
-      returning id, ano, periodo_inicio, periodo_fim, titulo, status, retifica_id
-    `, [periodo_inicio, periodo_fim, titulo || null, retifica_id || null, quem(req)]);
 
-    await registrar(e.id, 'criada',
-      retifica_id ? 'Rascunho aberto como retificacao' : 'Rascunho aberto', quem(req));
-    res.status(201).json(e);
-  } catch (e) { next(e); }
-});
+  return (
+    <div className="bg-white rounded-xl border border-slate-200 p-4">
+      <p className="text-[13px] font-medium mb-3">Período da escala</p>
+      <div className="grid sm:grid-cols-3 gap-2">
+        <div>
+          <p className="text-[11px] text-slate-500 mb-1">Começa</p>
+          <input type="date" value={inicio}
+            onChange={(e) => { setInicio(e.target.value); setFim(somaDias(e.target.value, 4)); }}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+        </div>
+        <div>
+          <p className="text-[11px] text-slate-500 mb-1">Termina</p>
+          <input type="date" value={fim} min={inicio}
+            onChange={(e) => setFim(e.target.value)}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+        </div>
+        <div>
+          <p className="text-[11px] text-slate-500 mb-1">Título (opcional)</p>
+          <input value={titulo} onChange={(e) => setTitulo(e.target.value)}
+            placeholder="Ex.: rodízio de setembro"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+        </div>
+      </div>
+      <p className="text-[11px] text-slate-500 mt-2">
+        O padrão é a próxima segunda a sexta. O rascunho não recebe número —
+        ele só vira documento na publicação.
+      </p>
+      {erro && <p className="text-[12px] text-rose-600 mt-2">{erro}</p>}
+      <div className="flex gap-2 mt-3">
+        <button onClick={criar} disabled={criando}
+          className="bg-teal-600 text-white rounded-lg px-4 py-2 text-[13px] font-medium disabled:opacity-50">
+          {criando ? "Abrindo…" : "Abrir rascunho"}
+        </button>
+        <button onClick={() => setAberto(false)}
+          className="border border-slate-200 rounded-lg px-4 py-2 text-[13px] text-slate-600">
+          Cancelar
+        </button>
+      </div>
+    </div>
+  );
+}
 
-/* ------------------------------------------------------------------
- * POST /escalas/:id/itens — inclui uma pessoa
- * ---------------------------------------------------------------- */
-router.post('/:id/itens', podeEscrever, async (req, res, next) => {
-  const { trabalhador_id, destino_unidade_id, data_inicio, data_fim,
-          origem_local_id, requisicao_id, motivo, observacoes } = req.body || {};
-  if (!trabalhador_id || !destino_unidade_id || !data_inicio || !data_fim) {
-    return res.status(400).json({ error: 'Faltam a pessoa, o destino ou as datas' });
+/* ================================================================== */
+function Detalhe({ token, id, podeEditar, pedir, gravar, aoVoltar }) {
+  const [e, setE] = useState(null);
+  const [erro, setErro] = useState("");
+  const [candidatos, setCandidatos] = useState(null);
+  const [busca, setBusca] = useState("");
+  const [escolhido, setEscolhido] = useState(null);
+  const [confirmar, setConfirmar] = useState(false);
+  const [motivoCancelar, setMotivoCancelar] = useState("");
+  const [cancelando, setCancelando] = useState(false);
+
+  async function carregar() {
+    try { setE(await pedir(`/escalas/${id}`, token)); }
+    catch (err) { setErro(err.message); }
   }
-  try {
-    const { rows: [e] } = await consulta('select status from escalas where id = $1', [req.params.id]);
-    if (!e) return res.status(404).json({ error: 'Escala nao encontrada' });
-    if (e.status !== 'rascunho') {
-      return res.status(409).json({ error: 'Esta escala nao e mais um rascunho' });
-    }
+  useEffect(() => { carregar(); }, [id, token]);
 
-    const dias = Math.round(
-      (new Date(data_fim) - new Date(data_inicio)) / 86400000) + 1;
-    if (dias < 1) return res.status(400).json({ error: 'As datas estao invertidas' });
-    if (dias > DIAS_POR_MES) {
-      return res.status(400).json({
-        error: `O bloco de rodizio vai de segunda a sexta, no maximo ${DIAS_POR_MES} dias. Este tem ${dias}.`,
-      });
+  useEffect(() => {
+    if (e?.status === "rascunho" && !candidatos) {
+      pedir("/escalas/candidatos", token).then(setCandidatos).catch(() => setCandidatos([]));
     }
+  }, [e, candidatos, token]);
 
-    const { rows: [i] } = await consulta(`
-      insert into escala_itens
-        (escala_id, trabalhador_id, origem_local_id, destino_unidade_id,
-         data_inicio, data_fim, requisicao_id, motivo, observacoes, ordem)
-      values ($1,$2,$3,$4,$5,$6,$7,$8,$9,
-              (select coalesce(max(ordem),0)+1 from escala_itens where escala_id = $1))
-      returning id
-    `, [req.params.id, trabalhador_id, origem_local_id || null, destino_unidade_id,
-        data_inicio, data_fim, requisicao_id || null, motivo || null, observacoes || null]);
+  const jaNaEscala = useMemo(
+    () => new Set((e?.itens || []).map((i) => i.trabalhador_codigo)), [e]);
 
-    const { rows: [linha] } = await consulta(
-      'select * from v_escala_itens where id = $1', [i.id]);
-    await registrar(req.params.id, 'item-incluido',
-      `${linha.trabalhador_nome || linha.trabalhador_codigo} para ${linha.destino_codigo}`, quem(req));
-    res.status(201).json(linha);
-  } catch (e) {
-    if (e && e.message && e.message.includes('ja esta na escala')) {
-      return res.status(409).json({ error: e.message });
-    }
-    next(e);
+  const filtrados = useMemo(() => {
+    if (!candidatos) return [];
+    const t = busca.trim().toLowerCase();
+    return candidatos
+      .filter((c) => !jaNaEscala.has(c.codigo))
+      .filter((c) => !t || (c.nome || "").toLowerCase().includes(t) || c.codigo.includes(t))
+      .slice(0, 60);
+  }, [candidatos, busca, jaNaEscala]);
+
+  async function remover(itemId) {
+    setErro("");
+    try { await gravar(`/escalas/${id}/itens/${itemId}`, token, {}, "DELETE"); await carregar(); }
+    catch (err) { setErro(err.message); }
   }
-});
 
-/* DELETE /escalas/:id/itens/:itemId */
-router.delete('/:id/itens/:itemId', podeEscrever, async (req, res, next) => {
-  try {
-    const { rows: [linha] } = await consulta(
-      'select * from v_escala_itens where id = $1 and escala_id = $2',
-      [req.params.itemId, req.params.id]);
-    if (!linha) return res.status(404).json({ error: 'Linha nao encontrada' });
-
-    await consulta('delete from escala_itens where id = $1', [req.params.itemId]);
-    await registrar(req.params.id, 'item-removido',
-      `${linha.trabalhador_nome || linha.trabalhador_codigo} retirado`, quem(req));
-    res.json({ removido: true });
-  } catch (e) {
-    if (e && e.message && e.message.includes('ja foi publicada')) {
-      return res.status(409).json({ error: e.message });
-    }
-    next(e);
+  async function publicar() {
+    setErro("");
+    try { await gravar(`/escalas/${id}/publicar`, token, {}, "POST"); setConfirmar(false); await carregar(); }
+    catch (err) { setErro(err.message); setConfirmar(false); }
   }
-});
 
-/* ------------------------------------------------------------------
- * POST /escalas/:id/publicar
- * Aqui o rascunho vira documento: ganha numero, hora, autor e hash.
- * Depois disto, nada mais muda.
- * ---------------------------------------------------------------- */
-router.post('/:id/publicar', podeEscrever, async (req, res, next) => {
-  try {
-    const { rows: [e] } = await consulta(
-      'select id, sindicato_id, ano, status from escalas where id = $1', [req.params.id]);
-    if (!e) return res.status(404).json({ error: 'Escala nao encontrada' });
-    if (e.status !== 'rascunho') {
-      return res.status(409).json({ error: 'So rascunho pode ser publicado' });
-    }
-
-    const { rows: [c] } = await consulta(
-      'select count(*)::int as n from escala_itens where escala_id = $1', [e.id]);
-    if (c.n === 0) {
-      return res.status(400).json({ error: 'Escala vazia. Inclua ao menos uma pessoa antes de publicar.' });
-    }
-
-    const { rows: [pub] } = await consulta(`
-      update escalas set
-        numero          = proximo_numero_escala(sindicato_id, ano),
-        status          = 'publicada',
-        publicada_em    = now(),
-        publicada_por   = $2,
-        hash_publicacao = hash_da_escala($1)
-       where id = $1
-      returning id, ano, numero, publicada_em, publicada_por, hash_publicacao
-    `, [e.id, quem(req)]);
-
-    await registrar(e.id, 'publicada',
-      `Escala ${pub.numero}/${pub.ano} publicada com ${c.n} pessoas`, quem(req));
-    res.json(pub);
-  } catch (e) { next(e); }
-});
-
-/* ------------------------------------------------------------------
- * POST /escalas/:id/cancelar — unica mudanca possivel depois de publicada
- * ---------------------------------------------------------------- */
-router.post('/:id/cancelar', podeEscrever, async (req, res, next) => {
-  const motivo = String((req.body || {}).motivo || '').trim();
-  if (motivo.length < 5) {
-    return res.status(400).json({ error: 'Escreva o motivo do cancelamento' });
+  async function cancelar() {
+    setCancelando(true); setErro("");
+    try {
+      await gravar(`/escalas/${id}/cancelar`, token, { motivo: motivoCancelar }, "POST");
+      setMotivoCancelar(""); await carregar();
+    } catch (err) { setErro(err.message); } finally { setCancelando(false); }
   }
-  try {
-    const { rows: [e] } = await consulta(`
-      update escalas set status = 'cancelada', cancelada_em = now(),
-                         cancelada_por = $2, motivo_cancelamento = $3
-       where id = $1 and status in ('rascunho','publicada')
-      returning id, status, numero, ano
-    `, [req.params.id, quem(req), motivo]);
-    if (!e) return res.status(404).json({ error: 'Escala nao encontrada ou ja cancelada' });
 
-    await registrar(e.id, 'cancelada', motivo, quem(req));
-    res.json(e);
-  } catch (e) { next(e); }
-});
+  async function descartar() {
+    setErro("");
+    try { await gravar(`/escalas/${id}`, token, {}, "DELETE"); aoVoltar(); }
+    catch (err) { setErro(err.message); }
+  }
 
-/* DELETE /escalas/:id — so rascunho, e some sem deixar numero */
-router.delete('/:id', podeEscrever, async (req, res, next) => {
-  try {
-    const { rows: [e] } = await consulta(
-      'select status from escalas where id = $1', [req.params.id]);
-    if (!e) return res.status(404).json({ error: 'Escala nao encontrada' });
-    if (e.status !== 'rascunho') {
-      return res.status(409).json({ error: 'So rascunho pode ser descartado. Publicada, cancele com motivo.' });
-    }
-    await consulta('delete from escalas where id = $1', [req.params.id]);
-    res.json({ descartado: true });
-  } catch (e) { next(e); }
-});
+  if (!e) return <p className="text-sm text-slate-400">Carregando…</p>;
 
-/* ------------------------------------------------------------------
- * GET /escalas/:id/conferir — o hash ainda bate?
- * Recalcula e compara com o que foi gravado na publicacao.
- * ---------------------------------------------------------------- */
-router.get('/:id/conferir', async (req, res, next) => {
-  try {
-    const { rows: [e] } = await consulta(`
-      select numero, ano, status, hash_publicacao,
-             hash_da_escala(id) as hash_agora
-        from escalas where id = $1
-    `, [req.params.id]);
-    if (!e) return res.status(404).json({ error: 'Escala nao encontrada' });
-    res.json({ ...e, integra: e.hash_publicacao === e.hash_agora });
-  } catch (e) { next(e); }
-});
+  const rascunho = e.status === "rascunho";
+  const titulo = e.numero
+    ? `Escala ${String(e.numero).padStart(3, "0")}/${e.ano}`
+    : "Rascunho";
 
-module.exports = router;
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center gap-3 flex-wrap">
+        <button onClick={aoVoltar} className="text-[13px] text-slate-600 underline">← Escalas</button>
+        <span className="text-sm font-medium">{titulo}</span>
+        <Selo status={e.status} />
+        <span className="text-[12px] text-slate-500">
+          {dataBR(e.periodo_inicio)} a {dataBR(e.periodo_fim)}
+        </span>
+      </div>
+
+      {erro && (
+        <div className="bg-rose-50 border border-rose-200 rounded-xl p-3">
+          <p className="text-[13px] text-rose-700">{erro}</p>
+        </div>
+      )}
+
+      {/* ---------- cabeçalho do documento publicado ---------- */}
+      {!rascunho && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <p className="text-[13px] font-medium">{titulo}{e.titulo ? ` · ${e.titulo}` : ""}</p>
+          <p className="text-[12px] text-slate-600 mt-1">
+            {e.pessoas} {e.pessoas === 1 ? "pessoa" : "pessoas"} · {e.dias_pessoa} dias-pessoa ·{" "}
+            {e.destinos} {e.destinos === 1 ? "destino" : "destinos"}
+          </p>
+          {e.publicada_em && (
+            <p className="text-[12px] text-slate-600 mt-1">
+              Publicada em <b>{horaBR(e.publicada_em)}</b> por <b>{e.publicada_por}</b>
+            </p>
+          )}
+          {e.hash_publicacao && (
+            <p className="text-[10.5px] text-slate-400 mt-1 break-all">
+              impressão digital {e.hash_publicacao}
+            </p>
+          )}
+          {e.status === "cancelada" && (
+            <p className="text-[12px] text-rose-700 mt-2">
+              Cancelada em {horaBR(e.cancelada_em)} por {e.cancelada_por} — "{e.motivo_cancelamento}"
+            </p>
+          )}
+          <p className="text-[11px] text-slate-500 mt-3 leading-relaxed">
+            Escala publicada não se altera. Se algo precisar mudar, publique uma retificação:
+            uma escala nova apontando para esta. As duas ficam no arquivo, e é isso que mostra
+            que houve correção em vez de o documento simplesmente ter mudado.
+          </p>
+        </div>
+      )}
+
+      {/* ---------- as linhas ---------- */}
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between">
+          <p className="text-[13px] font-medium">
+            Quem vai rodar · {e.itens?.length || 0}
+          </p>
+          {rascunho && (
+            <p className="text-[11px] text-slate-500">{e.dias_pessoa} dias-pessoa</p>
+          )}
+        </div>
+
+        {(!e.itens || e.itens.length === 0) ? (
+          <p className="px-4 py-6 text-[13px] text-slate-500 text-center">
+            Nenhuma pessoa ainda. Escolha da fila ao lado.
+          </p>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-[12px]">
+              <thead className="bg-slate-50 text-slate-500">
+                <tr>
+                  <th className="text-left px-3 py-2">Código</th>
+                  <th className="text-left px-3 py-2">Nome</th>
+                  <th className="text-left px-3 py-2">Sai de</th>
+                  <th className="text-left px-3 py-2">Vai para</th>
+                  <th className="text-left px-3 py-2">Movimento</th>
+                  <th className="text-left px-3 py-2">Período</th>
+                  <th className="text-right px-3 py-2">Dias</th>
+                  {rascunho && podeEditar && <th className="px-3 py-2"></th>}
+                </tr>
+              </thead>
+              <tbody>
+                {e.itens.map((i) => (
+                  <tr key={i.id} className="border-t border-slate-50">
+                    <td className="px-3 py-2 font-medium">{i.trabalhador_codigo}</td>
+                    <td className="px-3 py-2">{i.trabalhador_nome || "—"}</td>
+                    <td className="px-3 py-2 text-slate-600">
+                      {i.origem_local || "—"}
+                      {i.origem_cidade && <span className="text-slate-400"> · {i.origem_cidade}</span>}
+                    </td>
+                    <td className="px-3 py-2 text-slate-600">
+                      <b>{i.destino_codigo}</b> {i.destino_local || i.destino_nome}
+                      <span className="block text-slate-500">{i.destino_nome}</span>
+                      {i.destino_cidade && <span className="text-slate-400 block">{i.destino_cidade}</span>}
+                    </td>
+                    <td className="px-3 py-2">
+                      <span className={`text-[11px] ${
+                        i.tipo_movimento === "outro setor, mesmo local" ? "text-teal-700"
+                        : i.tipo_movimento === "outro local, mesma cidade" ? "text-sky-700"
+                        : "text-amber-700"}`}>{i.tipo_movimento}</span>
+                    </td>
+                    <td className="px-3 py-2 text-slate-600">
+                      {dataBR(i.data_inicio)} a {dataBR(i.data_fim)}
+                    </td>
+                    <td className="px-3 py-2 text-right tabular-nums">{i.dias}</td>
+                    {rascunho && podeEditar && (
+                      <td className="px-3 py-2 text-right">
+                        <button onClick={() => remover(i.id)}
+                          className="text-[11px] text-rose-600 underline">tirar</button>
+                      </td>
+                    )}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* ---------- montagem ---------- */}
+      {rascunho && podeEditar && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <p className="text-[13px] font-medium">Fila de quem precisa rodar</p>
+          <p className="text-[11px] text-slate-500 mt-1 mb-3">
+            Na ordem de quem está há mais tempo sem sair da unidade-base. Este é o primeiro
+            critério, e é ele que sustenta a escala perante o fiscal.
+          </p>
+          <input value={busca} onChange={(ev) => setBusca(ev.target.value)}
+            placeholder="Buscar nome ou código…"
+            className="w-full sm:w-72 border border-slate-200 rounded-lg px-3 py-2 text-[13px] mb-3" />
+
+          {!candidatos && <p className="text-[13px] text-slate-400">Carregando a fila…</p>}
+
+          <div className="space-y-1.5 max-h-[420px] overflow-y-auto">
+            {filtrados.map((c) => (
+              <div key={c.codigo}>
+                <button onClick={() => setEscolhido(escolhido?.codigo === c.codigo ? null : c)}
+                  className={`w-full text-left rounded-lg border p-2.5 ${
+                    escolhido?.codigo === c.codigo
+                      ? "border-teal-500 bg-teal-50"
+                      : "border-slate-200 hover:border-slate-400"}`}>
+                  <div className="flex items-start gap-2 flex-wrap">
+                    <div className="flex-1 min-w-[180px]">
+                      <p className="text-[13px]">
+                        <b>{c.codigo}</b> {c.nome || <span className="text-amber-700">sem cadastro no MMG+</span>}
+                      </p>
+                      <p className="text-[11px] text-slate-500">
+                        {c.local_base} {c.cidade && `· ${c.cidade}`}
+                      </p>
+                    </div>
+                    <div className="text-right text-[11px] text-slate-500">
+                      <p>saiu {c.dias_fora} dias em 12 meses</p>
+                      <p className="text-amber-700">faltam {c.falta}</p>
+                    </div>
+                  </div>
+                  {c.ja_escalado_em && (
+                    <p className="text-[10.5px] text-rose-600 mt-1">
+                      já está numa escala publicada a partir de {dataBR(c.ja_escalado_em)}
+                    </p>
+                  )}
+                </button>
+
+                {escolhido?.codigo === c.codigo && (
+                  <Destinos token={token} escala={e} candidato={c}
+                    pedir={pedir} gravar={gravar}
+                    aoIncluir={async () => { setEscolhido(null); await carregar(); }} />
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* ---------- publicar ---------- */}
+      {rascunho && podeEditar && (
+        <div className="bg-slate-900 text-white rounded-xl p-4">
+          {!confirmar ? (
+            <>
+              <p className="text-[13px] font-medium text-teal-300">Publicar</p>
+              <p className="text-[12px] text-slate-300 mt-1 leading-relaxed">
+                A publicação dá número à escala e grava a hora e o seu nome. Depois disso ela
+                não pode mais ser alterada — é isso que a torna prova do cumprimento do rodízio.
+              </p>
+              <div className="flex gap-2 mt-3 flex-wrap">
+                <button onClick={() => setConfirmar(true)} disabled={!e.itens?.length}
+                  className="bg-teal-600 rounded-lg px-4 py-2 text-[13px] font-medium disabled:opacity-40">
+                  Publicar escala
+                </button>
+                <button onClick={descartar}
+                  className="border border-slate-700 rounded-lg px-4 py-2 text-[13px] text-slate-300">
+                  Descartar rascunho
+                </button>
+              </div>
+              {!e.itens?.length && (
+                <p className="text-[11px] text-slate-400 mt-2">
+                  Inclua ao menos uma pessoa antes de publicar.
+                </p>
+              )}
+            </>
+          ) : (
+            <>
+              <p className="text-[13px] font-medium text-amber-300">Confirma?</p>
+              <p className="text-[12px] text-slate-300 mt-1 leading-relaxed">
+                Vai publicar {e.itens.length} {e.itens.length === 1 ? "pessoa" : "pessoas"} de{" "}
+                {dataBR(e.periodo_inicio)} a {dataBR(e.periodo_fim)}. Depois de publicada, correção
+                só por retificação.
+              </p>
+              <div className="flex gap-2 mt-3">
+                <button onClick={publicar}
+                  className="bg-teal-600 rounded-lg px-4 py-2 text-[13px] font-medium">
+                  Sim, publicar
+                </button>
+                <button onClick={() => setConfirmar(false)}
+                  className="border border-slate-700 rounded-lg px-4 py-2 text-[13px] text-slate-300">
+                  Voltar
+                </button>
+              </div>
+            </>
+          )}
+        </div>
+      )}
+
+      {/* ---------- cancelar publicada ---------- */}
+      {e.status === "publicada" && podeEditar && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <p className="text-[13px] font-medium">Cancelar esta escala</p>
+          <p className="text-[11px] text-slate-500 mt-1 mb-2">
+            O cancelamento não apaga nada: a escala continua no arquivo, marcada como cancelada,
+            com o motivo e o seu nome.
+          </p>
+          <div className="flex gap-2 flex-wrap">
+            <input value={motivoCancelar} onChange={(ev) => setMotivoCancelar(ev.target.value)}
+              placeholder="Motivo do cancelamento"
+              className="flex-1 min-w-[220px] border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+            <button onClick={cancelar} disabled={motivoCancelar.trim().length < 5 || cancelando}
+              className="border border-rose-200 text-rose-700 rounded-lg px-4 py-2 text-[13px] disabled:opacity-40">
+              {cancelando ? "…" : "Cancelar escala"}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ---------- trilha ---------- */}
+      {e.eventos?.length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <p className="text-[13px] font-medium mb-2">O que aconteceu com esta escala</p>
+          <div className="space-y-1">
+            {e.eventos.map((ev, n) => (
+              <p key={n} className="text-[11.5px] text-slate-600">
+                <span className="text-slate-400">{horaBR(ev.quando)}</span> · {ev.descricao || ev.tipo}
+                {ev.quem && <span className="text-slate-400"> · {ev.quem}</span>}
+              </p>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* ================================================================== */
+function Destinos({ token, escala, candidato, pedir, gravar, aoIncluir }) {
+  const [lista, setLista] = useState(null);
+  const [erro, setErro] = useState("");
+  const [destino, setDestino] = useState(null);
+  const [inicio, setInicio] = useState(String(escala.periodo_inicio).slice(0, 10));
+  const [fim, setFim] = useState(String(escala.periodo_fim).slice(0, 10));
+  const [salvando, setSalvando] = useState(false);
+
+  useEffect(() => {
+    if (!candidato.local_base_id) { setLista([]); return; }
+    pedir(`/escalas/destinos/${candidato.local_base_id}`, token)
+      .then(setLista).catch((e) => { setErro(e.message); setLista([]); });
+  }, [candidato.local_base_id, token]);
+
+  const dias = diasEntre(inicio, fim);
+
+  async function incluir() {
+    setSalvando(true); setErro("");
+    try {
+      await gravar(`/escalas/${escala.id}/itens`, token, {
+        trabalhador_id: candidato.trabalhador_id,
+        origem_local_id: candidato.local_base_id,
+        destino_unidade_id: destino.id,
+        data_inicio: inicio,
+        data_fim: fim,
+      }, "POST");
+      await aoIncluir();
+    } catch (e) { setErro(e.message); } finally { setSalvando(false); }
+  }
+
+  const porNivel = { 1: [], 2: [], 3: [] };
+  (lista || []).forEach((d) => porNivel[d.nivel]?.push(d));
+  const rotulos = {
+    1: "No mesmo local, outro setor — sem deslocamento",
+    2: "Outro local, mesma cidade",
+    3: "Outra cidade — exige transporte",
+  };
+
+  return (
+    <div className="mt-1.5 ml-2 border-l-2 border-teal-200 pl-3 pb-2">
+      {!lista && <p className="text-[12px] text-slate-400">Procurando destinos…</p>}
+      {lista && lista.length === 0 && (
+        <p className="text-[12px] text-rose-600">
+          Nenhuma unidade viva serve de destino para esta pessoa hoje.
+        </p>
+      )}
+
+      {[1, 2, 3].map((n) => porNivel[n].length > 0 && (
+        <div key={n} className="mb-2">
+          <p className="text-[10.5px] text-slate-500 uppercase tracking-wide mb-1">{rotulos[n]}</p>
+          <div className="flex flex-wrap gap-1.5">
+            {porNivel[n].slice(0, 12).map((d) => (
+              <button key={d.id} onClick={() => setDestino(d)}
+                className={`text-left rounded-lg border px-2.5 py-1.5 text-[11.5px] min-w-[210px] max-w-[300px] ${
+                  destino?.id === d.id
+                    ? "bg-teal-600 text-white border-teal-600"
+                    : "bg-white border-slate-200 hover:border-slate-400"}`}>
+                <span className="block">
+                  <b>{d.codigo}</b> {d.local || d.nome_completo}
+                </span>
+                <span className={`block text-[10.5px] ${destino?.id === d.id ? "text-teal-50" : "text-slate-600"}`}>
+                  {d.setor || "—"}
+                </span>
+                <span className={`block text-[10px] ${destino?.id === d.id ? "text-teal-100" : "text-slate-500"}`}>
+                  {d.cidade || "—"}
+                  {d.km != null && ` · ${Math.round(d.km)} km${d.km_aproximado ? " aprox." : ""}`}
+                  {d.gente_no_mes > 0 && ` · ${d.gente_no_mes} pessoas no mês`}
+                </span>
+              </button>
+            ))}
+          </div>
+        </div>
+      ))}
+
+      {destino && (
+        <div className="mt-2 bg-slate-50 rounded-lg p-3">
+          <div className="flex gap-2 flex-wrap items-end">
+            <div>
+              <p className="text-[10.5px] text-slate-500 mb-1">De</p>
+              <input type="date" value={inicio} onChange={(e) => setInicio(e.target.value)}
+                className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12px]" />
+            </div>
+            <div>
+              <p className="text-[10.5px] text-slate-500 mb-1">Até</p>
+              <input type="date" value={fim} min={inicio} onChange={(e) => setFim(e.target.value)}
+                className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12px]" />
+            </div>
+            <button onClick={incluir} disabled={salvando || dias < 1 || dias > DIAS_POR_MES}
+              className="bg-teal-600 text-white rounded-lg px-4 py-2 text-[12.5px] font-medium disabled:opacity-40">
+              {salvando ? "…" : `Incluir · ${dias} ${dias === 1 ? "dia" : "dias"}`}
+            </button>
+          </div>
+          {dias > DIAS_POR_MES && (
+            <p className="text-[11px] text-rose-600 mt-1.5">
+              O bloco vai de segunda a sexta, no máximo {DIAS_POR_MES} dias. Este tem {dias}.
+            </p>
+          )}
+        </div>
+      )}
+
+      {erro && <p className="text-[11.5px] text-rose-600 mt-1.5">{erro}</p>}
+    </div>
+  );
+}
