@@ -1,8 +1,10 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useCallback } from "react";
 import Importar from "./Importar.jsx";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
 const MESES = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
+// O ciclo agraria comeca em dezembro: dependendo do ano a safra ja abre nele.
+const CICLO = [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
 
 const GRUPOS = {
   ativos:      "Ativos",
@@ -339,7 +341,7 @@ function Lista({ token, grupo, locais, aoVoltar, diasPorMes, aoAbrirFicha }) {
 }
 
 /* ------------------------------------------------------------------ */
-function Safra({ token }) {
+function Safra({ token, aoAtualizar }) {
   const [dados, setDados] = useState(null);
   const [meses, setMeses] = useState([]);
   const [salvando, setSalvando] = useState(false);
@@ -361,11 +363,14 @@ function Safra({ token }) {
     try {
       await gravar("/painel/safra", token, { meses });
       setDados(await pedir("/painel/safra", token));
-      setAviso("Calendário gravado e relógio recalculado. Volte ao Painel para ver os números novos.");
+      if (aoAtualizar) await aoAtualizar();
+      setAviso("Calendário gravado, relógio recalculado e painel atualizado.");
     } catch (e) { setAviso(e.message); } finally { setSalvando(false); }
   }
 
   const max = Math.max(...dados.meses.map((m) => m.media_pessoas), 1);
+  const ciclo = CICLO.map((n) => dados.meses.find((m) => m.mes === n)).filter(Boolean);
+  const eco = ciclo[0]; // dezembro repetido no fim, so para mostrar que o ciclo fecha
   const maxRec = Math.max(...(dados.recente || []).map((m) => m.pessoas), 1);
   const divergentes = dados.meses.filter((m) => meses.includes(m.mes) !== m.acima_da_media);
   const r = dados.restantes || { meses: 0, dias: 0, horizonte: 6 };
@@ -384,13 +389,13 @@ function Safra({ token }) {
 
       {/* -------- calendário + gráfico do mês típico -------- */}
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <div className="grid grid-cols-6 md:grid-cols-12 gap-1.5 mb-4">
-          {dados.meses.map((m) => {
+        <div className="flex flex-wrap gap-1.5 mb-4">
+          {ciclo.map((m) => {
             const marcado = meses.includes(m.mes);
             const diverge = marcado !== m.acima_da_media;
             return (
               <button key={m.mes} onClick={() => alternar(m.mes)}
-                className={`rounded-lg py-2 text-[12px] font-medium border ${
+                className={`flex-1 min-w-[52px] rounded-lg py-2 text-[12px] font-medium border ${
                   marcado ? "bg-amber-400 border-amber-500 text-amber-950"
                           : "bg-teal-50 border-teal-200 text-teal-800"}`}>
                 {MESES[m.mes - 1]}
@@ -398,19 +403,36 @@ function Safra({ token }) {
               </button>
             );
           })}
+          {eco && (
+            <div title="mesmo dezembro do começo — o ciclo fecha aqui"
+              className={`flex-1 min-w-[52px] rounded-lg py-2 text-[12px] font-medium border border-dashed opacity-40 text-center ${
+                meses.includes(eco.mes) ? "bg-amber-400 border-amber-500 text-amber-950"
+                                        : "bg-teal-50 border-teal-200 text-teal-800"}`}>
+              {MESES[eco.mes - 1]}
+              <span className="block text-[9px]">repete</span>
+            </div>
+          )}
         </div>
 
         <p className="text-[11px] text-slate-500 mb-2">
-          Mês típico · média de todos os anos do arquivo · média geral {dados.media} pessoas
+          Mês típico · média de todos os anos do arquivo · média geral {dados.media} pessoas ·
+          o ciclo começa em dezembro, porque dependendo do ano a safra já abre nele
         </p>
         <div className="flex items-end gap-1 h-24">
-          {dados.meses.map((m) => (
+          {ciclo.map((m) => (
             <div key={m.mes} className="flex-1 flex flex-col items-center gap-1">
               <div className={`w-full rounded-sm ${meses.includes(m.mes) ? "bg-amber-400" : "bg-teal-500"}`}
                    style={{ height: `${Math.max(3, (m.media_pessoas / max) * 76)}px` }} />
               <span className="text-[9px] text-slate-400">{m.media_pessoas}</span>
             </div>
           ))}
+          {eco && (
+            <div className="flex-1 flex flex-col items-center gap-1 opacity-30">
+              <div className={`w-full rounded-sm ${meses.includes(eco.mes) ? "bg-amber-400" : "bg-teal-500"}`}
+                   style={{ height: `${Math.max(3, (eco.media_pessoas / max) * 76)}px` }} />
+              <span className="text-[9px] text-slate-400">{eco.media_pessoas}</span>
+            </div>
+          )}
         </div>
 
         {divergentes.length > 0 && (
@@ -575,19 +597,23 @@ function Painel({ token, sair }) {
   const [buscaLocal, setBuscaLocal] = useState("");
   const [soSemPonto, setSoSemPonto] = useState(false);
 
-  useEffect(() => {
-    Promise.all([
-      pedir("/painel/resumo", token),
-      pedir("/painel/curva", token),
-      pedir("/painel/locais", token),
-      pedir("/painel/fila", token),
-      pedir("/painel/sem-cadastro", token),
-      pedir("/painel/safristas-fixos", token),
-    ])
-      .then(([resumo, curva, locais, fila, semCadastro, safristas]) =>
-        setD({ resumo, curva, locais, fila, semCadastro, safristas }))
-      .catch((e) => setErro(e.message));
-  }, [token]);
+  const carregar = useCallback(
+    () =>
+      Promise.all([
+        pedir("/painel/resumo", token),
+        pedir("/painel/curva", token),
+        pedir("/painel/locais", token),
+        pedir("/painel/fila", token),
+        pedir("/painel/sem-cadastro", token),
+        pedir("/painel/safristas-fixos", token),
+      ])
+        .then(([resumo, curva, locais, fila, semCadastro, safristas]) =>
+          setD({ resumo, curva, locais, fila, semCadastro, safristas }))
+        .catch((e) => setErro(e.message)),
+    [token]
+  );
+
+  useEffect(() => { carregar(); }, [carregar]);
 
   const filaFiltrada = useMemo(() => {
     if (!d) return [];
@@ -747,7 +773,8 @@ function Painel({ token, sair }) {
               </div>
 
               <p className="text-[11px] mt-3 text-slate-400 leading-relaxed">
-                A separação entre as três colunas depende da cidade de cada local, e{" "}
+                Mesma cidade não quer dizer sem carro: dois locais em Cascavel podem estar a
+                20 km um do outro. A separação entre as três colunas depende da cidade de cada local, e{" "}
                 {comPonto === 0
                   ? "nenhum local tem ponto exato ainda — a distância está sendo estimada pelo centro do município."
                   : `${comPonto} de ${resumo.base.locais} locais já têm ponto exato no mapa.`}{" "}
@@ -758,7 +785,7 @@ function Painel({ token, sair }) {
         )}
 
         {aba === "importar" && <Importar token={token} />}
-        {aba === "safra" && <Safra token={token} />}
+        {aba === "safra" && <Safra token={token} aoAtualizar={carregar} />}
 
         {aba === "locais" && (
           <>
