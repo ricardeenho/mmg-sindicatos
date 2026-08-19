@@ -4,6 +4,10 @@ const cors = require('cors');
 
 const app = express();
 
+// atras do proxy do Railway: sem isto o IP de quem envia a requisicao
+// publica chega sempre como o do proxy, e o freio por IP nao funciona
+app.set('trust proxy', 1);
+
 const ORIGENS = [
   'http://localhost:5173',
   'http://localhost:3000',
@@ -31,6 +35,7 @@ app.get('/', (req, res) => {
 app.use('/auth', require('./routes/auth'));
 app.use('/painel', require('./routes/painel'));
 app.use('/importacao', require('./routes/importacao'));
+app.use('/requisicoes', require('./routes/requisicoes'));
 
 app.use((err, req, res, next) => {
   console.error(err);
