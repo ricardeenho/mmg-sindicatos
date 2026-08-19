@@ -36,6 +36,7 @@ app.use('/auth', require('./routes/auth'));
 app.use('/painel', require('./routes/painel'));
 app.use('/importacao', require('./routes/importacao'));
 app.use('/requisicoes', require('./routes/requisicoes'));
+app.use('/escalas', require('./routes/escalas'));
 
 app.use((err, req, res, next) => {
   console.error(err);
