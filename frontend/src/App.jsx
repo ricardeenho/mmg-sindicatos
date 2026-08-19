@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import Importar from "./Importar.jsx";
 import Requisicao, { Requisicoes } from "./Requisicao.jsx";
+import Escalas from "./Escalas.jsx";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
 const MESES = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
@@ -850,7 +851,7 @@ function Painel({ token, sair }) {
       <div className="max-w-6xl mx-auto px-4 py-4 space-y-4">
         <div className="flex gap-1.5 flex-wrap">
           {[["painel","Painel"],["safra","Safra"],["locais","Locais"],["fila","Fila"],
-            ["requisicoes","Requisições"],
+            ["requisicoes","Requisições"],["escalas","Escalas"],
             ["safristas","Safristas fixos"],["cadastro","Sem cadastro"],
             ...(podeEditar ? [["importar","Importar"]] : []),
             ...(eu.perfil === "admin" ? [["usuarios","Acessos"]] : [])].map(([k, rot]) => (
@@ -968,6 +969,9 @@ function Painel({ token, sair }) {
         {aba === "usuarios" && eu.perfil === "admin" && <Usuarios token={token} />}
         {aba === "requisicoes" && (
           <Requisicoes token={token} podeEditar={podeEditar} pedir={pedir} gravar={gravar} />
+        )}
+        {aba === "escalas" && (
+          <Escalas token={token} podeEditar={podeEditar} pedir={pedir} gravar={gravar} />
         )}
         {aba === "safra" && <Safra token={token} aoAtualizar={carregar} podeEditar={podeEditar} />}
 
