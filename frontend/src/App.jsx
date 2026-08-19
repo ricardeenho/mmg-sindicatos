@@ -29,6 +29,21 @@ async function gravar(caminho, token, corpo, metodo = "PUT") {
   return r.json();
 }
 
+const dataBR = (d) => (d ? new Date(d).toLocaleDateString("pt-BR") : "");
+
+/* Como esta pessoa pode rodar, na ordem do mais barato para o mais caro. */
+function comoRodar(t) {
+  if (t.tem_nivel_1) return { texto: "outro setor, no mesmo local", cor: "text-teal-700", nivel: 1 };
+  if (t.locais_mesma_cidade > 0) return { texto: "outro local, mesma cidade", cor: "text-sky-700", nivel: 2 };
+  if (t.km_mais_proximo != null) {
+    return {
+      texto: `outro local, ~${Math.round(t.km_mais_proximo)} km${t.ponto_aproximado ? " (aprox.)" : ""}`,
+      cor: "text-amber-700", nivel: 3,
+    };
+  }
+  return { texto: "sem destino conhecido", cor: "text-rose-700", nivel: 9 };
+}
+
 /* ------------------------------------------------------------------ */
 function Login({ aoEntrar }) {
   const [usuario, setUsuario] = useState("");
@@ -131,7 +146,6 @@ function Curva({ dados, primeiro, ultimo }) {
   );
 }
 
-
 /* ------------------------------------------------------------------ */
 function Ficha({ token, codigo, aoFechar }) {
   const [t, setT] = useState(null);
@@ -191,6 +205,7 @@ function Ficha({ token, codigo, aoFechar }) {
                   <thead className="bg-slate-50 text-slate-500">
                     <tr>
                       <th className="text-left px-3 py-2">Local</th>
+                      <th className="text-left px-3 py-2">Cidade</th>
                       <th className="text-left px-3 py-2">Setor</th>
                       <th className="text-right px-3 py-2">Dias</th>
                       <th className="text-left px-3 py-2">Período</th>
@@ -206,11 +221,11 @@ function Ficha({ token, codigo, aoFechar }) {
                             <span className="ml-1 text-[10px] text-slate-400">base</span>
                           )}
                         </td>
+                        <td className="px-3 py-2 text-slate-500">{h.cidade || "—"}</td>
                         <td className="px-3 py-2 text-slate-600">{h.setor} · {h.unidade}</td>
                         <td className="px-3 py-2 text-right tabular-nums font-medium">{h.dias}</td>
                         <td className="px-3 py-2 text-slate-500 text-[11px]">
-                          {new Date(h.primeiro).toLocaleDateString("pt-BR")} a{" "}
-                          {new Date(h.ultimo).toLocaleDateString("pt-BR")}
+                          {dataBR(h.primeiro)} a {dataBR(h.ultimo)}
                         </td>
                       </tr>
                     ))}
@@ -309,9 +324,7 @@ function Lista({ token, grupo, locais, aoVoltar, diasPorMes, aoAbrirFicha }) {
                     t.falta > 0 ? "text-amber-600" : "text-emerald-600"}`}>{t.falta}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.semanas}</td>
                   <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.pct_no_local_base}%</td>
-                  <td className="px-3 py-2 text-slate-500">
-                    {t.ultimo_dia && new Date(t.ultimo_dia).toLocaleDateString("pt-BR")}
-                  </td>
+                  <td className="px-3 py-2 text-slate-500">{dataBR(t.ultimo_dia)}</td>
                 </tr>
               ))}
             </tbody>
@@ -348,12 +361,14 @@ function Safra({ token }) {
     try {
       await gravar("/painel/safra", token, { meses });
       setDados(await pedir("/painel/safra", token));
-      setAviso("Calendário gravado. Recarregue o painel para ver o efeito nos números.");
+      setAviso("Calendário gravado e relógio recalculado. Volte ao Painel para ver os números novos.");
     } catch (e) { setAviso(e.message); } finally { setSalvando(false); }
   }
 
-  const max = Math.max(...dados.meses.map((m) => m.media_pessoas));
+  const max = Math.max(...dados.meses.map((m) => m.media_pessoas), 1);
+  const maxRec = Math.max(...(dados.recente || []).map((m) => m.pessoas), 1);
   const divergentes = dados.meses.filter((m) => meses.includes(m.mes) !== m.acima_da_media);
+  const r = dados.restantes || { meses: 0, dias: 0, horizonte: 6 };
 
   return (
     <div className="space-y-4">
@@ -361,11 +376,13 @@ function Safra({ token }) {
         <p className="text-sm font-medium">Janelas de safra e entressafra</p>
         <p className="text-[11px] text-slate-500 mt-1">
           Marque os meses de safra do sindicato. O rodízio só é exigido nos meses não marcados.
-          A barra mostra o efetivo médio de cada mês — é a curva do seu próprio Ponto, e serve
-          para conferir se o declarado bate com o que acontece.
+          Os dois gráficos abaixo servem a perguntas diferentes: o primeiro mostra como é um mês
+          típico em todos os anos do arquivo, e é o que ajuda a declarar o calendário; o segundo
+          mostra os últimos doze meses de verdade, e é onde uma safra curta aparece.
         </p>
       </div>
 
+      {/* -------- calendário + gráfico do mês típico -------- */}
       <div className="bg-white rounded-xl border border-slate-200 p-4">
         <div className="grid grid-cols-6 md:grid-cols-12 gap-1.5 mb-4">
           {dados.meses.map((m) => {
@@ -384,7 +401,7 @@ function Safra({ token }) {
         </div>
 
         <p className="text-[11px] text-slate-500 mb-2">
-          Efetivo médio por mês · média geral {dados.media} pessoas
+          Mês típico · média de todos os anos do arquivo · média geral {dados.media} pessoas
         </p>
         <div className="flex items-end gap-1 h-24">
           {dados.meses.map((m) => (
@@ -414,6 +431,132 @@ function Safra({ token }) {
         </button>
         {aviso && <p className="text-[12px] text-slate-600 mt-2 text-center">{aviso}</p>}
       </div>
+
+      {/* -------- os últimos 12 meses de verdade -------- */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <p className="text-sm font-medium">Os últimos doze meses, de verdade</p>
+        <p className="text-[11px] text-slate-500 mt-1 mb-3">
+          Efetivo mês a mês, do que foi realmente apurado. É aqui que uma safra fraca fica visível:
+          se a barra âmbar de um mês marcado como safra ficar baixa, aquela safra não aconteceu
+          como o calendário previa — e a entressafra daquele ano foi maior do que se declarou.
+        </p>
+        <div className="flex items-end gap-1 h-28">
+          {(dados.recente || []).map((m) => (
+            <div key={m.competencia} className="flex-1 group relative flex flex-col items-center gap-1">
+              <div className={`w-full rounded-sm ${m.em_safra ? "bg-amber-400" : "bg-teal-500"}`}
+                   style={{ height: `${Math.max(3, (m.pessoas / maxRec) * 84)}px` }} />
+              <span className="text-[9px] text-slate-400 tabular-nums">{m.pessoas}</span>
+              <span className="hidden group-hover:block absolute -top-6 left-1/2 -translate-x-1/2 bg-slate-900 text-white text-[10px] px-1.5 py-0.5 rounded whitespace-nowrap z-10">
+                {m.competencia}: {m.pessoas} pessoas
+              </span>
+            </div>
+          ))}
+        </div>
+        <div className="flex gap-1 mt-1">
+          {(dados.recente || []).map((m) => (
+            <span key={m.competencia} className="flex-1 text-center text-[8.5px] text-slate-400 leading-tight">
+              {MESES[m.mes - 1]}
+              {m.mes === 1 && <span className="block text-[7.5px] text-slate-600 font-semibold">{m.ano}</span>}
+            </span>
+          ))}
+        </div>
+      </div>
+
+      {/* -------- o que vem pela frente -------- */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <p className="text-sm font-medium">O que vem pela frente</p>
+            <p className="text-[11px] text-slate-500 mt-1">
+              Os próximos {r.horizonte} meses pelo calendário declarado. Isto é previsão, não
+              apuração — nenhum destes dias foi trabalhado ainda.
+            </p>
+          </div>
+          <div className="text-right">
+            <p className="text-2xl font-semibold tabular-nums text-teal-700">{r.dias}</p>
+            <p className="text-[11px] text-slate-500 leading-tight">
+              dias de entressafra pela frente<br />em {r.meses} {r.meses === 1 ? "mês" : "meses"}
+            </p>
+          </div>
+        </div>
+        <div className="grid grid-cols-6 gap-1.5 mt-4">
+          {(dados.aFrente || []).map((m) => (
+            <div key={m.competencia}
+              className={`rounded-lg py-2 text-center border border-dashed ${
+                m.em_safra ? "bg-amber-50 border-amber-300 text-amber-800"
+                           : "bg-teal-50 border-teal-300 text-teal-800"}`}>
+              <p className="text-[12px] font-medium">{MESES[m.mes - 1]}</p>
+              <p className="text-[9px] opacity-70">{m.em_safra ? "safra" : `${m.dias} dias`}</p>
+            </div>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+function PontoDoLocal({ token, local, aoGravar }) {
+  const [aberto, setAberto] = useState(false);
+  const [texto, setTexto] = useState("");
+  const [erro, setErro] = useState("");
+  const [salvando, setSalvando] = useState(false);
+
+  async function salvar(limpar = false) {
+    setSalvando(true); setErro("");
+    try {
+      const p = await gravar(`/painel/local/${local.id}/ponto`, token, { texto: limpar ? "" : texto });
+      aoGravar(p); setAberto(false); setTexto("");
+    } catch (e) { setErro(e.message); } finally { setSalvando(false); }
+  }
+
+  const chip =
+    local.fonte === "mapa"
+      ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-50 text-emerald-700">ponto exato</span>
+      : local.fonte === "municipio"
+      ? <span className="text-[10px] px-1.5 py-0.5 rounded bg-slate-100 text-slate-600">ponto do município</span>
+      : <span className="text-[10px] px-1.5 py-0.5 rounded bg-rose-50 text-rose-700">sem ponto</span>;
+
+  return (
+    <div className="mt-1">
+      <div className="flex items-center gap-2 flex-wrap">
+        {chip}
+        <button onClick={() => setAberto((v) => !v)} className="text-[10.5px] text-teal-700 underline">
+          {aberto ? "fechar" : local.fonte === "mapa" ? "corrigir" : "definir no mapa"}
+        </button>
+        {local.fonte === "mapa" && (
+          <span className="text-[10px] text-slate-400 tabular-nums">
+            {Number(local.latitude).toFixed(4)}, {Number(local.longitude).toFixed(4)}
+          </span>
+        )}
+      </div>
+
+      {aberto && (
+        <div className="mt-2 bg-slate-50 rounded-lg p-3">
+          <p className="text-[11px] text-slate-600 leading-relaxed mb-2">
+            No Google Maps, procure a unidade pelo nome. Clique com o <b>botão direito</b> sobre o
+            pino — os números que aparecem no topo do menu são a coordenada, e clicar neles copia.
+            Cole aqui. Link curto (maps.app.goo.gl) não serve: abra ele primeiro.
+          </p>
+          <div className="flex gap-2 flex-wrap">
+            <input value={texto} onChange={(e) => setTexto(e.target.value)}
+              placeholder="-24.9555, -53.4552"
+              onKeyDown={(e) => e.key === "Enter" && salvar()}
+              className="flex-1 min-w-[200px] border border-slate-200 rounded-lg px-3 py-2 text-[12px]" />
+            <button onClick={() => salvar()} disabled={salvando}
+              className="bg-teal-600 text-white rounded-lg px-4 py-2 text-[12px] font-medium disabled:opacity-50">
+              {salvando ? "…" : "Gravar"}
+            </button>
+            {local.fonte === "mapa" && (
+              <button onClick={() => salvar(true)} disabled={salvando}
+                className="border border-slate-200 rounded-lg px-3 py-2 text-[12px] text-slate-600">
+                Limpar
+              </button>
+            )}
+          </div>
+          {erro && <p className="text-[11px] text-rose-600 mt-2 leading-relaxed">{erro}</p>}
+        </div>
+      )}
     </div>
   );
 }
@@ -428,7 +571,9 @@ function Painel({ token, sair }) {
   const [buscaFila, setBuscaFila] = useState("");
   const [filtroLocal, setFiltroLocal] = useState("");
   const [soSemNivel1, setSoSemNivel1] = useState(false);
+  const [raio, setRaio] = useState("");
   const [buscaLocal, setBuscaLocal] = useState("");
+  const [soSemPonto, setSoSemPonto] = useState(false);
 
   useEffect(() => {
     Promise.all([
@@ -447,20 +592,43 @@ function Painel({ token, sair }) {
   const filaFiltrada = useMemo(() => {
     if (!d) return [];
     const t = buscaFila.trim().toLowerCase();
-    return d.fila.filter((x) =>
-      (!t || (x.nome || "").toLowerCase().includes(t) || x.codigo.includes(t)) &&
-      (!filtroLocal || x.local_base === filtroLocal) &&
-      (!soSemNivel1 || !x.tem_nivel_1)
-    );
-  }, [d, buscaFila, filtroLocal, soSemNivel1]);
+    return d.fila.filter((x) => {
+      const c = comoRodar(x);
+      const passaRaio =
+        !raio ||
+        (raio === "cidade" && c.nivel <= 2) ||
+        (["30", "60"].includes(raio) &&
+          (c.nivel <= 2 || (x.km_mais_proximo != null && x.km_mais_proximo <= Number(raio))));
+      return (
+        (!t || (x.nome || "").toLowerCase().includes(t) || x.codigo.includes(t)) &&
+        (!filtroLocal || x.local_base === filtroLocal) &&
+        (!soSemNivel1 || c.nivel >= 3) &&
+        passaRaio
+      );
+    });
+  }, [d, buscaFila, filtroLocal, soSemNivel1, raio]);
 
   const locaisFiltrados = useMemo(() => {
     if (!d) return [];
     const t = buscaLocal.trim().toLowerCase();
-    return d.locais.filter((l) => !t || l.local_base.toLowerCase().includes(t));
-  }, [d, buscaLocal]);
+    return d.locais.filter(
+      (l) =>
+        (!t || l.local_base.toLowerCase().includes(t) || (l.cidade || "").toLowerCase().includes(t)) &&
+        (!soSemPonto || l.fonte !== "mapa")
+    );
+  }, [d, buscaLocal, soSemPonto]);
 
   function abrirGrupo(g) { setGrupo(g); setAba("lista"); }
+
+  function atualizarPonto(p) {
+    setD((v) => ({
+      ...v,
+      locais: v.locais.map((l) =>
+        l.id === p.id
+          ? { ...l, latitude: p.latitude, longitude: p.longitude, fonte: p.fonte, aproximada: p.aproximada }
+          : l),
+    }));
+  }
 
   if (erro) return (
     <div className="min-h-screen grid place-items-center p-6">
@@ -473,8 +641,8 @@ function Painel({ token, sair }) {
   if (!d) return <div className="min-h-screen grid place-items-center text-slate-400 text-sm">Carregando…</div>;
 
   const { resumo, curva, locais, fila, semCadastro, safristas } = d;
-  const j = resumo.janela, a = resumo.ativos, r = resumo.regras;
-  const semNivel1 = resumo.fixos.pessoas - resumo.fixos.com_nivel_1;
+  const j = resumo.janela, a = resumo.ativos, r = resumo.regras, fx = resumo.fixos;
+  const comPonto = resumo.base.locais_com_ponto ?? 0;
 
   return (
     <div className="min-h-screen bg-slate-50 pb-16">
@@ -484,8 +652,7 @@ function Painel({ token, sair }) {
           <div className="flex-1">
             <h1 className="text-sm font-semibold leading-tight">Rodízio</h1>
             <p className="text-[11px] text-slate-400 leading-tight">
-              Janela de {new Date(j.janela_inicio).toLocaleDateString("pt-BR")} a{" "}
-              {new Date(j.janela_fim).toLocaleDateString("pt-BR")} · {j.percentual}% da entressafra
+              Janela de {dataBR(j.janela_inicio)} a {dataBR(j.janela_fim)} · {j.percentual}% da entressafra
             </p>
           </div>
           <button onClick={sair} className="text-[11px] text-slate-400 hover:text-white">Sair</button>
@@ -541,6 +708,7 @@ function Painel({ token, sair }) {
                 <li><b>Obrigados</b> — dos ativos, os que somam {j.isencao_dias} dias ou mais trabalhados nos meses de entressafra da janela. Abaixo disso, isento.</li>
                 <li><b>Precisam rodar</b> — obrigados cuja meta ainda não foi cumprida. A meta é {j.percentual}% dos dias de entressafra de cada um, com teto de {j.teto_dias}.</li>
                 <li><b>Em dia</b> — obrigados que já acumularam dias fora da unidade-base suficientes.</li>
+                <li><b>A janela</b> termina em {dataBR(j.janela_fim)}, que é o último dia apurado — não a data de hoje. Dia que ainda não foi apurado não pode contar, então a janela anda quando a apuração do mês entra.</li>
               </ul>
               <p className="text-[11px] text-teal-700 mt-2">Clique em qualquer cartão para ver quem são.</p>
             </div>
@@ -550,16 +718,40 @@ function Painel({ token, sair }) {
             <div className="bg-slate-900 text-white rounded-xl p-4">
               <p className="text-[13px] font-medium text-teal-300">Fila de regularização</p>
               <p className="text-[12.5px] mt-2 leading-relaxed text-slate-200">
-                <b className="text-white">{resumo.fixos.pessoas} pessoas</b> ativas passaram 95% ou mais
+                <b className="text-white">{fx.pessoas} pessoas</b> ativas passaram 95% ou mais
                 dos dias no mesmo local e estão obrigadas ao rodízio. Somam{" "}
-                <b className="text-white">{resumo.fixos.dias_a_cumprir} dias-pessoa</b>, o que dá{" "}
-                <b className="text-white">{resumo.fixos.semanas} semanas de rodízio</b> na regra de no
+                <b className="text-white">{fx.dias_a_cumprir} dias-pessoa</b>, o que dá{" "}
+                <b className="text-white">{fx.semanas} semanas de rodízio</b> na regra de no
                 máximo {r.dias_por_mes} dias por mês.
               </p>
-              <p className="text-[12px] mt-3 text-slate-300 leading-relaxed">
-                <b className="text-amber-300">{resumo.fixos.com_nivel_1}</b> resolvem trocando de setor no
-                próprio local, sem transporte. <b className="text-amber-300">{semNivel1}</b> precisam sair
-                do local — e é aí que entra a logística de carro.
+
+              <div className="grid grid-cols-3 gap-2 mt-4">
+                <div className="bg-slate-800 rounded-lg p-3">
+                  <p className="text-xl font-semibold tabular-nums text-teal-300">{fx.com_nivel_1}</p>
+                  <p className="text-[10.5px] text-slate-300 leading-tight mt-0.5">
+                    trocam de setor no próprio local
+                  </p>
+                </div>
+                <div className="bg-slate-800 rounded-lg p-3">
+                  <p className="text-xl font-semibold tabular-nums text-sky-300">{fx.mesma_cidade}</p>
+                  <p className="text-[10.5px] text-slate-300 leading-tight mt-0.5">
+                    vão a outro local na mesma cidade
+                  </p>
+                </div>
+                <div className="bg-slate-800 rounded-lg p-3">
+                  <p className="text-xl font-semibold tabular-nums text-amber-300">{fx.precisa_transporte}</p>
+                  <p className="text-[10.5px] text-slate-300 leading-tight mt-0.5">
+                    precisam sair da cidade — {fx.semanas_transporte} semanas de carro
+                  </p>
+                </div>
+              </div>
+
+              <p className="text-[11px] mt-3 text-slate-400 leading-relaxed">
+                A separação entre as três colunas depende da cidade de cada local, e{" "}
+                {comPonto === 0
+                  ? "nenhum local tem ponto exato ainda — a distância está sendo estimada pelo centro do município."
+                  : `${comPonto} de ${resumo.base.locais} locais já têm ponto exato no mapa.`}{" "}
+                Quanto mais pontos definidos na aba Locais, mais confiável fica esta conta.
               </p>
             </div>
           </>
@@ -571,30 +763,48 @@ function Painel({ token, sair }) {
         {aba === "locais" && (
           <>
             <div className="flex gap-2 items-center flex-wrap">
-              <Busca valor={buscaLocal} aoMudar={setBuscaLocal} dica="Buscar local…" />
+              <Busca valor={buscaLocal} aoMudar={setBuscaLocal} dica="Buscar local ou cidade…" />
+              <button onClick={() => setSoSemPonto((v) => !v)}
+                className={`px-3 py-2 rounded-lg text-[13px] border ${
+                  soSemPonto ? "bg-slate-900 text-white border-slate-900"
+                             : "bg-white text-slate-600 border-slate-200"}`}>
+                Só quem falta definir no mapa
+              </button>
               <span className="text-[12px] text-slate-500">{locaisFiltrados.length} de {locais.length}</span>
             </div>
+
             <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
               {locaisFiltrados.map((l) => (
-                <div key={l.local_base} className="px-4 py-3 border-b border-slate-50 flex items-center gap-3">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-sm truncate">{l.local_base}</p>
-                    <p className="text-[11px] text-slate-500">
-                      {l.setores} {l.setores === 1 ? "setor" : "setores"}
-                      {l.setores === 1 && <span className="text-rose-600"> · precisa sair do local</span>}
-                      {" · "}{l.semanas} semanas de rodízio
-                    </p>
-                  </div>
-                  <div className="text-right shrink-0">
-                    <p className="text-sm font-semibold tabular-nums">{l.pessoas}</p>
-                    <p className="text-[11px] text-slate-400">{l.dias_a_cumprir} dias</p>
+                <div key={l.id} className="px-4 py-3 border-b border-slate-50">
+                  <div className="flex items-start gap-3">
+                    <div className="flex-1 min-w-0">
+                      <p className="text-sm truncate">{l.local_base}</p>
+                      <p className="text-[11px] text-slate-500">
+                        {l.cidade || <span className="text-rose-600">sem cidade</span>}
+                        {" · "}{l.setores} {l.setores === 1 ? "setor" : "setores"}
+                        {l.setores === 1 && l.locais_mesma_cidade === 0 && (
+                          <span className="text-rose-600"> · precisa sair da cidade</span>
+                        )}
+                        {l.locais_mesma_cidade > 0 && (
+                          <span className="text-sky-700"> · {l.locais_mesma_cidade} local(is) na mesma cidade</span>
+                        )}
+                        {l.km_mais_proximo != null && (
+                          <span className="text-slate-400"> · vizinho a {Math.round(l.km_mais_proximo)} km</span>
+                        )}
+                      </p>
+                      <PontoDoLocal token={token} local={l} aoGravar={atualizarPonto} />
+                    </div>
+                    <div className="text-right shrink-0">
+                      <p className="text-sm font-semibold tabular-nums">{l.pessoas}</p>
+                      <p className="text-[11px] text-slate-400">{l.dias_a_cumprir} dias</p>
+                    </div>
                   </div>
                 </div>
               ))}
             </div>
             <p className="text-[11px] text-slate-400">
               O filtro por Sede e Filial ainda não é possível: o arquivo do Ponto não traz essa
-              informação. Ela precisa vir do cadastro de unidades tomadoras.
+              informação. Ela virá no arquivo cadastral que será pedido ao TI.
             </p>
           </>
         )}
@@ -606,7 +816,14 @@ function Painel({ token, sair }) {
               <select value={filtroLocal} onChange={(e) => setFiltroLocal(e.target.value)}
                 className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
                 <option value="">Todos os locais</option>
-                {locais.map((l) => <option key={l.local_base} value={l.local_base}>{l.local_base}</option>)}
+                {locais.map((l) => <option key={l.id} value={l.local_base}>{l.local_base}</option>)}
+              </select>
+              <select value={raio} onChange={(e) => setRaio(e.target.value)}
+                className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
+                <option value="">Qualquer distância</option>
+                <option value="cidade">Sem sair da cidade</option>
+                <option value="30">Destino a até 30 km</option>
+                <option value="60">Destino a até 60 km</option>
               </select>
               <button onClick={() => setSoSemNivel1((v) => !v)}
                 className={`px-3 py-2 rounded-lg text-[13px] border ${
@@ -625,6 +842,7 @@ function Painel({ token, sair }) {
                       <th className="text-left px-3 py-2">Código</th>
                       <th className="text-left px-3 py-2">Nome</th>
                       <th className="text-left px-3 py-2">Local</th>
+                      <th className="text-left px-3 py-2">Cidade</th>
                       <th className="text-right px-3 py-2">Dias</th>
                       <th className="text-right px-3 py-2">Entressafra</th>
                       <th className="text-right px-3 py-2">Fora</th>
@@ -635,32 +853,40 @@ function Painel({ token, sair }) {
                     </tr>
                   </thead>
                   <tbody>
-                    {filaFiltrada.map((t) => (
-                      <tr key={t.codigo} onClick={() => setFicha(t.codigo)}
-                        className="border-t border-slate-50 hover:bg-slate-50 cursor-pointer">
-                        <td className="px-3 py-2 font-medium">{t.codigo}</td>
-                        <td className="px-3 py-2">
-                          {t.nome || <span className="text-amber-700 text-[11px]">sem cadastro no MMG+</span>}
-                        </td>
-                        <td className="px-3 py-2 text-slate-600">{t.local_base}</td>
-                        <td className="px-3 py-2 text-right tabular-nums">{t.dias}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.dias_entressafra}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.dias_fora}</td>
-                        <td className="px-3 py-2 text-right tabular-nums">{t.meta}</td>
-                        <td className={`px-3 py-2 text-right tabular-nums font-semibold ${
-                          t.falta > 0 ? "text-amber-600" : "text-emerald-600"}`}>{t.falta}</td>
-                        <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.semanas}</td>
-                        <td className="px-3 py-2">
-                          {t.tem_nivel_1
-                            ? <span className="text-teal-700 text-[11px]">outro setor, sem transporte</span>
-                            : <span className="text-rose-700 text-[11px]">precisa sair do local</span>}
-                        </td>
-                      </tr>
-                    ))}
+                    {filaFiltrada.map((t) => {
+                      const c = comoRodar(t);
+                      return (
+                        <tr key={t.codigo} onClick={() => setFicha(t.codigo)}
+                          className="border-t border-slate-50 hover:bg-slate-50 cursor-pointer">
+                          <td className="px-3 py-2 font-medium">{t.codigo}</td>
+                          <td className="px-3 py-2">
+                            {t.nome || <span className="text-amber-700 text-[11px]">sem cadastro no MMG+</span>}
+                          </td>
+                          <td className="px-3 py-2 text-slate-600">{t.local_base}</td>
+                          <td className="px-3 py-2 text-slate-500">{t.cidade || "—"}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{t.dias}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.dias_entressafra}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.dias_fora}</td>
+                          <td className="px-3 py-2 text-right tabular-nums">{t.meta}</td>
+                          <td className={`px-3 py-2 text-right tabular-nums font-semibold ${
+                            t.falta > 0 ? "text-amber-600" : "text-emerald-600"}`}>{t.falta}</td>
+                          <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.semanas}</td>
+                          <td className="px-3 py-2">
+                            <span className={`text-[11px] ${c.cor}`}>{c.texto}</span>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>
             </div>
+            <p className="text-[11px] text-slate-400">
+              "Como rodar" vai do mais barato ao mais caro: outro setor no mesmo local não exige
+              deslocamento; outro local na mesma cidade costuma dispensar carro; acima disso entra
+              a logística. Onde o local ainda não tem ponto exato no mapa, a distância é estimada
+              pelo centro do município e vem marcada como aproximada.
+            </p>
           </>
         )}
 
@@ -728,12 +954,8 @@ function Painel({ token, sair }) {
                       <tr key={t.codigo} className="border-t border-slate-50">
                         <td className="px-3 py-2 font-medium">{t.codigo}</td>
                         <td className="px-3 py-2 text-right tabular-nums">{t.dias}</td>
-                        <td className="px-3 py-2 text-slate-500">
-                          {t.primeiro_dia && new Date(t.primeiro_dia).toLocaleDateString("pt-BR")}
-                        </td>
-                        <td className="px-3 py-2 text-slate-500">
-                          {t.ultimo_dia && new Date(t.ultimo_dia).toLocaleDateString("pt-BR")}
-                        </td>
+                        <td className="px-3 py-2 text-slate-500">{dataBR(t.primeiro_dia)}</td>
+                        <td className="px-3 py-2 text-slate-500">{dataBR(t.ultimo_dia)}</td>
                       </tr>
                     ))}
                   </tbody>
