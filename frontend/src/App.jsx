@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import Importar from "./Importar.jsx";
+import Requisicao, { Requisicoes } from "./Requisicao.jsx";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
 const MESES = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
@@ -759,9 +760,10 @@ function Painel({ token, sair }) {
         pedir("/painel/fila", token),
         pedir("/painel/sem-cadastro", token),
         pedir("/painel/safristas-fixos", token),
+        pedir("/requisicoes/resumo", token).catch(() => null),
       ])
-        .then(([resumo, curva, locais, fila, semCadastro, safristas]) =>
-          setD({ resumo, curva, locais, fila, semCadastro, safristas }))
+        .then(([resumo, curva, locais, fila, semCadastro, safristas, reqs]) =>
+          setD({ resumo, curva, locais, fila, semCadastro, safristas, reqs }))
         .catch((e) => setErro(e.message)),
     [token]
   );
@@ -819,7 +821,7 @@ function Painel({ token, sair }) {
   );
   if (!d) return <div className="min-h-screen grid place-items-center text-slate-400 text-sm">Carregando…</div>;
 
-  const { resumo, curva, locais, fila, semCadastro, safristas } = d;
+  const { resumo, curva, locais, fila, semCadastro, safristas, reqs } = d;
   const j = resumo.janela, a = resumo.ativos, r = resumo.regras, fx = resumo.fixos;
   const comPonto = resumo.base.locais_com_ponto ?? 0;
 
@@ -847,6 +849,7 @@ function Painel({ token, sair }) {
       <div className="max-w-6xl mx-auto px-4 py-4 space-y-4">
         <div className="flex gap-1.5 flex-wrap">
           {[["painel","Painel"],["safra","Safra"],["locais","Locais"],["fila","Fila"],
+            ["requisicoes","Requisições"],
             ["safristas","Safristas fixos"],["cadastro","Sem cadastro"],
             ...(podeEditar ? [["importar","Importar"]] : []),
             ...(eu.perfil === "admin" ? [["usuarios","Acessos"]] : [])].map(([k, rot]) => (
@@ -856,6 +859,12 @@ function Painel({ token, sair }) {
               {rot}
               {k === "cadastro" && semCadastro.length > 0 && (
                 <span className="ml-1.5 text-[10px] bg-amber-400 text-amber-950 rounded px-1">{semCadastro.length}</span>
+              )}
+              {k === "requisicoes" && reqs?.abertas > 0 && (
+                <span className={`ml-1.5 text-[10px] rounded px-1 ${
+                  reqs.urgentes > 0 ? "bg-rose-400 text-rose-950" : "bg-teal-400 text-teal-950"}`}>
+                  {reqs.abertas}
+                </span>
               )}
               {k === "safristas" && safristas.length > 0 && (
                 <span className="ml-1.5 text-[10px] bg-sky-400 text-sky-950 rounded px-1">{safristas.length}</span>
@@ -956,6 +965,9 @@ function Painel({ token, sair }) {
 
         {aba === "importar" && podeEditar && <Importar token={token} />}
         {aba === "usuarios" && eu.perfil === "admin" && <Usuarios token={token} />}
+        {aba === "requisicoes" && (
+          <Requisicoes token={token} podeEditar={podeEditar} pedir={pedir} gravar={gravar} />
+        )}
         {aba === "safra" && <Safra token={token} aoAtualizar={carregar} podeEditar={podeEditar} />}
 
         {aba === "locais" && (
@@ -1186,5 +1198,14 @@ function Painel({ token, sair }) {
 export default function App() {
   const [token, setToken] = useState(localStorage.getItem("token"));
   function sair() { localStorage.removeItem("token"); setToken(null); }
+
+  /* Endereço público do pedido: ?r=token, com ?u=unidade opcional.
+     Resolve ANTES do login — quem abre este link não tem conta. */
+  const params = new URLSearchParams(window.location.search);
+  const linkRequisicao = params.get("r");
+  if (linkRequisicao) {
+    return <Requisicao token={linkRequisicao} unidadeParam={params.get("u")} />;
+  }
+
   return token ? <Painel token={token} sair={sair} /> : <Login aoEntrar={setToken} />;
 }
