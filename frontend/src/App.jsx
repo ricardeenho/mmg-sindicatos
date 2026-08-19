@@ -2,6 +2,7 @@ import { useState, useEffect, useMemo, useCallback } from "react";
 import Importar from "./Importar.jsx";
 import Requisicao, { Requisicoes } from "./Requisicao.jsx";
 import Escalas from "./Escalas.jsx";
+import Convocacao from "./Convocacao.jsx";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
 const MESES = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
@@ -1210,6 +1211,12 @@ export default function App() {
   const linkRequisicao = params.get("r");
   if (linkRequisicao) {
     return <Requisicao token={linkRequisicao} unidadeParam={params.get("u")} />;
+  }
+
+  /* Endereço público da convocação: ?c=token */
+  const linkConvocacao = params.get("c");
+  if (linkConvocacao) {
+    return <Convocacao token={linkConvocacao} />;
   }
 
   return token ? <Painel token={token} sair={sair} /> : <Login aoEntrar={setToken} />;

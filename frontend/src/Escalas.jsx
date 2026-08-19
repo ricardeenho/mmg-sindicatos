@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import { BlocoConvocacoes } from "./Convocacao.jsx";
 
 const DIAS_POR_MES = 5;
 
@@ -469,6 +470,12 @@ function Detalhe({ token, id, podeEditar, pedir, gravar, aoVoltar }) {
             </>
           )}
         </div>
+      )}
+
+      {/* ---------- convocação ---------- */}
+      {e.status === "publicada" && (
+        <BlocoConvocacoes token={token} escalaId={e.id} podeEditar={podeEditar}
+                          pedir={pedir} gravar={gravar} />
       )}
 
       {/* ---------- cancelar publicada ---------- */}
