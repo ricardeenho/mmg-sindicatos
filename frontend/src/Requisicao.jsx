@@ -32,12 +32,11 @@ function Moldura({ children }) {
   return (
     <div className="min-h-screen bg-slate-100 px-4 py-6">
       <div className="max-w-lg mx-auto">
-        <div className="flex items-center gap-3 mb-5">
-          <span className="w-11 h-11 rounded-xl bg-teal-500 grid place-items-center text-white font-bold text-lg">M+</span>
-          <div>
-            <h1 className="font-semibold text-slate-900 leading-tight">Pedido de trabalhadores</h1>
-            <p className="text-[12px] text-slate-500 leading-tight">MMG Sindicatos</p>
-          </div>
+        <div className="mb-5">
+          <img src="/logo-mmg.png" alt="MMG · Movimentação de Mercadorias em Geral"
+               className="h-11 w-auto mb-3" />
+          <h1 className="font-semibold text-slate-900 leading-tight">Pedido de trabalhadores</h1>
+          <p className="text-[12px] text-slate-500 leading-tight">Sindicato · módulo Rodízio</p>
         </div>
         {children}
       </div>
