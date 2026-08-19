@@ -33,6 +33,16 @@ async function gravar(caminho, token, corpo, metodo = "PUT") {
 
 const dataBR = (d) => (d ? new Date(d).toLocaleDateString("pt-BR") : "");
 
+/* O perfil vem dentro do proprio token, entao sobrevive a recarga da
+   pagina sem precisar guardar nada a mais. */
+function lerToken(t) {
+  try {
+    return JSON.parse(
+      atob(String(t).split(".")[1].replace(/-/g, "+").replace(/_/g, "/"))
+    );
+  } catch (e) { return null; }
+}
+
 /* Como esta pessoa pode rodar, na ordem do mais barato para o mais caro. */
 function comoRodar(t) {
   if (t.tem_nivel_1) return { texto: "outro setor, no mesmo local", cor: "text-teal-700", nivel: 1 };
@@ -343,7 +353,7 @@ function Lista({ token, grupo, locais, aoVoltar, diasPorMes, aoAbrirFicha }) {
 }
 
 /* ------------------------------------------------------------------ */
-function Safra({ token, aoAtualizar }) {
+function Safra({ token, aoAtualizar, podeEditar }) {
   const [dados, setDados] = useState(null);
   const [meses, setMeses] = useState([]);
   const [salvando, setSalvando] = useState(false);
@@ -449,10 +459,16 @@ function Safra({ token, aoAtualizar }) {
           </div>
         )}
 
-        <button onClick={salvar} disabled={salvando}
-          className="w-full mt-4 bg-teal-600 text-white rounded-lg py-2.5 text-sm font-medium disabled:opacity-50">
-          {salvando ? "Gravando…" : "Gravar calendário"}
-        </button>
+        {podeEditar ? (
+          <button onClick={salvar} disabled={salvando}
+            className="w-full mt-4 bg-teal-600 text-white rounded-lg py-2.5 text-sm font-medium disabled:opacity-50">
+            {salvando ? "Gravando…" : "Gravar calendário"}
+          </button>
+        ) : (
+          <p className="text-[11.5px] text-slate-500 mt-4 text-center">
+            Seu acesso é de leitura — o calendário pode ser consultado, mas não alterado.
+          </p>
+        )}
         {aviso && <p className="text-[12px] text-slate-600 mt-2 text-center">{aviso}</p>}
       </div>
 
@@ -520,7 +536,7 @@ function Safra({ token, aoAtualizar }) {
 }
 
 /* ------------------------------------------------------------------ */
-function PontoDoLocal({ token, local, aoGravar }) {
+function PontoDoLocal({ token, local, aoGravar, podeEditar }) {
   const [aberto, setAberto] = useState(false);
   const [texto, setTexto] = useState("");
   const [erro, setErro] = useState("");
@@ -545,9 +561,11 @@ function PontoDoLocal({ token, local, aoGravar }) {
     <div className="mt-1">
       <div className="flex items-center gap-2 flex-wrap">
         {chip}
-        <button onClick={() => setAberto((v) => !v)} className="text-[10.5px] text-teal-700 underline">
-          {aberto ? "fechar" : local.fonte === "mapa" ? "corrigir" : "definir no mapa"}
-        </button>
+        {podeEditar && (
+          <button onClick={() => setAberto((v) => !v)} className="text-[10.5px] text-teal-700 underline">
+            {aberto ? "fechar" : local.fonte === "mapa" ? "corrigir" : "definir no mapa"}
+          </button>
+        )}
         {local.fonte === "mapa" && (
           <span className="text-[10px] text-slate-400 tabular-nums">
             {Number(local.latitude).toFixed(4)}, {Number(local.longitude).toFixed(4)}
@@ -586,7 +604,140 @@ function PontoDoLocal({ token, local, aoGravar }) {
 }
 
 /* ------------------------------------------------------------------ */
+function Usuarios({ token }) {
+  const [linhas, setLinhas] = useState(null);
+  const [erro, setErro] = useState("");
+  const [aviso, setAviso] = useState("");
+  const [novo, setNovo] = useState({ nome: "", usuario: "", senha: "", perfil: "leitura" });
+  const [salvando, setSalvando] = useState(false);
+
+  const recarregar = () =>
+    pedir("/auth/usuarios", token).then(setLinhas).catch((e) => setErro(e.message));
+
+  useEffect(() => { recarregar(); }, [token]);
+
+  async function criar() {
+    setSalvando(true); setErro(""); setAviso("");
+    try {
+      await gravar("/auth/usuarios", token, novo, "POST");
+      setAviso(`${novo.nome} criado. Passe a senha por um canal seguro e peça para trocar no primeiro acesso.`);
+      setNovo({ nome: "", usuario: "", senha: "", perfil: "leitura" });
+      await recarregar();
+    } catch (e) { setErro(e.message); } finally { setSalvando(false); }
+  }
+
+  async function mudar(id, corpo) {
+    setErro(""); setAviso("");
+    try {
+      await gravar(`/auth/usuarios/${id}`, token, corpo, "PATCH");
+      await recarregar();
+    } catch (e) { setErro(e.message); }
+  }
+
+  const PERFIL_TEXTO = {
+    admin: "mexe em usuários e em tudo",
+    gestor: "grava calendário, regra e ponto",
+    leitura: "só consulta",
+  };
+
+  return (
+    <div className="space-y-4">
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <p className="text-sm font-medium">Quem tem acesso</p>
+        <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+          Cada pessoa com o seu próprio acesso. Isso não é burocracia: quando a escala publicada
+          existir, ela é o registro que a lei exige, e o valor dela como prova está em ter data,
+          hora e autor. Escala assinada por "admin" vale menos numa fiscalização do que escala
+          assinada por uma pessoa.
+        </p>
+      </div>
+
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <p className="text-[13px] font-medium mb-3">Novo acesso</p>
+        <div className="grid sm:grid-cols-2 gap-2">
+          <input value={novo.nome} onChange={(e) => setNovo({ ...novo, nome: e.target.value })}
+            placeholder="Nome completo"
+            className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+          <input value={novo.usuario} onChange={(e) => setNovo({ ...novo, usuario: e.target.value })}
+            placeholder="Usuário para entrar"
+            className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+          <input value={novo.senha} onChange={(e) => setNovo({ ...novo, senha: e.target.value })}
+            placeholder="Senha inicial (8 caracteres ou mais)"
+            className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+          <select value={novo.perfil} onChange={(e) => setNovo({ ...novo, perfil: e.target.value })}
+            className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
+            <option value="leitura">Leitura — só consulta</option>
+            <option value="gestor">Gestor — grava calendário, regra e ponto</option>
+            <option value="admin">Admin — mexe em usuários também</option>
+          </select>
+        </div>
+        <button onClick={criar} disabled={salvando}
+          className="mt-3 bg-teal-600 text-white rounded-lg px-4 py-2 text-[13px] font-medium disabled:opacity-50">
+          {salvando ? "Criando…" : "Criar acesso"}
+        </button>
+        {erro && <p className="text-[12px] text-rose-600 mt-2">{erro}</p>}
+        {aviso && <p className="text-[12px] text-emerald-700 mt-2">{aviso}</p>}
+      </div>
+
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12px]">
+            <thead className="bg-slate-50 text-slate-500">
+              <tr>
+                <th className="text-left px-3 py-2">Nome</th>
+                <th className="text-left px-3 py-2">Usuário</th>
+                <th className="text-left px-3 py-2">Perfil</th>
+                <th className="text-left px-3 py-2">Último acesso</th>
+                <th className="text-left px-3 py-2">Situação</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(linhas || []).map((u) => (
+                <tr key={u.id} className={`border-t border-slate-50 ${u.ativo ? "" : "opacity-50"}`}>
+                  <td className="px-3 py-2 font-medium">{u.nome}</td>
+                  <td className="px-3 py-2 text-slate-600">{u.usuario}</td>
+                  <td className="px-3 py-2">
+                    <select value={u.perfil} onChange={(e) => mudar(u.id, { perfil: e.target.value })}
+                      className="border border-slate-200 rounded px-2 py-1 text-[11.5px]">
+                      <option value="leitura">leitura</option>
+                      <option value="gestor">gestor</option>
+                      <option value="admin">admin</option>
+                    </select>
+                    <span className="block text-[10px] text-slate-400 mt-0.5">{PERFIL_TEXTO[u.perfil]}</span>
+                  </td>
+                  <td className="px-3 py-2 text-slate-500">
+                    {u.ultimo_acesso_em ? new Date(u.ultimo_acesso_em).toLocaleString("pt-BR") : "nunca entrou"}
+                  </td>
+                  <td className="px-3 py-2">
+                    <button onClick={() => mudar(u.id, { ativo: !u.ativo })}
+                      className={`text-[11px] px-2 py-1 rounded ${
+                        u.ativo ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
+                      {u.ativo ? "ativo · desativar" : "desativado · reativar"}
+                    </button>
+                  </td>
+                </tr>
+              ))}
+              {linhas && linhas.length === 0 && (
+                <tr><td colSpan="5" className="px-3 py-4 text-slate-400">
+                  Nenhum acesso criado ainda. Você está entrando pelo login de administração.
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+      <p className="text-[11px] text-slate-400">
+        O login de administração continua valendo e não aparece nesta lista — ele vive nas
+        variáveis do Railway e serve para não haver como ficar trancado do lado de fora.
+      </p>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 function Painel({ token, sair }) {
+  const eu = lerToken(token) || {};
+  const podeEditar = eu.perfil === "admin" || eu.perfil === "gestor";
   const [d, setD] = useState(null);
   const [erro, setErro] = useState("");
   const [aba, setAba] = useState("painel");
@@ -683,6 +834,12 @@ function Painel({ token, sair }) {
               Janela de {dataBR(j.janela_inicio)} a {dataBR(j.janela_fim)} · {j.percentual}% da entressafra
             </p>
           </div>
+          <div className="text-right">
+            <p className="text-[11px] text-slate-300 leading-tight">{eu.nome || eu.usuario}</p>
+            <p className="text-[10px] text-slate-500 leading-tight">
+              {eu.perfil === "leitura" ? "somente leitura" : eu.perfil}
+            </p>
+          </div>
           <button onClick={sair} className="text-[11px] text-slate-400 hover:text-white">Sair</button>
         </div>
       </header>
@@ -690,7 +847,9 @@ function Painel({ token, sair }) {
       <div className="max-w-6xl mx-auto px-4 py-4 space-y-4">
         <div className="flex gap-1.5 flex-wrap">
           {[["painel","Painel"],["safra","Safra"],["locais","Locais"],["fila","Fila"],
-            ["safristas","Safristas fixos"],["cadastro","Sem cadastro"],["importar","Importar"]].map(([k, rot]) => (
+            ["safristas","Safristas fixos"],["cadastro","Sem cadastro"],
+            ...(podeEditar ? [["importar","Importar"]] : []),
+            ...(eu.perfil === "admin" ? [["usuarios","Acessos"]] : [])].map(([k, rot]) => (
             <button key={k} onClick={() => setAba(k)}
               className={`px-4 py-2 rounded-lg text-[13px] font-medium ${
                 aba === k ? "bg-slate-900 text-white" : "bg-white border border-slate-200 text-slate-600"}`}>
@@ -795,8 +954,9 @@ function Painel({ token, sair }) {
           </>
         )}
 
-        {aba === "importar" && <Importar token={token} />}
-        {aba === "safra" && <Safra token={token} aoAtualizar={carregar} />}
+        {aba === "importar" && podeEditar && <Importar token={token} />}
+        {aba === "usuarios" && eu.perfil === "admin" && <Usuarios token={token} />}
+        {aba === "safra" && <Safra token={token} aoAtualizar={carregar} podeEditar={podeEditar} />}
 
         {aba === "locais" && (
           <>
@@ -836,7 +996,8 @@ function Painel({ token, sair }) {
                           <span className="text-slate-400"> · vizinho a {Math.round(l.km_mais_proximo)} km</span>
                         )}
                       </p>
-                      <PontoDoLocal token={token} local={l} aoGravar={atualizarPonto} />
+                      <PontoDoLocal token={token} local={l} aoGravar={atualizarPonto}
+                                    podeEditar={podeEditar} />
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-sm font-semibold tabular-nums">{l.pessoas}</p>
