@@ -15,7 +15,7 @@ const DIAS_UNIDADE_ATIVA = 5; // unidade viva = movimento nos ultimos 5 dias
 const ANC = '(select max(data) from apuracao_dia)';
 
 const ativoEm = (a) =>
-  `${a ? a + '.' : ''}ultimo_dia > (select janela_fim from v_janela limit 1) - ${DIAS_ATIVO}`;
+  `${a ? a + '.' : ''}ultimo_dia > ${ANC} - ${DIAS_ATIVO}`;
 const ATIVO = ativoEm('');
 
 /* Quem esta vivo. Unidade morta nao serve de destino de rodizio —
@@ -93,7 +93,7 @@ router.get('/resumo', async (req, res, next) => {
                fx.setores_no_local,
                coalesce(v.locais_mesma_cidade, 0) as lmc
           from v_fila_fixos fx
-          left join locais        l  on l.nome = fx.local_base
+          left join locais        l  on l.id = fx.local_base_id
           left join setores_vivos sv on sv.local_id = l.id
           left join viz           v  on v.local_id  = l.id
          where ${ativoEm('fx')}
@@ -339,7 +339,7 @@ router.get('/fila', async (req, res, next) => {
              coalesce(v.locais_mesma_cidade, 0)::int        as locais_mesma_cidade,
              v.km_mais_proximo
         from v_fila_fixos f
-        left join locais        l  on l.nome = f.local_base
+        left join locais        l  on l.id = f.local_base_id
         left join v_local_ponto p  on p.id   = l.id
         left join setores_vivos sv on sv.local_id = l.id
         left join viz           v  on v.local_id  = l.id
@@ -361,14 +361,14 @@ router.get('/locais', async (req, res, next) => {
     const { rows } = await consulta(`
       with ${VIVOS}, ${VIZINHANCA},
       fila as (
-        select local_base,
+        select local_base_id,
                count(*)::int                                       as pessoas,
                sum(falta)::int                                     as dias_a_cumprir,
                max(setores_no_local)::int                          as setores_fila,
                sum(ceil(falta::numeric / ${DIAS_POR_MES}))::int    as semanas
           from v_fila_fixos
          where ${ATIVO}
-         group by local_base
+         group by local_base_id
       ),
       setores as (
         select local_id, count(*)::int as setores from unidades group by local_id
@@ -384,7 +384,7 @@ router.get('/locais', async (req, res, next) => {
              v.km_mais_proximo,
              lv.vivo, lv.ultimo as ultimo_movimento, lv.dias_parado
         from v_local_ponto p
-        left join fila          f  on f.local_base = p.nome
+        left join fila          f  on f.local_base_id = p.id
         left join viz           v  on v.local_id   = p.id
         left join setores       s  on s.local_id   = p.id
         left join setores_vivos sv on sv.local_id  = p.id
