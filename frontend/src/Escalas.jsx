@@ -340,7 +340,8 @@ function Detalhe({ token, id, podeEditar, pedir, gravar, aoVoltar }) {
                       {i.origem_cidade && <span className="text-slate-400"> · {i.origem_cidade}</span>}
                     </td>
                     <td className="px-3 py-2 text-slate-600">
-                      <b>{i.destino_codigo}</b> {i.destino_nome}
+                      <b>{i.destino_codigo}</b> {i.destino_local || i.destino_nome}
+                      <span className="block text-slate-500">{i.destino_nome}</span>
                       {i.destino_cidade && <span className="text-slate-400 block">{i.destino_cidade}</span>}
                     </td>
                     <td className="px-3 py-2">
@@ -562,11 +563,16 @@ function Destinos({ token, escala, candidato, pedir, gravar, aoIncluir }) {
           <div className="flex flex-wrap gap-1.5">
             {porNivel[n].slice(0, 12).map((d) => (
               <button key={d.id} onClick={() => setDestino(d)}
-                className={`text-left rounded-lg border px-2.5 py-1.5 text-[11.5px] ${
+                className={`text-left rounded-lg border px-2.5 py-1.5 text-[11.5px] min-w-[210px] max-w-[300px] ${
                   destino?.id === d.id
                     ? "bg-teal-600 text-white border-teal-600"
                     : "bg-white border-slate-200 hover:border-slate-400"}`}>
-                <b>{d.codigo}</b> {d.setor || d.nome_completo}
+                <span className="block">
+                  <b>{d.codigo}</b> {d.local || d.nome_completo}
+                </span>
+                <span className={`block text-[10.5px] ${destino?.id === d.id ? "text-teal-50" : "text-slate-600"}`}>
+                  {d.setor || "—"}
+                </span>
                 <span className={`block text-[10px] ${destino?.id === d.id ? "text-teal-100" : "text-slate-500"}`}>
                   {d.cidade || "—"}
                   {d.km != null && ` · ${Math.round(d.km)} km${d.km_aproximado ? " aprox." : ""}`}
