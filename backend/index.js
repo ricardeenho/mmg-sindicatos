@@ -20,7 +20,8 @@ app.use(cors({
   },
 }));
 
-app.use(express.json());
+// o arquivo do ponto sobe como texto no corpo da requisicao
+app.use(express.json({ limit: '25mb' }));
 
 // termometro — publico de proposito
 app.get('/', (req, res) => {
@@ -29,6 +30,7 @@ app.get('/', (req, res) => {
 
 app.use('/auth', require('./routes/auth'));
 app.use('/painel', require('./routes/painel'));
+app.use('/importacao', require('./routes/importacao'));
 
 app.use((err, req, res, next) => {
   console.error(err);

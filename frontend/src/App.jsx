@@ -1,4 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
+import Importar from "./Importar.jsx";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
 const MESES = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
@@ -494,7 +495,7 @@ function Painel({ token, sair }) {
       <div className="max-w-6xl mx-auto px-4 py-4 space-y-4">
         <div className="flex gap-1.5 flex-wrap">
           {[["painel","Painel"],["safra","Safra"],["locais","Locais"],["fila","Fila"],
-            ["safristas","Safristas fixos"],["cadastro","Sem cadastro"]].map(([k, rot]) => (
+            ["safristas","Safristas fixos"],["cadastro","Sem cadastro"],["importar","Importar"]].map(([k, rot]) => (
             <button key={k} onClick={() => setAba(k)}
               className={`px-4 py-2 rounded-lg text-[13px] font-medium ${
                 aba === k ? "bg-slate-900 text-white" : "bg-white border border-slate-200 text-slate-600"}`}>
@@ -564,6 +565,7 @@ function Painel({ token, sair }) {
           </>
         )}
 
+        {aba === "importar" && <Importar token={token} />}
         {aba === "safra" && <Safra token={token} />}
 
         {aba === "locais" && (
