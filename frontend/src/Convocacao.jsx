@@ -234,6 +234,29 @@ export function BlocoConvocacoes({ token, escalaId, podeEditar, pedir, gravar })
   }
   useEffect(() => { carregar(); }, [escalaId, token]);
 
+  /* Enquanto houver quem nao respondeu, o painel pergunta sozinho de
+     20 em 20 segundos — e para assim que todos responderem, para nao
+     ficar batendo na API a tarde inteira. Tambem atualiza quando a
+     aba volta a ficar visivel, que e o caso de quem foi ao WhatsApp
+     mandar o link e voltou. */
+  const pendentes = (linhas || []).some(
+    (c) => c.status === "enviada" || c.status === "vista");
+
+  useEffect(() => {
+    if (!pendentes || registrando) return;
+
+    const relogio = setInterval(carregar, 20000);
+    const aoVoltar = () => { if (!document.hidden) carregar(); };
+    document.addEventListener("visibilitychange", aoVoltar);
+    window.addEventListener("focus", aoVoltar);
+
+    return () => {
+      clearInterval(relogio);
+      document.removeEventListener("visibilitychange", aoVoltar);
+      window.removeEventListener("focus", aoVoltar);
+    };
+  }, [pendentes, registrando, escalaId, token]);
+
   useEffect(() => {
     if (registrando && motivos.length === 0) {
       fetch(`${API}/convocacoes/publico/${registrando.token}`)
@@ -389,6 +412,7 @@ export function BlocoConvocacoes({ token, escalaId, podeEditar, pedir, gravar })
 
       {linhas && linhas.length > 0 && (
         <p className="text-[11px] text-slate-400 mt-3 leading-relaxed">
+          {pendentes && "Esta lista se atualiza sozinha enquanto houver resposta pendente. "}
           A recusa não altera a escala e não gera penalidade — a pessoa continua na fila.
           O que a escala registra é que o sindicato ofereceu; a convocação registra o que
           a pessoa respondeu. As duas coisas juntas é que formam a prova.
