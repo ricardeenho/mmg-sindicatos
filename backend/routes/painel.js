@@ -6,7 +6,7 @@ const router = express.Router();
 router.use(autenticar);
 
 const DIAS_ATIVO = 14;        // trabalhador ativo = movimento nas ultimas duas semanas
-const DIAS_POR_MES = 6;       // permanencia maxima fora da base, por mes
+const DIAS_POR_MES = 5;       // bloco de segunda a sexta: cabe em quase todo destino vivo
 const MESES_A_FRENTE = 6;     // quantos meses declarados o painel projeta
 const DIAS_UNIDADE_ATIVA = 5; // unidade viva = movimento nos ultimos 5 dias
 

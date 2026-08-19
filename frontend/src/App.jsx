@@ -1174,7 +1174,8 @@ function Painel({ token, sair }) {
 
         <p className="text-[11px] text-slate-400 text-center pt-2">
           Meia diária conta como um dia. Um dia de rodízio por data, no máximo.
-          Cada bloco de rodízio vai de segunda a sábado, com no máximo {r.dias_por_mes} dias por mês.
+          Cada bloco de rodízio vai de segunda a sexta, com no máximo {r.dias_por_mes} dias por mês —
+          só 27 dos 181 locais funcionam no sábado, então o bloco curto é o que cabe em todo lugar.
         </p>
       </div>
     </div>
