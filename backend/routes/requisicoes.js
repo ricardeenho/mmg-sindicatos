@@ -208,7 +208,9 @@ router.get('/', autenticar, async (req, res, next) => {
              r.dias_antecedencia, r.urgente, r.status,
              r.atendida_em, r.atendida_por, r.atendida_obs, r.criado_em,
              r.unidade_codigo, r.unidade_nome, r.unidade_setor,
-             r.local_nome, r.local_cidade, r.atividades_de_risco
+             r.local_nome, r.local_cidade, r.atividades_de_risco,
+             (select array_agg(ar.nome order by ar.ordem)
+                from atividades_ref ar where ar.codigo = any(r.atividades)) as atividades_nomes
         from v_requisicoes r
         ${filtro}
        order by (r.status = 'aberta') desc, r.urgente desc, r.previsao_inicio, r.criado_em desc

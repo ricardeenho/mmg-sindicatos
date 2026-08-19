@@ -16,7 +16,34 @@ const proximaSegunda = () => {
   d.setDate(d.getDate() + ((8 - d.getDay()) % 7 || 7));
   return d.toISOString().slice(0, 10);
 };
-const dataBR = (d) => (d ? new Date(d + "T12:00:00").toLocaleDateString("pt-BR") : "");
+/* A API devolve a data como ISO completo. Cortar os 10 primeiros
+   caracteres e montar a mao evita fuso horario e "Invalid Date". */
+const dataBR = (d) => {
+  if (!d) return "";
+  const [ano, mes, dia] = String(d).slice(0, 10).split("-");
+  return ano && mes && dia ? `${dia}/${mes}/${ano}` : "";
+};
+
+/* Fica FORA do componente de proposito. Declarada dentro, ela seria uma
+   funcao nova a cada tecla digitada, e o React destruiria e recriaria
+   tudo que esta dentro dela — o campo perderia o foco e o teclado do
+   celular fecharia a cada letra. */
+function Moldura({ children }) {
+  return (
+    <div className="min-h-screen bg-slate-100 px-4 py-6">
+      <div className="max-w-lg mx-auto">
+        <div className="flex items-center gap-3 mb-5">
+          <span className="w-11 h-11 rounded-xl bg-teal-500 grid place-items-center text-white font-bold text-lg">M+</span>
+          <div>
+            <h1 className="font-semibold text-slate-900 leading-tight">Pedido de trabalhadores</h1>
+            <p className="text-[12px] text-slate-500 leading-tight">MMG Sindicatos</p>
+          </div>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
 
 /* ==================================================================
  * TELA PÚBLICA — quem abre o link não tem login
@@ -112,21 +139,6 @@ export default function Requisicao({ token, unidadeParam }) {
   }
 
   const podeEnviar = unidade && quantidade >= 1 && inicio && nome.trim().length >= 3;
-
-  const Moldura = ({ children }) => (
-    <div className="min-h-screen bg-slate-100 px-4 py-6">
-      <div className="max-w-lg mx-auto">
-        <div className="flex items-center gap-3 mb-5">
-          <span className="w-11 h-11 rounded-xl bg-teal-500 grid place-items-center text-white font-bold text-lg">M+</span>
-          <div>
-            <h1 className="font-semibold text-slate-900 leading-tight">Pedido de trabalhadores</h1>
-            <p className="text-[12px] text-slate-500 leading-tight">MMG Sindicatos</p>
-          </div>
-        </div>
-        {children}
-      </div>
-    </div>
-  );
 
   if (estado === "carregando") {
     return <Moldura><p className="text-sm text-slate-400">Abrindo…</p></Moldura>;
@@ -478,9 +490,9 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
                   {r.solicitante_fone ? ` · ${r.solicitante_fone}` : ""}
                   {r.solicitante_tipo === "mmg" && <span className="text-sky-700"> · da MMG</span>}
                 </p>
-                {r.atividades?.length > 0 && (
+                {(r.atividades_nomes || r.atividades)?.length > 0 && (
                   <p className="text-[11.5px] text-slate-600 mt-1">
-                    {r.atividades.join(", ")}
+                    {(r.atividades_nomes || r.atividades).join(", ")}
                     {r.atividades_de_risco > 0 && (
                       <span className="text-amber-700"> · exige NR em dia</span>
                     )}
