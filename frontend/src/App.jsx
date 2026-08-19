@@ -36,6 +36,8 @@ const dataBR = (d) => (d ? new Date(d).toLocaleDateString("pt-BR") : "");
 /* Como esta pessoa pode rodar, na ordem do mais barato para o mais caro. */
 function comoRodar(t) {
   if (t.tem_nivel_1) return { texto: "outro setor, no mesmo local", cor: "text-teal-700", nivel: 1 };
+  if (t.setores_no_local > 1 && t.locais_mesma_cidade > 0)
+    return { texto: "outro local, mesma cidade (setor vizinho parado)", cor: "text-sky-700", nivel: 2 };
   if (t.locais_mesma_cidade > 0) return { texto: "outro local, mesma cidade", cor: "text-sky-700", nivel: 2 };
   if (t.km_mais_proximo != null) {
     return {
@@ -735,6 +737,7 @@ function Painel({ token, sair }) {
                 <li><b>Precisam rodar</b> — obrigados cuja meta ainda não foi cumprida. A meta é {j.percentual}% dos dias de entressafra de cada um, com teto de {j.teto_dias}.</li>
                 <li><b>Em dia</b> — obrigados que já acumularam dias fora da unidade-base suficientes.</li>
                 <li><b>A janela</b> termina em {dataBR(j.janela_fim)}, que é o último dia apurado — não a data de hoje. Dia que ainda não foi apurado não pode contar, então a janela anda quando a apuração do mês entra.</li>
+                <li><b>Unidade viva</b> — teve ao menos um trabalhador nos últimos {r.dias_unidade_ativa} dias contados do último dia apurado. Unidade parada não entra como destino de rodízio: hoje são {resumo.base.unidades_vivas} das {resumo.base.unidades} cadastradas, em {resumo.base.locais_vivos} locais.</li>
               </ul>
               <p className="text-[11px] text-teal-700 mt-2">Clique em qualquer cartão para ver quem são.</p>
             </div>
@@ -755,7 +758,7 @@ function Painel({ token, sair }) {
                 <div className="bg-slate-800 rounded-lg p-3">
                   <p className="text-xl font-semibold tabular-nums text-teal-300">{fx.com_nivel_1}</p>
                   <p className="text-[10.5px] text-slate-300 leading-tight mt-0.5">
-                    trocam de setor no próprio local
+                    trocam de setor no próprio local, com o setor vizinho vivo
                   </p>
                 </div>
                 <div className="bg-slate-800 rounded-lg p-3">
@@ -772,7 +775,15 @@ function Painel({ token, sair }) {
                 </div>
               </div>
 
+              {fx.nivel_1_perdido > 0 && (
+                <p className="text-[11.5px] mt-3 text-amber-300 leading-relaxed">
+                  {fx.nivel_1_perdido} pessoas estão em local com mais de um setor cadastrado, mas
+                  com o setor vizinho parado — por isso não contam como troca dentro do local.
+                </p>
+              )}
+
               <p className="text-[11px] mt-3 text-slate-400 leading-relaxed">
+                Só entra como destino a unidade que teve gente nos últimos {r.dias_unidade_ativa} dias.
                 Mesma cidade não quer dizer sem carro: dois locais em Cascavel podem estar a
                 20 km um do outro. A separação entre as três colunas depende da cidade de cada local, e{" "}
                 {comPonto === 0
@@ -807,13 +818,19 @@ function Painel({ token, sair }) {
                     <div className="flex-1 min-w-0">
                       <p className="text-sm truncate">{l.local_base}</p>
                       <p className="text-[11px] text-slate-500">
+                        {l.vivo
+                          ? <span className="text-emerald-700">ativa</span>
+                          : <span className="text-slate-400">
+                              {l.dias_parado != null ? `parada há ${l.dias_parado} dias` : "sem movimento no arquivo"}
+                            </span>}
+                        {" · "}
                         {l.cidade || <span className="text-rose-600">sem cidade</span>}
-                        {" · "}{l.setores} {l.setores === 1 ? "setor" : "setores"}
-                        {l.setores === 1 && l.locais_mesma_cidade === 0 && (
+                        {" · "}{l.setores_vivos} de {l.setores} {l.setores === 1 ? "setor ativo" : "setores ativos"}
+                        {l.setores_vivos <= 1 && l.locais_mesma_cidade === 0 && (
                           <span className="text-rose-600"> · precisa sair da cidade</span>
                         )}
                         {l.locais_mesma_cidade > 0 && (
-                          <span className="text-sky-700"> · {l.locais_mesma_cidade} local(is) na mesma cidade</span>
+                          <span className="text-sky-700"> · {l.locais_mesma_cidade} local(is) vivo(s) na mesma cidade</span>
                         )}
                         {l.km_mais_proximo != null && (
                           <span className="text-slate-400"> · vizinho a {Math.round(l.km_mais_proximo)} km</span>
@@ -911,8 +928,10 @@ function Painel({ token, sair }) {
             <p className="text-[11px] text-slate-400">
               "Como rodar" vai do mais barato ao mais caro: outro setor no mesmo local não exige
               deslocamento; outro local na mesma cidade costuma dispensar carro; acima disso entra
-              a logística. Onde o local ainda não tem ponto exato no mapa, a distância é estimada
-              pelo centro do município e vem marcada como aproximada.
+              a logística. Só conta como destino a unidade que teve gente nos últimos{" "}
+              {r.dias_unidade_ativa} dias — setor cadastrado mas parado não serve. Onde o local ainda
+              não tem ponto exato no mapa, a distância é estimada pelo centro do município e vem
+              marcada como aproximada.
             </p>
           </>
         )}
