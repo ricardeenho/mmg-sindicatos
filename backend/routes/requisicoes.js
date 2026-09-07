@@ -291,4 +291,35 @@ router.post('/links', autenticar, autorizar('admin', 'gestor'), async (req, res,
   } catch (e) { next(e); }
 });
 
+/* ==================================================================
+ * INTEGRACAO - o MMG+ le os pedidos (06/09/2026)
+ * GET /requisicoes/integracao/vigentes
+ * Header: x-mmg-token = MMG_PLUS_TOKEN (variavel de ambiente no Railway)
+ *
+ * Lista plana, sem estado. O MMG+ guarda uma copia e decide o quadro
+ * de cada unidade: o pedido mais recente que ja comecou e nao terminou
+ * e o TOTAL a partir daquela data. Este sistema nao sabe que o MMG+
+ * existe - so responde a quem tem o token.
+ * ================================================================ */
+router.get('/integracao/vigentes', async (req, res, next) => {
+  try {
+    const esperado = process.env.MMG_PLUS_TOKEN;
+    const recebido = req.headers['x-mmg-token'];
+    if (!esperado || !recebido || recebido !== esperado) {
+      return res.status(401).json({ error: 'Token invalido' });
+    }
+    const { rows } = await consulta(`
+      select r.id, r.unidade_codigo, r.unidade_nome, r.local_cidade,
+             r.quantidade, r.previsao_inicio, r.previsao_fim, r.turno,
+             r.atividades, r.observacoes, r.status, r.urgente,
+             r.solicitante_nome, r.solicitante_tipo, r.criado_em, r.atendida_em
+        from v_requisicoes r
+       where r.status <> 'cancelada'
+         and r.previsao_inicio >= current_date - 180
+       order by r.unidade_codigo, r.previsao_inicio desc
+    `);
+    res.json({ gerado_em: new Date().toISOString(), total: rows.length, requisicoes: rows });
+  } catch (e) { next(e); }
+});
+
 module.exports = router;

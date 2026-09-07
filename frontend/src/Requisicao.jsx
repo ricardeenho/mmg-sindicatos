@@ -242,7 +242,8 @@ export default function Requisicao({ token, unidadeParam }) {
 
         {/* ---- quantas pessoas ---- */}
         <div className="bg-white rounded-2xl p-4">
-          <p className="text-[13px] font-medium text-slate-900 mb-2">Quantas pessoas?</p>
+          <p className="text-[13px] font-medium text-slate-900 mb-1">Quantas pessoas no total?</p>
+          <p className="text-[11.5px] text-slate-500 mb-2">Contando as que já estão na unidade. É o total que você quer a partir da data abaixo.</p>
           <div className="flex items-center gap-3">
             <button onClick={() => setQuantidade((q) => Math.max(1, q - 1))}
               className="w-12 h-12 rounded-xl border border-slate-300 text-xl">−</button>
