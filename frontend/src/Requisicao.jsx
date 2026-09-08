@@ -257,7 +257,8 @@ export default function Requisicao({ token, unidadeParam }) {
 
         {/* ---- quando ---- */}
         <div className="bg-white rounded-2xl p-4">
-          <p className="text-[13px] font-medium text-slate-900 mb-2">A partir de quando?</p>
+          <p className="text-[13px] font-medium text-slate-900 mb-1">A partir de quando?</p>
+          <p className="text-[11.5px] text-slate-500 mb-2">Pedidos com pelo menos 48 horas de antecedência: o sindicato precisa de dois dias para montar a escala e avisar os trabalhadores.</p>
           <div className="flex gap-2 mb-2 flex-wrap">
             {[["Hoje", hoje()], ["Amanhã", maisDias(1)], ["Segunda", proximaSegunda()]].map(([r, v]) => (
               <button key={r} onClick={() => setInicio(v)}
@@ -266,7 +267,7 @@ export default function Requisicao({ token, unidadeParam }) {
                                : "bg-white text-slate-600 border-slate-300"}`}>{r}</button>
             ))}
           </div>
-          <input type="date" value={inicio} min={hoje()} onChange={(e) => setInicio(e.target.value)}
+          <input type="date" value={inicio} min={maisDias(2)} onChange={(e) => setInicio(e.target.value)}
             className="w-full border border-slate-300 rounded-xl px-4 py-3 text-[15px]" />
         </div>
 

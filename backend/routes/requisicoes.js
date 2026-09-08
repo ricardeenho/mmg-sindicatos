@@ -145,6 +145,14 @@ router.post('/publico/:token', async (req, res, next) => {
     if (inicio < new Date(hoje.getTime() - 86400000)) {
       return res.status(400).json({ error: 'A data de inicio nao pode estar no passado' });
     }
+    // 08/09: pedido com pelo menos 48 horas de antecedencia. O sindicato
+    // precisa de dois dias para montar a escala e avisar os trabalhadores.
+    const minimo = new Date(hoje); minimo.setDate(minimo.getDate() + 2);
+    if (inicio < minimo) {
+      const br = minimo.toLocaleDateString('pt-BR');
+      return res.status(400).json({ error: 'O pedido precisa ser feito com pelo menos 48 horas de anteced' + String.fromCharCode(0xEA) + 'ncia. A data mais pr' + String.fromCharCode(0xF3) + 'xima ' + String.fromCharCode(0xE9) + ' ' + br + '.' });
+    }
+
     if (inicio > umAno) {
       return res.status(400).json({ error: 'A data de inicio esta longe demais' });
     }
