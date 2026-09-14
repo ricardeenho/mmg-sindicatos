@@ -19,9 +19,33 @@ const GRUPOS = {
   isentos:     "Isentos",
 };
 
+/* 14/09/2026 — TOKEN VENCIDO NÃO VIRA TELA VERMELHA.
+   Antes, quando o token expirava, a API devolvia "Sem token" ou
+   "Token invalido ou expirado" e isso caía como texto cru na tela —
+   o Ricardo tinha que clicar em "Entrar de novo" toda vez.
+   Agora `pedir` e `gravar` reconhecem esses dois casos, limpam o
+   token guardado e mandam direto para o login (window.location.reload
+   com o token já removido; sem token, App() cai no <Login>). Qualquer
+   outro erro continua subindo normal, para a tela de erro que já
+   existia — este atalho é só para token vencido. */
+function tokenVencido(msg) {
+  const m = String(msg || "").toLowerCase();
+  return m.includes("token invalido") || m.includes("token inválido")
+    || m.includes("sem token") || m.includes("token expirado");
+}
+
+function forcarLogout() {
+  localStorage.removeItem("token");
+  window.location.reload();
+}
+
 async function pedir(caminho, token) {
   const r = await fetch(API + caminho, { headers: { Authorization: `Bearer ${token}` } });
-  if (!r.ok) throw new Error((await r.json()).error || "Falha na consulta");
+  if (!r.ok) {
+    const corpo = await r.json().catch(() => ({}));
+    if (r.status === 401 || tokenVencido(corpo.error)) { forcarLogout(); return new Promise(() => {}); }
+    throw new Error(corpo.error || "Falha na consulta");
+  }
   return r.json();
 }
 async function gravar(caminho, token, corpo, metodo = "PUT") {
@@ -30,7 +54,11 @@ async function gravar(caminho, token, corpo, metodo = "PUT") {
     headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
     body: JSON.stringify(corpo),
   });
-  if (!r.ok) throw new Error((await r.json()).error || "Falha ao gravar");
+  if (!r.ok) {
+    const d = await r.json().catch(() => ({}));
+    if (r.status === 401 || tokenVencido(d.error)) { forcarLogout(); return new Promise(() => {}); }
+    throw new Error(d.error || "Falha ao gravar");
+  }
   return r.json();
 }
 
