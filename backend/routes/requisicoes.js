@@ -11,6 +11,25 @@ const ACENTOS_PARA = 'aaaaaeeeeiiiiooooouuuuc';
 const semAcento = (campo) => `translate(lower(${campo}), '${ACENTOS_DE}', '${ACENTOS_PARA}')`;
 
 /* ------------------------------------------------------------------
+ * MOTIVOS DE CANCELAMENTO (14/09/2026)
+ *
+ * Lista fechada de proposito. Texto livre nao vira estatistica:
+ * "engano" e "nao precisa mais" escritos de dez jeitos nao contam.
+ * Com a lista, "Foi engano" e "Duplicado" podem ficar de FORA da
+ * conta de urgencia, e "Nao precisa mais" num pedido urgente vira o
+ * indicador da unidade que pede em panico e desmarca depois.
+ *
+ * Os rotulos usam \u para o arquivo continuar 100% ASCII.
+ * ---------------------------------------------------------------- */
+const MOTIVOS_CANCELAMENTO = {
+  engano:        'Foi engano \u2014 n\u00e3o era para ter pedido',
+  duplicado:     'Duplicado \u2014 j\u00e1 havia esse pedido',
+  nao_precisa:   'N\u00e3o precisa mais',
+  outro_caminho: 'Resolvido por outro caminho',
+  outro:         'Outro',
+};
+
+/* ------------------------------------------------------------------
  * Freio simples para o endereco publico. Nao e seguranca de verdade —
  * e so para um engano de dedo, ou um robo bobo, nao encher a tabela.
  * Vive na memoria do processo: zera a cada deploy, e isso esta bom.
@@ -145,13 +164,21 @@ router.post('/publico/:token', async (req, res, next) => {
     if (inicio < new Date(hoje.getTime() - 86400000)) {
       return res.status(400).json({ error: 'A data de inicio nao pode estar no passado' });
     }
-    // 08/09: pedido com pelo menos 48 horas de antecedencia. O sindicato
-    // precisa de dois dias para montar a escala e avisar os trabalhadores.
-    const minimo = new Date(hoje); minimo.setDate(minimo.getDate() + 2);
-    if (inicio < minimo) {
-      const br = minimo.toLocaleDateString('pt-BR');
-      return res.status(400).json({ error: 'O pedido precisa ser feito com pelo menos 48 horas de anteced' + String.fromCharCode(0xEA) + 'ncia. A data mais pr' + String.fromCharCode(0xF3) + 'xima ' + String.fromCharCode(0xE9) + ' ' + br + '.' });
-    }
+
+    /* 14/09/2026 — A TRAVA DAS 48 HORAS CAIU.
+     *
+     * Ela entrou em 08/09 e recusava qualquer pedido com menos de dois
+     * dias. O efeito na pratica era o contrario do pretendido: o gestor
+     * que precisava de gente amanha nao conseguia registrar, ligava para
+     * o escritorio, e o pedido de ultima hora deixava de existir no
+     * sistema — justo o dado que sustenta o par. 2 do art. 4 do
+     * regimento e mostra quem sempre pede em cima da hora.
+     *
+     * Agora o pedido ENTRA, a tela avisa antes (aviso curto ao escolher
+     * a data) e o recibo traz o texto da MMG sobre o prazo. O registro
+     * se forma, a estatistica se forma, e a unidade recebe o recado.
+     * O prazo continua valendo — o que mudou e que ele e cobrado por
+     * escrito, nao por porta fechada. */
 
     if (inicio > umAno) {
       return res.status(400).json({ error: 'A data de inicio esta longe demais' });
@@ -244,12 +271,37 @@ router.get('/resumo', autenticar, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-/* PATCH /requisicoes/:id — muda o status */
+/* GET /requisicoes/motivos — a lista fechada, para a tela montar os botoes
+ * sem repetir os textos do lado de la. */
+router.get('/motivos', autenticar, async (req, res) => {
+  res.json(Object.entries(MOTIVOS_CANCELAMENTO).map(([codigo, rotulo]) => ({ codigo, rotulo })));
+});
+
+/* PATCH /requisicoes/:id — muda o status
+ *
+ * 14/09/2026: cancelar passou a exigir MOTIVO da lista fechada. "Outro"
+ * pede observacao de 5 caracteres, igual ao cancelamento de escala.
+ * O motivo e gravado em atendida_obs, que ja era a nota dos dois
+ * fechamentos (atendida e cancelada) — coluna propria exigiria mexer
+ * na view v_requisicoes, de onde a lista le. Como o texto vem de lista
+ * fechada, ele sai sempre igual e a contagem por motivo funciona. */
 router.patch('/:id', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
-  const { status, atendida_obs } = req.body || {};
+  const { status, atendida_obs, motivo, observacao } = req.body || {};
   if (!['aberta', 'em_atendimento', 'atendida', 'cancelada'].includes(status)) {
     return res.status(400).json({ error: 'Status invalido' });
   }
+
+  let nota = atendida_obs || null;
+  if (status === 'cancelada') {
+    const rotulo = MOTIVOS_CANCELAMENTO[motivo];
+    if (!rotulo) return res.status(400).json({ error: 'Escolha o motivo do cancelamento' });
+    const obs = String(observacao || '').trim();
+    if (motivo === 'outro' && obs.length < 5) {
+      return res.status(400).json({ error: 'Escreva qual foi o motivo' });
+    }
+    nota = obs ? rotulo + ' \u2014 ' + obs : rotulo;
+  }
+
   try {
     const fechando = status === 'atendida' || status === 'cancelada';
     const { rows: [r] } = await consulta(`
@@ -261,7 +313,7 @@ router.patch('/:id', autenticar, autorizar('admin', 'gestor'), async (req, res, 
        where id = $1
       returning id, status
     `, [req.params.id, status, fechando,
-        req.usuario.nome || req.usuario.usuario, atendida_obs || null]);
+        req.usuario.nome || req.usuario.usuario, nota]);
     if (!r) return res.status(404).json({ error: 'Requisicao nao encontrada' });
     res.json(r);
   } catch (e) { next(e); }
@@ -308,6 +360,12 @@ router.post('/links', autenticar, autorizar('admin', 'gestor'), async (req, res,
  * de cada unidade: o pedido mais recente que ja comecou e nao terminou
  * e o TOTAL a partir daquela data. Este sistema nao sabe que o MMG+
  * existe - so responde a quem tem o token.
+ *
+ * 14/09/2026: o filtro daqui continua tirando so o cancelado. Quem
+ * decide que pedido ATENDIDO tambem nao e demanda e o MMG+, do lado
+ * de la, porque e ele quem calcula a falta. Este endpoint entrega o
+ * quadro completo de propriedade — se outro consumidor aparecer, ele
+ * escolhe o proprio corte.
  * ================================================================ */
 router.get('/integracao/vigentes', async (req, res, next) => {
   try {

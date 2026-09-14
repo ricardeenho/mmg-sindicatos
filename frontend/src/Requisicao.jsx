@@ -6,6 +6,29 @@ const TURNOS = [
   ["manha", "Manhã"], ["tarde", "Tarde"], ["noite", "Noite"], ["integral", "Dia inteiro"],
 ];
 
+/* 14/09/2026 — motivos do cancelamento.
+   Lista fechada, os mesmos códigos do backend. Texto livre não vira
+   estatística; com a lista, "Foi engano" e "Duplicado" podem sair da
+   conta de urgência e "Não precisa mais" num pedido urgente mostra a
+   unidade que pede em pânico e desmarca depois. */
+const MOTIVOS_CANCELAMENTO = [
+  ["engano", "Foi engano — não era para ter pedido"],
+  ["duplicado", "Duplicado — já havia esse pedido"],
+  ["nao_precisa", "Não precisa mais"],
+  ["outro_caminho", "Resolvido por outro caminho"],
+  ["outro", "Outro"],
+];
+
+/* O recado da MMG sobre o prazo. Aparece no RECIBO, depois do envio —
+   está escrito no passado ("a solicitação foi realizada"), então só faz
+   sentido ali. O aviso de antes é outro, curto, junto da data. */
+const RECADO_48H = [
+  "Olá! Lembramos que, conforme nosso acordo, as solicitações de colaboradores devem ser realizadas com antecedência mínima de 48 horas. Esse prazo é necessário para organizarmos a disponibilidade e a logística dos trabalhadores e verificarmos documentação, treinamentos e exames antes do início das atividades.",
+  "Como a solicitação foi realizada em prazo inferior ao previsto, já estamos trabalhando para viabilizar o atendimento, sujeito à disponibilidade de trabalhadores aptos.",
+  "Agradecemos a compreensão e contamos com a observância do prazo de 48 horas nas próximas solicitações.",
+  "MMG.",
+];
+
 const hoje = () => new Date().toISOString().slice(0, 10);
 const maisDias = (n) => {
   const d = new Date(); d.setDate(d.getDate() + n);
@@ -139,6 +162,10 @@ export default function Requisicao({ token, unidadeParam }) {
 
   const podeEnviar = unidade && quantidade >= 1 && inicio && nome.trim().length >= 3;
 
+  /* Menos de 48 horas: comparação de texto ISO funciona porque as duas
+     datas estão no formato aaaa-mm-dd. Não bloqueia nada — só avisa. */
+  const curtoPrazo = inicio && inicio < maisDias(2);
+
   if (estado === "carregando") {
     return <Moldura><p className="text-sm text-slate-400">Abrindo…</p></Moldura>;
   }
@@ -157,6 +184,7 @@ export default function Requisicao({ token, unidadeParam }) {
   }
 
   if (estado === "pronto") {
+    const foiCurto = Number(recibo?.dias_antecedencia) < 2;
     return (
       <Moldura>
         <div className="bg-white rounded-2xl p-6 text-center">
@@ -167,11 +195,22 @@ export default function Requisicao({ token, unidadeParam }) {
           <p className="text-[13px] text-slate-600 mt-1">
             Protocolo <b className="tabular-nums">{recibo.protocolo}</b>
           </p>
-          <p className="text-[13px] text-slate-600 mt-3 leading-relaxed">
-            {recibo.urgente
-              ? "O pedido é para os próximos dias, então entra como urgente. Se puder, avise o sindicato por telefone também."
-              : "O sindicato vai montar a escala e avisar os trabalhadores."}
-          </p>
+          {!foiCurto && (
+            <p className="text-[13px] text-slate-600 mt-3 leading-relaxed">
+              {recibo.urgente
+                ? "O pedido é para os próximos dias, então entra como urgente. Se puder, avise o sindicato por telefone também."
+                : "O sindicato vai montar a escala e avisar os trabalhadores."}
+            </p>
+          )}
+          {foiCurto && (
+            <div className="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-left">
+              {RECADO_48H.map((p, i) => (
+                <p key={i} className={`text-[12.5px] text-amber-900 leading-relaxed ${i ? "mt-2.5" : ""}`}>
+                  {p}
+                </p>
+              ))}
+            </div>
+          )}
           <button onClick={outroPedido}
             className="mt-5 w-full bg-slate-900 text-white rounded-xl py-3 text-[14px] font-medium">
             Fazer outro pedido
@@ -258,7 +297,11 @@ export default function Requisicao({ token, unidadeParam }) {
         {/* ---- quando ---- */}
         <div className="bg-white rounded-2xl p-4">
           <p className="text-[13px] font-medium text-slate-900 mb-1">A partir de quando?</p>
-          <p className="text-[11.5px] text-slate-500 mb-2">Pedidos com pelo menos 48 horas de antecedência: o sindicato precisa de dois dias para montar a escala e avisar os trabalhadores.</p>
+          <p className="text-[11.5px] text-slate-500 mb-2">
+            O combinado é pedir com pelo menos 48 horas de antecedência — é o tempo de organizar a
+            logística e conferir documentos, treinamentos e exames. Pedido mais em cima da hora
+            também entra; o sindicato faz o possível.
+          </p>
           <div className="flex gap-2 mb-2 flex-wrap">
             {[["Hoje", hoje()], ["Amanhã", maisDias(1)], ["Segunda", proximaSegunda()]].map(([r, v]) => (
               <button key={r} onClick={() => setInicio(v)}
@@ -267,8 +310,17 @@ export default function Requisicao({ token, unidadeParam }) {
                                : "bg-white text-slate-600 border-slate-300"}`}>{r}</button>
             ))}
           </div>
-          <input type="date" value={inicio} min={maisDias(2)} onChange={(e) => setInicio(e.target.value)}
+          <input type="date" value={inicio} min={hoje()} onChange={(e) => setInicio(e.target.value)}
             className="w-full border border-slate-300 rounded-xl px-4 py-3 text-[15px]" />
+          {curtoPrazo && (
+            <div className="mt-2 bg-amber-50 border border-amber-200 rounded-xl p-3">
+              <p className="text-[12px] text-amber-900 leading-relaxed">
+                <b>Menos de 48 horas.</b> O pedido entra como urgente e pode não dar tempo de montar
+                a escala e conferir documentos, treinamentos e exames. Se a data estiver certa, pode
+                enviar assim mesmo — e avise o sindicato por telefone também.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* ---- quem está pedindo ---- */}
@@ -397,6 +449,12 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
   const [erro, setErro] = useState("");
   const [copiado, setCopiado] = useState("");
 
+  /* Cancelamento com motivo (14/09) */
+  const [cancelando, setCancelando] = useState(null); // id da requisição
+  const [motivo, setMotivo] = useState("");
+  const [observacao, setObservacao] = useState("");
+  const [salvandoCancel, setSalvandoCancel] = useState(false);
+
   async function carregar() {
     try {
       const [r, l] = await Promise.all([
@@ -415,6 +473,24 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
       await gravar(`/requisicoes/${id}`, token, { status }, "PATCH");
       await carregar();
     } catch (e) { setErro(e.message); }
+  }
+
+  function abrirCancelamento(id) {
+    setCancelando(id); setMotivo(""); setObservacao(""); setErro("");
+  }
+
+  function fecharCancelamento() {
+    setCancelando(null); setMotivo(""); setObservacao("");
+  }
+
+  async function confirmarCancelamento(id) {
+    setSalvandoCancel(true); setErro("");
+    try {
+      await gravar(`/requisicoes/${id}`, token,
+        { status: "cancelada", motivo, observacao }, "PATCH");
+      fecharCancelamento();
+      await carregar();
+    } catch (e) { setErro(e.message); } finally { setSalvandoCancel(false); }
   }
 
   const universal = links.find((l) => !l.unidade_codigo);
@@ -502,6 +578,11 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
                 {r.observacoes && (
                   <p className="text-[12px] text-slate-600 mt-1.5 italic">"{r.observacoes}"</p>
                 )}
+                {(r.status === "cancelada" || r.status === "atendida") && r.atendida_obs && (
+                  <p className="text-[11.5px] text-slate-500 mt-1.5">
+                    <span className="text-slate-400">Motivo:</span> {r.atendida_obs}
+                  </p>
+                )}
               </div>
 
               <div className="text-right shrink-0">
@@ -518,7 +599,7 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
               </div>
             </div>
 
-            {podeEditar && r.status !== "atendida" && r.status !== "cancelada" && (
+            {podeEditar && r.status !== "atendida" && r.status !== "cancelada" && cancelando !== r.id && (
               <div className="flex gap-2 mt-3 flex-wrap">
                 {r.status === "aberta" && (
                   <button onClick={() => mudar(r.id, "em_atendimento")}
@@ -530,10 +611,51 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
                   className="px-3 py-1.5 rounded-lg text-[12px] bg-emerald-600 text-white">
                   Marcar atendida
                 </button>
-                <button onClick={() => mudar(r.id, "cancelada")}
+                <button onClick={() => abrirCancelamento(r.id)}
                   className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600">
                   Cancelar
                 </button>
+              </div>
+            )}
+
+            {podeEditar && cancelando === r.id && (
+              <div className="mt-3 bg-slate-50 border border-slate-200 rounded-xl p-3">
+                <p className="text-[12.5px] font-medium text-slate-800">Por que está cancelando?</p>
+                <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                  O pedido não é apagado: ele fica no arquivo com o motivo. Engano e duplicado ficam
+                  de fora da estatística de urgência; "não precisa mais" continua contando.
+                </p>
+                <div className="mt-2.5 space-y-1.5">
+                  {MOTIVOS_CANCELAMENTO.map(([codigo, rotulo]) => (
+                    <button key={codigo} onClick={() => setMotivo(codigo)}
+                      className={`w-full text-left px-3 py-2 rounded-lg text-[12.5px] border ${
+                        motivo === codigo ? "bg-slate-900 text-white border-slate-900"
+                                          : "bg-white text-slate-600 border-slate-200"}`}>
+                      {rotulo}
+                    </button>
+                  ))}
+                </div>
+
+                {motivo && (
+                  <textarea value={observacao} onChange={(e) => setObservacao(e.target.value)} rows={2}
+                    placeholder={motivo === "outro"
+                      ? "Escreva o motivo (obrigatório)"
+                      : "Quer acrescentar alguma coisa? (opcional)"}
+                    className="mt-2.5 w-full border border-slate-200 rounded-lg px-3 py-2 text-[12.5px]" />
+                )}
+
+                <div className="flex gap-2 mt-2.5 flex-wrap">
+                  <button onClick={() => confirmarCancelamento(r.id)}
+                    disabled={!motivo || salvandoCancel ||
+                              (motivo === "outro" && observacao.trim().length < 5)}
+                    className="px-3 py-1.5 rounded-lg text-[12px] bg-slate-900 text-white disabled:opacity-40">
+                    {salvandoCancel ? "Cancelando…" : "Confirmar cancelamento"}
+                  </button>
+                  <button onClick={fecharCancelamento}
+                    className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600">
+                    Voltar
+                  </button>
+                </div>
               </div>
             )}
           </div>
