@@ -5,22 +5,48 @@ const { autenticar } = require('../middlewares/auth');
 const router = express.Router();
 router.use(autenticar);
 
-const DIAS_ATIVO = 14;        // trabalhador ativo = movimento nas ultimas duas semanas
-const DIAS_POR_MES = 5;       // bloco de segunda a sexta: cabe em quase todo destino vivo
-const MESES_A_FRENTE = 6;     // quantos meses declarados o painel projeta
-const DIAS_UNIDADE_ATIVA = 5; // unidade viva = movimento nos ultimos 5 dias
+/* 15/09/2026 — CRITERIOS SAIRAM DO CODIGO.
+   DIAS_ATIVO, DIAS_POR_MES, DIAS_UNIDADE_ATIVA e MESES_A_FRENTE eram
+   constantes aqui dentro. Agora vivem em `parametros` e sao lidos de
+   v_janela a cada pedido (`criterios()`), para que cada sindicato
+   tenha os seus e para que toda mudanca fique no historico.
 
-/* Tudo e medido a partir do ULTIMO DIA APURADO, nunca da data de hoje:
-   a apuracao chega com semanas de atraso e o parque pareceria morto. */
+   "Ativo" tambem mudou de lugar: antes a mv_relogio marcava 60 dias e o
+   painel aplicava 14 por cima. Agora a regua e uma so (dias_ativo),
+   calculada na mv_relogio e contada do FIM DA JANELA — com a janela
+   congelada, contar do ultimo dia apurado zeraria o painel de novo. */
+
+/* Unidade viva continua ancorada no ULTIMO DIA APURADO: e uma pergunta
+   sobre destino de hoje, nao sobre a janela. */
 const ANC = '(select max(data) from apuracao_dia)';
 
-const ativoEm = (a) =>
-  `${a ? a + '.' : ''}ultimo_dia > ${ANC} - ${DIAS_ATIVO}`;
-const ATIVO = ativoEm('');
+const n = (x) => Math.trunc(Number(x)) || 0;
+
+async function criterios() {
+  const { rows: [p] } = await consulta('select * from v_janela limit 1');
+  if (!p) throw new Error('Criterios do sindicato nao encontrados');
+  return p;
+}
+
+/* O usuario ja foi validado pelo `autenticar`; aqui so lemos o conteudo
+   do token (nome, usuario, perfil) para gravar autoria. */
+function quemPede(req) {
+  if (req.usuario && typeof req.usuario === 'object') return req.usuario;
+  if (req.user && typeof req.user === 'object') return req.user;
+  try {
+    const t = String(req.headers.authorization || '').split(' ')[1] || '';
+    return JSON.parse(Buffer.from(t.split('.')[1], 'base64url').toString('utf8'));
+  } catch (e) { return {}; }
+}
+const nomeDe = (u) => u.nome || u.usuario || 'admin';
+
+/* Erro vindo de RAISE EXCEPTION (P0001) ou de CHECK (23514) e mensagem
+   para a tela, nao erro de servidor. */
+const erroDeRegra = (e) => e && (e.code === 'P0001' || e.code === '23514');
 
 /* Quem esta vivo. Unidade morta nao serve de destino de rodizio —
    nao adianta ter 250 cadastradas se so 115 tem gente. */
-const VIVOS = `
+const vivos = (p) => `
   ult_unidade as (
     select u.id, u.local_id, max(a.data) as ultimo
       from unidades u
@@ -33,12 +59,12 @@ const VIVOS = `
   setores_vivos as (
     select local_id, count(*)::int as n
       from ult_unidade
-     where ultimo > ${ANC} - ${DIAS_UNIDADE_ATIVA}
+     where ultimo > ${ANC} - ${n(p.dias_unidade_ativa)}
      group by local_id
   ),
   local_vivo as (
     select l.id,
-           coalesce(ul.ultimo > ${ANC} - ${DIAS_UNIDADE_ATIVA}, false) as vivo,
+           coalesce(ul.ultimo > ${ANC} - ${n(p.dias_unidade_ativa)}, false) as vivo,
            ul.ultimo,
            (${ANC} - ul.ultimo)::int as dias_parado
       from locais l
@@ -62,16 +88,22 @@ const VIZINHANCA = `
       from locais l
   )`;
 
+const regrasDe = (p) => ({
+  dias_ativo:         n(p.dias_ativo),
+  dias_por_mes:       n(p.dias_por_mes),
+  dias_unidade_ativa: n(p.dias_unidade_ativa),
+  meses_a_frente:     n(p.meses_a_frente),
+  tipo_meta:          p.tipo_meta,
+  meta_dias:          n(p.meta_dias),
+});
+
 /* ------------------------------------------------------------------
  * GET /painel/resumo
  * ---------------------------------------------------------------- */
 router.get('/resumo', async (req, res, next) => {
   try {
-    const { rows: [janela] } = await consulta(`
-      select janela_inicio, janela_fim, percentual, isencao_dias,
-             teto_dias, carencia_antes, carencia_depois, congelado
-        from v_janela limit 1
-    `);
+    const p = await criterios();
+    const dpm = n(p.dias_por_mes);
 
     const { rows: [ativos] } = await consulta(`
       select count(*)::int                                                    as ativos,
@@ -79,14 +111,13 @@ router.get('/resumo', async (req, res, next) => {
              count(*) filter (where perfil = 'permanente' and falta > 0)::int as precisam,
              count(*) filter (where perfil = 'permanente' and falta = 0)::int as em_dia,
              coalesce(sum(falta) filter (where perfil = 'permanente'),0)::int as dias_a_cumprir
-        from v_situacao where ${ATIVO}
+        from v_situacao where ativo
     `);
 
-    /* A fila agora sabe distinguir tres saidas:
-       nivel 1 (outro setor no mesmo local), outro local na mesma cidade,
-       e o que sobra — que e o unico que exige carro. */
+    /* A fila distingue tres saidas: nivel 1 (outro setor no mesmo local),
+       outro local na mesma cidade, e o que sobra — que exige carro. */
     const { rows: [fixos] } = await consulta(`
-      with ${VIVOS}, ${VIZINHANCA},
+      with ${vivos(p)}, ${VIZINHANCA},
       f as (
         select fx.falta,
                coalesce(sv.n, 0)                  as setores_vivos,
@@ -96,15 +127,14 @@ router.get('/resumo', async (req, res, next) => {
           left join locais        l  on l.id = fx.local_base_id
           left join setores_vivos sv on sv.local_id = l.id
           left join viz           v  on v.local_id  = l.id
-         where ${ativoEm('fx')}
       )
       select count(*)::int as pessoas,
              coalesce(sum(falta),0)::int as dias_a_cumprir,
-             coalesce(sum(ceil(falta::numeric / ${DIAS_POR_MES})),0)::int as semanas,
+             coalesce(sum(ceil(falta::numeric / ${dpm})),0)::int as semanas,
              count(*) filter (where setores_vivos > 1)::int                        as com_nivel_1,
              count(*) filter (where setores_vivos <= 1 and lmc > 0)::int           as mesma_cidade,
              count(*) filter (where setores_vivos <= 1 and lmc = 0)::int           as precisa_transporte,
-             coalesce(sum(ceil(falta::numeric / ${DIAS_POR_MES}))
+             coalesce(sum(ceil(falta::numeric / ${dpm}))
                       filter (where setores_vivos <= 1 and lmc = 0),0)::int        as semanas_transporte,
              count(*) filter (where setores_no_local > 1 and setores_vivos <= 1)::int as nivel_1_perdido
         from f
@@ -118,22 +148,16 @@ router.get('/resumo', async (req, res, next) => {
              (select count(*) from apuracao_dia)::int                     as lancamentos,
              (select to_char(min(data),'MM/YYYY') from apuracao_dia)      as primeiro_mes,
              (select to_char(max(data),'MM/YYYY') from apuracao_dia)      as ultimo_mes,
+             (select max(data) from apuracao_dia)                         as ultimo_dia_apurado,
              (select count(*) from v_local_ponto where fonte = 'mapa')::int      as locais_com_ponto,
              (select count(*) from v_local_ponto where latitude is null)::int    as locais_sem_ponto,
              (select count(distinct u.id) from unidades u join apuracao_dia a on a.unidade_id = u.id
-               where a.data > ${ANC} - ${DIAS_UNIDADE_ATIVA})::int               as unidades_vivas,
+               where a.data > ${ANC} - ${n(p.dias_unidade_ativa)})::int          as unidades_vivas,
              (select count(distinct u.local_id) from unidades u join apuracao_dia a on a.unidade_id = u.id
-               where a.data > ${ANC} - ${DIAS_UNIDADE_ATIVA})::int               as locais_vivos
+               where a.data > ${ANC} - ${n(p.dias_unidade_ativa)})::int          as locais_vivos
     `);
 
-    res.json({
-      janela, ativos, fixos, base,
-      regras: {
-        dias_ativo: DIAS_ATIVO,
-        dias_por_mes: DIAS_POR_MES,
-        dias_unidade_ativa: DIAS_UNIDADE_ATIVA,
-      },
-    });
+    res.json({ janela: p, ativos, fixos, base, regras: regrasDe(p) });
   } catch (e) { next(e); }
 });
 
@@ -142,24 +166,25 @@ router.get('/resumo', async (req, res, next) => {
  * ---------------------------------------------------------------- */
 router.get('/trabalhadores', async (req, res, next) => {
   const filtros = {
-    ativos:      ATIVO,
-    obrigados:   `${ATIVO} and perfil = 'permanente'`,
-    precisam:    `${ATIVO} and perfil = 'permanente' and falta > 0`,
-    em_dia:      `${ATIVO} and perfil = 'permanente' and falta = 0`,
-    safristas:   `${ATIVO} and perfil = 'safrista'`,
-    isentos:     `${ATIVO} and perfil = 'isento'`,
+    ativos:      'ativo',
+    obrigados:   "ativo and perfil = 'permanente'",
+    precisam:    "ativo and perfil = 'permanente' and falta > 0",
+    em_dia:      "ativo and perfil = 'permanente' and falta = 0",
+    safristas:   "ativo and perfil = 'safrista'",
+    isentos:     "ativo and perfil = 'isento'",
     cadastrados: 'true',
   };
   const onde = filtros[req.query.grupo];
   if (!onde) return res.status(400).json({ error: 'Grupo desconhecido' });
 
   try {
+    const p = await criterios();
     const { rows } = await consulta(`
       select codigo, nome, local_base, dias, dias_entressafra, dias_fora,
              meta, falta, perfil, situacao, ultimo_dia,
              round(pct_no_local_base)::int as pct_no_local_base,
              meses_com_movimento,
-             ceil(falta::numeric / ${DIAS_POR_MES})::int as semanas
+             ceil(falta::numeric / ${n(p.dias_por_mes)})::int as semanas
         from v_situacao
        where ${onde}
        order by dias desc
@@ -204,16 +229,15 @@ router.get('/curva', async (req, res, next) => {
  * GET /painel/safra
  * Devolve TRES coisas:
  *   tipico   — media de cada mes em todos os anos do arquivo.
- *              Responde "como e um janeiro tipico" e serve para
- *              declarar o calendario.
  *   recente  — os ultimos 12 meses de verdade, a partir do ultimo dia
- *              apurado. Responde "como foi este ano" e e onde uma
- *              safra curta aparece.
- *   aFrente  — os proximos meses pelo calendario declarado, com os
- *              dias de entressafra que ainda vao acontecer.
+ *              apurado.
+ *   aFrente  — os proximos meses pelo calendario declarado.
  * ---------------------------------------------------------------- */
 router.get('/safra', async (req, res, next) => {
   try {
+    const p = await criterios();
+    const horizonte = n(p.meses_a_frente);
+
     const { rows: tipico } = await consulta(`
       with declarado as (
         select mes, bool_or(em_safra) as em_safra
@@ -264,7 +288,7 @@ router.get('/safra', async (req, res, next) => {
       with anc as (select date_trunc('month', janela_fim)::date as fim from v_janela limit 1),
       m as (
         select generate_series((select fim from anc) + interval '1 month',
-                               (select fim from anc) + interval '${MESES_A_FRENTE} months',
+                               (select fim from anc) + interval '${horizonte} months',
                                interval '1 month')::date as inicio
       ),
       declarado as (
@@ -296,7 +320,7 @@ router.get('/safra', async (req, res, next) => {
       restantes: {
         meses: entressafraAFrente.length,
         dias: entressafraAFrente.reduce((a, m) => a + m.dias, 0),
-        horizonte: MESES_A_FRENTE,
+        horizonte,
       },
     });
   } catch (e) { next(e); }
@@ -322,28 +346,158 @@ router.put('/safra', async (req, res, next) => {
 });
 
 /* ------------------------------------------------------------------
+ * CRITERIOS — GET /painel/criterios
+ *             PUT /painel/criterios              (gestor e admin)
+ *             POST /painel/criterios/congelar    (gestor e admin)
+ *             POST /painel/criterios/descongelar (so admin)
+ *
+ * Toda gravacao exige motivo. O gatilho do banco e quem grava o
+ * historico e quem recusa alteracao com criterios congelados — a tela
+ * so mostra a mensagem que vier de la.
+ * ---------------------------------------------------------------- */
+const CAMPOS_CRITERIO = {
+  percentual:         'numeric',
+  isencao_dias:       'int',
+  teto_dias:          'int',
+  tipo_meta:          'texto',
+  meta_dias:          'int',
+  dias_ativo:         'int',
+  dias_por_mes:       'int',
+  dias_unidade_ativa: 'int',
+  meses_a_frente:     'int',
+};
+
+async function lerCriterios() {
+  const atual = await criterios();
+  const { rows: historico } = await consulta(`
+    select id, evento, campo, valor_anterior, valor_novo, alterado_por, alterado_em, motivo
+      from criterios_historico
+     where sindicato_id = $1
+     order by alterado_em desc
+     limit 300
+  `, [atual.sindicato_id]);
+  const { rows: [{ ultimo_dia_apurado }] } = await consulta(`select max(data) as ultimo_dia_apurado from apuracao_dia`);
+  return { atual, historico, ultimo_dia_apurado };
+}
+
+router.get('/criterios', async (req, res, next) => {
+  try { res.json(await lerCriterios()); } catch (e) { next(e); }
+});
+
+router.put('/criterios', async (req, res, next) => {
+  try {
+    const corpo = req.body || {};
+    const motivo = String(corpo.motivo || '').trim();
+    if (motivo.length < 5) return res.status(400).json({ error: 'Informe o motivo da alteracao (5 caracteres ou mais).' });
+
+    const sets = [];
+    const valores = [];
+    for (const [campo, tipo] of Object.entries(CAMPOS_CRITERIO)) {
+      if (!(campo in corpo)) continue;
+      let v = corpo[campo];
+      if (tipo === 'int') {
+        v = Number(v);
+        if (!Number.isInteger(v)) return res.status(400).json({ error: `${campo}: informe um numero inteiro.` });
+      } else if (tipo === 'numeric') {
+        v = Number(String(v).replace(',', '.'));
+        if (!Number.isFinite(v)) return res.status(400).json({ error: `${campo}: informe um numero.` });
+      } else if (campo === 'tipo_meta' && !['percentual', 'dias'].includes(v)) {
+        return res.status(400).json({ error: 'tipo_meta: use "percentual" ou "dias".' });
+      }
+      valores.push(v);
+      sets.push(`${campo} = $${valores.length}`);
+    }
+    if (!sets.length) return res.status(400).json({ error: 'Nenhum criterio informado.' });
+
+    valores.push(nomeDe(quemPede(req)), motivo);
+    sets.push(`alterado_por = $${valores.length - 1}`, `alterado_motivo = $${valores.length}`);
+
+    const { rows: [p] } = await consulta(`
+      update parametros set ${sets.join(', ')}
+       where id = (select id from v_janela limit 1)
+      returning id
+    `, valores);
+    if (!p) return res.status(404).json({ error: 'Criterios nao encontrados.' });
+
+    await consulta('select recalcular_relogio()');
+    res.json(await lerCriterios());
+  } catch (e) {
+    if (erroDeRegra(e)) return res.status(409).json({ error: e.message });
+    next(e);
+  }
+});
+
+/* Congelar guarda a janela do momento em parametros: a partir dai a
+   v_janela passa a ler as datas gravadas em vez de acompanhar a
+   apuracao. */
+router.post('/criterios/congelar', async (req, res, next) => {
+  try {
+    const motivo = String((req.body || {}).motivo || '').trim();
+    if (motivo.length < 5) return res.status(400).json({ error: 'Informe o motivo do congelamento (5 caracteres ou mais).' });
+    const { rows: [p] } = await consulta(`
+      update parametros pa
+         set congelado = true,
+             janela_inicio = j.janela_inicio,
+             janela_fim = j.janela_fim,
+             alterado_por = $1,
+             alterado_motivo = $2
+        from v_janela j
+       where pa.id = j.id and pa.congelado = false
+      returning pa.id
+    `, [nomeDe(quemPede(req)), motivo]);
+    if (!p) return res.status(409).json({ error: 'Os criterios ja estao congelados.' });
+    await consulta('select recalcular_relogio()');
+    res.json(await lerCriterios());
+  } catch (e) {
+    if (erroDeRegra(e)) return res.status(409).json({ error: e.message });
+    next(e);
+  }
+});
+
+router.post('/criterios/descongelar', async (req, res, next) => {
+  try {
+    const eu = quemPede(req);
+    if (eu.perfil !== 'admin') return res.status(403).json({ error: 'So o administrador pode descongelar os criterios.' });
+    const motivo = String((req.body || {}).motivo || '').trim();
+    if (motivo.length < 5) return res.status(400).json({ error: 'Informe o motivo (5 caracteres ou mais).' });
+    const { rows: [p] } = await consulta(`
+      update parametros
+         set congelado = false, alterado_por = $1, alterado_motivo = $2
+       where id = (select id from v_janela limit 1) and congelado = true
+      returning id
+    `, [nomeDe(eu), motivo]);
+    if (!p) return res.status(409).json({ error: 'Os criterios nao estao congelados.' });
+    await consulta('select recalcular_relogio()');
+    res.json(await lerCriterios());
+  } catch (e) {
+    if (erroDeRegra(e)) return res.status(409).json({ error: e.message });
+    next(e);
+  }
+});
+
+/* ------------------------------------------------------------------
  * GET /painel/fila
  * ---------------------------------------------------------------- */
 router.get('/fila', async (req, res, next) => {
   try {
+    const p = await criterios();
     const { rows } = await consulta(`
-      with ${VIVOS}, ${VIZINHANCA}
+      with ${vivos(p)}, ${VIZINHANCA}
       select f.codigo, f.nome, f.local_base, f.dias, f.dias_entressafra, f.dias_fora,
              f.meta, f.falta, round(f.pct_no_local_base)::int as pct_no_local_base,
              f.meses_com_movimento, f.setores_no_local, f.ultimo_dia,
-             ceil(f.falta::numeric / ${DIAS_POR_MES})::int as semanas,
+             ceil(f.falta::numeric / ${n(p.dias_por_mes)})::int as semanas,
              coalesce(sv.n, 0)::int                         as setores_vivos,
              (coalesce(sv.n, 0) > 1)                        as tem_nivel_1,
-             p.cidade,
-             p.aproximada                                   as ponto_aproximado,
+             pt.cidade,
+             pt.aproximada                                  as ponto_aproximado,
              coalesce(v.locais_mesma_cidade, 0)::int        as locais_mesma_cidade,
              v.km_mais_proximo
         from v_fila_fixos f
         left join locais        l  on l.id = f.local_base_id
-        left join v_local_ponto p  on p.id   = l.id
+        left join v_local_ponto pt on pt.id  = l.id
         left join setores_vivos sv on sv.local_id = l.id
         left join viz           v  on v.local_id  = l.id
-       where ${ativoEm('f')}
        order by f.dias desc
        limit 500
     `);
@@ -353,28 +507,28 @@ router.get('/fila', async (req, res, next) => {
 
 /* ------------------------------------------------------------------
  * GET /painel/locais
- * Agora lista TODOS os locais, tenham ou nao gente na fila —
+ * Lista TODOS os locais, tenham ou nao gente na fila —
  * a tela de definir o ponto no mapa precisa de todos.
  * ---------------------------------------------------------------- */
 router.get('/locais', async (req, res, next) => {
   try {
+    const p = await criterios();
     const { rows } = await consulta(`
-      with ${VIVOS}, ${VIZINHANCA},
+      with ${vivos(p)}, ${VIZINHANCA},
       fila as (
         select local_base_id,
-               count(*)::int                                       as pessoas,
-               sum(falta)::int                                     as dias_a_cumprir,
-               max(setores_no_local)::int                          as setores_fila,
-               sum(ceil(falta::numeric / ${DIAS_POR_MES}))::int    as semanas
+               count(*)::int                                            as pessoas,
+               sum(falta)::int                                          as dias_a_cumprir,
+               max(setores_no_local)::int                               as setores_fila,
+               sum(ceil(falta::numeric / ${n(p.dias_por_mes)}))::int    as semanas
           from v_fila_fixos
-         where ${ATIVO}
          group by local_base_id
       ),
       setores as (
         select local_id, count(*)::int as setores from unidades group by local_id
       )
-      select p.id, p.nome as local_base, p.cidade, p.municipio,
-             p.latitude, p.longitude, p.fonte, p.aproximada,
+      select pt.id, pt.nome as local_base, pt.cidade, pt.municipio,
+             pt.latitude, pt.longitude, pt.fonte, pt.aproximada,
              coalesce(f.pessoas, 0)                     as pessoas,
              coalesce(f.dias_a_cumprir, 0)              as dias_a_cumprir,
              coalesce(f.setores_fila, s.setores, 0)     as setores,
@@ -383,13 +537,13 @@ router.get('/locais', async (req, res, next) => {
              coalesce(v.locais_mesma_cidade, 0)::int    as locais_mesma_cidade,
              v.km_mais_proximo,
              lv.vivo, lv.ultimo as ultimo_movimento, lv.dias_parado
-        from v_local_ponto p
-        left join fila          f  on f.local_base_id = p.id
-        left join viz           v  on v.local_id   = p.id
-        left join setores       s  on s.local_id   = p.id
-        left join setores_vivos sv on sv.local_id  = p.id
-        left join local_vivo    lv on lv.id        = p.id
-       order by lv.vivo desc nulls last, coalesce(f.pessoas,0) desc, p.nome
+        from v_local_ponto pt
+        left join fila          f  on f.local_base_id = pt.id
+        left join viz           v  on v.local_id   = pt.id
+        left join setores       s  on s.local_id   = pt.id
+        left join setores_vivos sv on sv.local_id  = pt.id
+        left join local_vivo    lv on lv.id        = pt.id
+       order by lv.vivo desc nulls last, coalesce(f.pessoas,0) desc, pt.nome
     `);
     res.json(rows);
   } catch (e) { next(e); }
@@ -398,9 +552,6 @@ router.get('/locais', async (req, res, next) => {
 /* ------------------------------------------------------------------
  * PUT /painel/local/:id/ponto
  * Recebe o que a pessoa colou do Google Maps e extrai a coordenada.
- * Aceita "-24.9555, -53.4552" (botao direito no pino copia assim)
- * ou um endereco completo do maps com @lat,lon ou !3d..!4d..
- * Texto vazio limpa o ponto e volta ao centroide do municipio.
  * ---------------------------------------------------------------- */
 function extrairCoordenada(texto) {
   const t = String(texto || '').trim();
@@ -434,8 +585,8 @@ router.put('/local/:id/ponto', async (req, res, next) => {
          where id = $1 returning id
       `, [req.params.id]);
       if (!l) return res.status(404).json({ error: 'Local nao encontrado' });
-      const { rows: [p] } = await consulta('select * from v_local_ponto where id = $1', [l.id]);
-      return res.json(p);
+      const { rows: [pt] } = await consulta('select * from v_local_ponto where id = $1', [l.id]);
+      return res.json(pt);
     }
 
     const c = extrairCoordenada(texto);
@@ -461,8 +612,8 @@ router.put('/local/:id/ponto', async (req, res, next) => {
     `, [req.params.id, c.lat, c.lon]);
     if (!l) return res.status(404).json({ error: 'Local nao encontrado' });
 
-    const { rows: [p] } = await consulta('select * from v_local_ponto where id = $1', [l.id]);
-    res.json(p);
+    const { rows: [pt] } = await consulta('select * from v_local_ponto where id = $1', [l.id]);
+    res.json(pt);
   } catch (e) { next(e); }
 });
 
@@ -471,8 +622,9 @@ router.put('/local/:id/ponto', async (req, res, next) => {
  * ---------------------------------------------------------------- */
 router.get('/local/:id/vizinhos', async (req, res, next) => {
   try {
+    const p = await criterios();
     const { rows } = await consulta(`
-      with ${VIVOS}
+      with ${vivos(p)}
       select d.destino_id, d.destino_nome, d.destino_cidade,
              d.mesma_cidade, d.km, d.km_aproximado,
              lv.vivo, lv.dias_parado
@@ -568,24 +720,6 @@ router.get('/trabalhador/:codigo', async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-/* ------------------------------------------------------------------
- * PATCH /painel/regra
- * ---------------------------------------------------------------- */
-router.patch('/regra', async (req, res, next) => {
-  try {
-    const { percentual, isencao_dias, teto_dias } = req.body || {};
-    const { rows: [p] } = await consulta(`
-      update parametros set
-        percentual   = coalesce($1, percentual),
-        isencao_dias = coalesce($2, isencao_dias),
-        teto_dias    = coalesce($3, teto_dias)
-       where id = (select id from v_janela limit 1) and congelado = false
-      returning percentual, isencao_dias, teto_dias, congelado
-    `, [percentual, isencao_dias, teto_dias]);
-    if (!p) return res.status(409).json({ error: 'Janela congelada — regra nao pode ser alterada' });
-    await consulta('select recalcular_relogio()');
-    res.json(p);
-  } catch (e) { next(e); }
-});
+/* PATCH /painel/regra foi substituido por PUT /painel/criterios. */
 
 module.exports = router;

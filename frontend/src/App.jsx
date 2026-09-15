@@ -63,6 +63,8 @@ async function gravar(caminho, token, corpo, metodo = "PUT") {
 }
 
 const dataBR = (d) => (d ? new Date(d).toLocaleDateString("pt-BR") : "");
+const dataHoraBR = (d) =>
+  d ? new Date(d).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
 
 /* O perfil vem dentro do proprio token, entao sobrevive a recarga da
    pagina sem precisar guardar nada a mais. */
@@ -565,6 +567,367 @@ function Safra({ token, aoAtualizar, podeEditar }) {
   );
 }
 
+/* ------------------------------------------------------------------
+ * CRITÉRIOS — 15/09/2026
+ * Tudo que decide "quem está em dia" vive na tabela `parametros` e é
+ * editado aqui. Cada gravação exige motivo; o banco grava o histórico
+ * e recusa alteração enquanto os critérios estiverem congelados.
+ * ---------------------------------------------------------------- */
+const CRITERIOS = [
+  {
+    campo: "dias_ativo", rotulo: "Dias para considerar ativo", unidade: "dias", min: 1, max: 365,
+    ajuda: "Quem teve ao menos um dia apurado nesse intervalo, contado do fim da janela, entra no rodízio. Quem não teve fica de fora da conta.",
+  },
+  {
+    campo: "isencao_dias", rotulo: "Isenção", unidade: "dias de entressafra", min: 0, max: 365,
+    ajuda: "Abaixo disso a pessoa é isenta: trabalhou pouco na entressafra e não tem obrigação de rodar.",
+  },
+  {
+    campo: "tipo_meta", rotulo: "Como a meta é calculada", tipo: "opcao",
+    opcoes: [
+      ["percentual", "Percentual dos dias de entressafra"],
+      ["dias", "Número fixo de dias"],
+    ],
+    ajuda: "Percentual acompanha quanto cada pessoa trabalhou; número fixo cobra o mesmo de todos os obrigados.",
+  },
+  {
+    campo: "percentual", rotulo: "Percentual", unidade: "% dos dias de entressafra", min: 1, max: 100, decimal: true, so: "percentual",
+    ajuda: "A meta de cada pessoa é esta fatia dos dias que ela trabalhou na entressafra dentro da janela.",
+  },
+  {
+    campo: "teto_dias", rotulo: "Teto", unidade: "dias", min: 1, max: 365, so: "percentual",
+    ajuda: "A meta percentual nunca passa disto, por mais dias que a pessoa tenha trabalhado.",
+  },
+  {
+    campo: "meta_dias", rotulo: "Meta fixa", unidade: "dias fora da base", min: 1, max: 365, so: "dias",
+    ajuda: "Todo obrigado precisa deste número de dias fora da unidade-base na janela.",
+  },
+  {
+    campo: "dias_por_mes", rotulo: "Bloco de rodízio", unidade: "dias por mês", min: 1, max: 31,
+    ajuda: "Permanência máxima fora da base por mês. É o que converte dias que faltam em semanas de rodízio.",
+  },
+  {
+    campo: "dias_unidade_ativa", rotulo: "Unidade viva", unidade: "dias", min: 1, max: 365,
+    ajuda: "Unidade com gente nesse intervalo, contado do último dia apurado, serve de destino. Unidade parada não.",
+  },
+  {
+    campo: "meses_a_frente", rotulo: "Projeção da Safra", unidade: "meses", min: 1, max: 12,
+    ajuda: "Quantos meses o bloco \"o que vem pela frente\" mostra na aba Safra.",
+  },
+];
+const ROTULO_CAMPO = Object.fromEntries(CRITERIOS.map((c) => [c.campo, c.rotulo]));
+ROTULO_CAMPO.janela = "Janela";
+ROTULO_CAMPO.congelado = "Congelamento";
+ROTULO_CAMPO.carencia_antes = "Carência antes da safra";
+ROTULO_CAMPO.carencia_depois = "Carência depois da safra";
+ROTULO_CAMPO.meia_diaria_conta = "Meia diária conta";
+ROTULO_CAMPO.prazo_envio_dia = "Prazo de envio";
+
+function valorLegivel(campo, v) {
+  if (v == null) return "—";
+  if (campo === "tipo_meta") return v === "dias" ? "número fixo de dias" : "percentual";
+  if (campo === "percentual") return `${Number(v)}%`;
+  return String(v);
+}
+
+function Criterios({ token, aoAtualizar, podeEditar, souAdmin }) {
+  const [dados, setDados] = useState(null);
+  const [erro, setErro] = useState("");
+  const [form, setForm] = useState({});
+  const [motivo, setMotivo] = useState("");
+  const [motivoGelo, setMotivoGelo] = useState("");
+  const [geloAberto, setGeloAberto] = useState(false);
+  const [salvando, setSalvando] = useState(false);
+  const [aviso, setAviso] = useState("");
+
+  const aplicar = (d) => {
+    setDados(d);
+    const f = {};
+    CRITERIOS.forEach((c) => { f[c.campo] = d.atual[c.campo]; });
+    setForm(f);
+  };
+
+  useEffect(() => {
+    pedir("/painel/criterios", token).then(aplicar).catch((e) => setErro(e.message));
+  }, [token]);
+
+  const a = dados?.atual;
+  const congelado = !!a?.congelado;
+  const travado = !podeEditar || congelado;
+
+  const mudancas = useMemo(() => {
+    if (!a) return [];
+    return CRITERIOS.filter((c) => {
+      if (c.so && form.tipo_meta !== c.so) return false;
+      return String(form[c.campo] ?? "") !== String(a[c.campo] ?? "");
+    });
+  }, [form, a]);
+
+  const invalido = useMemo(() => {
+    return CRITERIOS.find((c) => {
+      if (c.tipo === "opcao") return false;
+      if (c.so && form.tipo_meta !== c.so) return false;
+      const v = Number(String(form[c.campo] ?? "").replace(",", "."));
+      if (!Number.isFinite(v)) return true;
+      if (!c.decimal && !Number.isInteger(v)) return true;
+      return v < c.min || v > c.max;
+    });
+  }, [form]);
+
+  async function salvar() {
+    setSalvando(true); setErro(""); setAviso("");
+    try {
+      const corpo = { motivo };
+      mudancas.forEach((c) => { corpo[c.campo] = form[c.campo]; });
+      const d = await gravar("/painel/criterios", token, corpo);
+      aplicar(d); setMotivo("");
+      if (aoAtualizar) await aoAtualizar();
+      setAviso(`${mudancas.length} ${mudancas.length === 1 ? "critério gravado" : "critérios gravados"}, relógio recalculado e painel atualizado.`);
+    } catch (e) { setErro(e.message); } finally { setSalvando(false); }
+  }
+
+  async function congelar(descongelar = false) {
+    setSalvando(true); setErro(""); setAviso("");
+    try {
+      const d = await gravar(`/painel/criterios/${descongelar ? "descongelar" : "congelar"}`, token, { motivo: motivoGelo }, "POST");
+      aplicar(d); setMotivoGelo(""); setGeloAberto(false);
+      if (aoAtualizar) await aoAtualizar();
+      setAviso(descongelar
+        ? "Critérios descongelados. A janela volta a acompanhar a apuração."
+        : "Critérios congelados. A janela ficou travada nas datas de hoje.");
+    } catch (e) { setErro(e.message); } finally { setSalvando(false); }
+  }
+
+  if (erro && !dados) return <p className="text-sm text-rose-600">{erro}</p>;
+  if (!dados) return <p className="text-sm text-slate-400">Carregando…</p>;
+
+  const ultimaPor = (campo) => (dados.historico || []).find((h) => h.campo === campo && h.evento === "alteracao");
+
+  return (
+    <div className="space-y-4">
+      {/* -------- situação -------- */}
+      <div className={`rounded-xl border p-4 ${congelado ? "bg-sky-50 border-sky-200" : "bg-white border-slate-200"}`}>
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div className="flex-1 min-w-[260px]">
+            <p className="text-sm font-medium">Critérios do rodízio</p>
+            <p className="text-[11.5px] text-slate-600 mt-1 leading-relaxed">
+              São estes números que decidem quem é obrigado, quem está em dia e quanto falta.
+              Toda alteração pede motivo e fica no histórico abaixo, com quem mudou, quando e o
+              valor anterior — porque critério alterado no meio da janela, sem rastro, é o que um
+              fiscal usa contra a entidade.
+            </p>
+          </div>
+          <div className="text-right shrink-0">
+            {congelado ? (
+              <>
+                <span className="inline-block text-[11px] font-medium px-2.5 py-1 rounded-full bg-sky-600 text-white">
+                  congelados
+                </span>
+                <p className="text-[11px] text-slate-600 mt-1.5 leading-tight">
+                  desde {dataHoraBR(a.congelado_em)}<br />por {a.congelado_por}
+                </p>
+              </>
+            ) : (
+              <>
+                <span className="inline-block text-[11px] font-medium px-2.5 py-1 rounded-full bg-emerald-100 text-emerald-800">
+                  abertos
+                </span>
+                {a.alterado_em && (
+                  <p className="text-[11px] text-slate-500 mt-1.5 leading-tight">
+                    última alteração {dataHoraBR(a.alterado_em)}<br />por {a.alterado_por}
+                  </p>
+                )}
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+
+      {/* -------- janela -------- */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <p className="text-[13px] font-medium">Janela de apuração</p>
+            <p className="text-[11px] text-slate-500 mt-1 leading-relaxed max-w-xl">
+              {congelado
+                ? "Travada nas datas em que os critérios foram congelados. Dias apurados depois do fim entram no banco mas não mudam quem está em dia — é a fotografia que vale para a fiscalização."
+                : `Móvel: termina no último dia apurado (${dataBR(dados.ultimo_dia_apurado)}) e começa doze meses antes. Anda sozinha a cada importação. Congelar trava as datas de hoje.`}
+            </p>
+          </div>
+          <div className="text-right">
+            <p className="text-lg font-semibold tabular-nums">{dataBR(a.janela_inicio)} <span className="text-slate-400 font-normal">a</span> {dataBR(a.janela_fim)}</p>
+            <p className="text-[11px] text-slate-500">{congelado ? "congelada" : "acompanha a apuração"}</p>
+          </div>
+        </div>
+      </div>
+
+      {/* -------- os critérios -------- */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          {CRITERIOS.map((c) => {
+            const escondido = c.so && form.tipo_meta !== c.so;
+            if (escondido) return null;
+            const mudou = mudancas.some((m) => m.campo === c.campo);
+            const ult = ultimaPor(c.campo);
+            return (
+              <div key={c.campo}
+                className={`rounded-lg border p-3 ${mudou ? "border-teal-400 bg-teal-50/40" : "border-slate-200"}`}>
+                <p className="text-[12px] font-medium text-slate-800">{c.rotulo}</p>
+                {c.tipo === "opcao" ? (
+                  <select value={form.tipo_meta || "percentual"} disabled={travado}
+                    onChange={(e) => setForm({ ...form, tipo_meta: e.target.value })}
+                    className="mt-2 w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px] disabled:bg-slate-50 disabled:text-slate-500">
+                    {c.opcoes.map(([v, r]) => <option key={v} value={v}>{r}</option>)}
+                  </select>
+                ) : (
+                  <div className="mt-2 flex items-baseline gap-2">
+                    <input value={form[c.campo] ?? ""} disabled={travado} inputMode="decimal"
+                      onChange={(e) => setForm({ ...form, [c.campo]: e.target.value })}
+                      className="w-24 border border-slate-200 rounded-lg px-3 py-2 text-[15px] font-semibold tabular-nums disabled:bg-slate-50 disabled:text-slate-500" />
+                    <span className="text-[11px] text-slate-500">{c.unidade}</span>
+                  </div>
+                )}
+                <p className="text-[10.5px] text-slate-500 mt-2 leading-relaxed">{c.ajuda}</p>
+                <p className="text-[10px] text-slate-400 mt-1.5">
+                  {mudou
+                    ? <span className="text-teal-700">era {valorLegivel(c.campo, a[c.campo])}</span>
+                    : ult ? `alterado em ${dataHoraBR(ult.alterado_em)} por ${ult.alterado_por}` : "nunca alterado"}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+
+        {podeEditar && !congelado && (
+          <div className="mt-4 border-t border-slate-100 pt-4">
+            <textarea value={motivo} onChange={(e) => setMotivo(e.target.value)} rows={2}
+              placeholder="Motivo da alteração — obrigatório. Ex.: ajuste combinado com a fiscalização em 15/09."
+              className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+            <div className="flex items-center gap-3 mt-2 flex-wrap">
+              <button onClick={salvar}
+                disabled={salvando || !mudancas.length || motivo.trim().length < 5 || !!invalido}
+                className="bg-teal-600 text-white rounded-lg px-4 py-2.5 text-sm font-medium disabled:opacity-50">
+                {salvando ? "Gravando…" : mudancas.length
+                  ? `Gravar ${mudancas.length} ${mudancas.length === 1 ? "alteração" : "alterações"} e recalcular`
+                  : "Nada alterado"}
+              </button>
+              {invalido && (
+                <span className="text-[11px] text-rose-600">
+                  {invalido.rotulo}: use um número entre {invalido.min} e {invalido.max}.
+                </span>
+              )}
+              {!invalido && mudancas.length > 0 && motivo.trim().length < 5 && (
+                <span className="text-[11px] text-slate-500">Escreva o motivo para liberar o botão.</span>
+              )}
+            </div>
+          </div>
+        )}
+        {!podeEditar && (
+          <p className="text-[11.5px] text-slate-500 mt-4 text-center">
+            Seu acesso é de leitura — os critérios podem ser consultados, mas não alterados.
+          </p>
+        )}
+        {podeEditar && congelado && (
+          <p className="text-[11.5px] text-sky-800 mt-4 text-center">
+            Critérios congelados: nada pode ser alterado até que um administrador descongele, com motivo.
+          </p>
+        )}
+        {erro && <p className="text-[12px] text-rose-600 mt-2 text-center leading-relaxed">{erro}</p>}
+        {aviso && <p className="text-[12px] text-emerald-700 mt-2 text-center">{aviso}</p>}
+      </div>
+
+      {/* -------- congelar / descongelar -------- */}
+      {podeEditar && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <div className="flex items-start justify-between gap-4 flex-wrap">
+            <div className="flex-1 min-w-[260px]">
+              <p className="text-[13px] font-medium">{congelado ? "Descongelar" : "Congelar critérios"}</p>
+              <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
+                {congelado
+                  ? "Só o administrador descongela, com motivo. A janela volta a acompanhar a apuração e os critérios voltam a aceitar alteração."
+                  : "Trava tudo: critérios e janela. Use quando os números forem acordados com a fiscalização — a partir daí ninguém altera, nem pelo banco. Descongelar fica registrado."}
+              </p>
+            </div>
+            {(!congelado || souAdmin) && !geloAberto && (
+              <button onClick={() => setGeloAberto(true)}
+                className={`rounded-lg px-4 py-2 text-[13px] font-medium border ${
+                  congelado ? "bg-white border-slate-300 text-slate-700" : "bg-sky-600 border-sky-600 text-white"}`}>
+                {congelado ? "Descongelar…" : "Congelar…"}
+              </button>
+            )}
+            {congelado && !souAdmin && (
+              <span className="text-[11px] text-slate-400 self-center">só o administrador</span>
+            )}
+          </div>
+          {geloAberto && (
+            <div className="mt-3 bg-slate-50 rounded-lg p-3">
+              <textarea value={motivoGelo} onChange={(e) => setMotivoGelo(e.target.value)} rows={2}
+                placeholder={congelado ? "Motivo do descongelamento — obrigatório." : "Motivo do congelamento — obrigatório. Ex.: critérios acordados com a fiscalização em 15/09."}
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+              <div className="flex gap-2 mt-2">
+                <button onClick={() => congelar(congelado)} disabled={salvando || motivoGelo.trim().length < 5}
+                  className="bg-sky-600 text-white rounded-lg px-4 py-2 text-[13px] font-medium disabled:opacity-50">
+                  {salvando ? "…" : congelado ? "Confirmar descongelamento" : "Confirmar congelamento"}
+                </button>
+                <button onClick={() => { setGeloAberto(false); setMotivoGelo(""); }}
+                  className="border border-slate-200 rounded-lg px-3 py-2 text-[13px] text-slate-600">
+                  Voltar
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* -------- histórico -------- */}
+      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+        <div className="px-4 py-3 border-b border-slate-100 flex items-baseline gap-2">
+          <p className="text-[13px] font-medium">Histórico de alterações</p>
+          <span className="text-[11px] text-slate-400">{(dados.historico || []).length} registros · não se edita nem se apaga</span>
+        </div>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12px]">
+            <thead className="bg-slate-50 text-slate-500">
+              <tr>
+                <th className="text-left px-3 py-2">Quando</th>
+                <th className="text-left px-3 py-2">Quem</th>
+                <th className="text-left px-3 py-2">Critério</th>
+                <th className="text-left px-3 py-2">De</th>
+                <th className="text-left px-3 py-2">Para</th>
+                <th className="text-left px-3 py-2">Motivo</th>
+              </tr>
+            </thead>
+            <tbody>
+              {(dados.historico || []).map((h) => (
+                <tr key={h.id} className="border-t border-slate-50 align-top">
+                  <td className="px-3 py-2 text-slate-500 whitespace-nowrap">{dataHoraBR(h.alterado_em)}</td>
+                  <td className="px-3 py-2 font-medium whitespace-nowrap">{h.alterado_por}</td>
+                  <td className="px-3 py-2">
+                    {h.evento === "alteracao"
+                      ? (ROTULO_CAMPO[h.campo] || h.campo)
+                      : <span className={`text-[11px] px-1.5 py-0.5 rounded ${
+                          h.evento === "congelar" ? "bg-sky-100 text-sky-800" : "bg-amber-100 text-amber-800"}`}>
+                          {h.evento === "congelar" ? "congelou" : "descongelou"}
+                        </span>}
+                  </td>
+                  <td className="px-3 py-2 text-slate-500">{valorLegivel(h.campo, h.valor_anterior)}</td>
+                  <td className="px-3 py-2 font-medium">{valorLegivel(h.campo, h.valor_novo)}</td>
+                  <td className="px-3 py-2 text-slate-600">{h.motivo}</td>
+                </tr>
+              ))}
+              {(dados.historico || []).length === 0 && (
+                <tr><td colSpan="6" className="px-3 py-4 text-slate-400">
+                  Nenhuma alteração registrada ainda. Os valores em vigor são os iniciais do sistema.
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 function PontoDoLocal({ token, local, aoGravar, podeEditar }) {
   const [aberto, setAberto] = useState(false);
@@ -666,7 +1029,7 @@ function Usuarios({ token }) {
 
   const PERFIL_TEXTO = {
     admin: "mexe em usuários e em tudo",
-    gestor: "grava calendário, regra e ponto",
+    gestor: "grava calendário, critérios e ponto",
     leitura: "só consulta",
   };
 
@@ -697,7 +1060,7 @@ function Usuarios({ token }) {
           <select value={novo.perfil} onChange={(e) => setNovo({ ...novo, perfil: e.target.value })}
             className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
             <option value="leitura">Leitura — só consulta</option>
-            <option value="gestor">Gestor — grava calendário, regra e ponto</option>
+            <option value="gestor">Gestor — grava calendário, critérios e ponto</option>
             <option value="admin">Admin — mexe em usuários também</option>
           </select>
         </div>
@@ -853,6 +1216,9 @@ function Painel({ token, sair }) {
   const { resumo, curva, locais, fila, semCadastro, safristas, reqs } = d;
   const j = resumo.janela, a = resumo.ativos, r = resumo.regras, fx = resumo.fixos;
   const comPonto = resumo.base.locais_com_ponto ?? 0;
+  const metaTexto = r.tipo_meta === "dias"
+    ? `A meta é fixa: ${r.meta_dias} dias fora da unidade-base para todo obrigado.`
+    : `A meta é ${j.percentual}% dos dias de entressafra de cada um, com teto de ${j.teto_dias}.`;
 
   return (
     <div className="min-h-screen bg-slate-50 pb-16">
@@ -864,7 +1230,8 @@ function Painel({ token, sair }) {
           <div className="flex-1">
             <h1 className="text-sm font-semibold leading-tight">Rodízio</h1>
             <p className="text-[11px] text-slate-400 leading-tight">
-              Janela de {dataBR(j.janela_inicio)} a {dataBR(j.janela_fim)} · {j.percentual}% da entressafra
+              Janela de {dataBR(j.janela_inicio)} a {dataBR(j.janela_fim)}
+              {j.congelado ? " · congelada" : ""} · {r.tipo_meta === "dias" ? `meta de ${r.meta_dias} dias` : `${j.percentual}% da entressafra`}
             </p>
           </div>
           <div className="text-right">
@@ -879,7 +1246,7 @@ function Painel({ token, sair }) {
 
       <div className="max-w-6xl mx-auto px-4 py-4 space-y-4">
         <div className="flex gap-1.5 flex-wrap">
-          {[["painel","Painel"],["safra","Safra"],["locais","Locais"],["fila","Fila"],
+          {[["painel","Painel"],["safra","Safra"],["criterios","Critérios"],["locais","Locais"],["fila","Fila"],
             ["requisicoes","Requisições"],["escalas","Escalas"],
             ["safristas","Safristas fixos"],["cadastro","Sem cadastro"],
             ...(podeEditar ? [["importar","Importar"]] : []),
@@ -888,6 +1255,9 @@ function Painel({ token, sair }) {
               className={`px-4 py-2 rounded-lg text-[13px] font-medium ${
                 aba === k ? "bg-slate-900 text-white" : "bg-white border border-slate-200 text-slate-600"}`}>
               {rot}
+              {k === "criterios" && j.congelado && (
+                <span className="ml-1.5 text-[10px] bg-sky-400 text-sky-950 rounded px-1">congelados</span>
+              )}
               {k === "cadastro" && semCadastro.length > 0 && (
                 <span className="ml-1.5 text-[10px] bg-amber-400 text-amber-950 rounded px-1">{semCadastro.length}</span>
               )}
@@ -915,7 +1285,7 @@ function Painel({ token, sair }) {
           <>
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <Cartao rotulo="Ativos" valor={a.ativos} aoClicar={() => abrirGrupo("ativos")}
-                      sub={`com movimento nos últimos ${r.dias_ativo} dias`} />
+                      sub={`com movimento nos últimos ${r.dias_ativo} dias da janela`} />
               <Cartao rotulo="Obrigados" valor={a.obrigados} aoClicar={() => abrirGrupo("obrigados")}
                       sub={`${j.isencao_dias}+ dias trabalhados na entressafra`} />
               <Cartao rotulo="Precisam rodar" valor={a.precisam} cor="text-amber-600"
@@ -931,14 +1301,18 @@ function Painel({ token, sair }) {
             <div className="bg-white rounded-xl border border-slate-200 p-4">
               <p className="text-[13px] font-medium mb-2">Como cada número é apurado</p>
               <ul className="text-[11.5px] text-slate-600 space-y-1 leading-relaxed">
-                <li><b>Ativos</b> — trabalharam ao menos um dia nos últimos {r.dias_ativo} dias. Só eles entram no rodízio.</li>
+                <li><b>Ativos</b> — trabalharam ao menos um dia nos últimos {r.dias_ativo} dias da janela. Só eles entram no rodízio.</li>
                 <li><b>Obrigados</b> — dos ativos, os que somam {j.isencao_dias} dias ou mais trabalhados nos meses de entressafra da janela. Abaixo disso, isento.</li>
-                <li><b>Precisam rodar</b> — obrigados cuja meta ainda não foi cumprida. A meta é {j.percentual}% dos dias de entressafra de cada um, com teto de {j.teto_dias}.</li>
+                <li><b>Precisam rodar</b> — obrigados cuja meta ainda não foi cumprida. {metaTexto}</li>
                 <li><b>Em dia</b> — obrigados que já acumularam dias fora da unidade-base suficientes.</li>
-                <li><b>A janela</b> termina em {dataBR(j.janela_fim)}, que é o último dia apurado — não a data de hoje. Dia que ainda não foi apurado não pode contar, então a janela anda quando a apuração do mês entra.</li>
+                <li><b>A janela</b> termina em {dataBR(j.janela_fim)}{j.congelado
+                  ? ", data em que foi congelada — dias apurados depois disso não mudam quem está em dia."
+                  : ", que é o último dia apurado — não a data de hoje. Dia que ainda não foi apurado não pode contar, então a janela anda quando a apuração do mês entra."}</li>
                 <li><b>Unidade viva</b> — teve ao menos um trabalhador nos últimos {r.dias_unidade_ativa} dias contados do último dia apurado. Unidade parada não entra como destino de rodízio: hoje são {resumo.base.unidades_vivas} das {resumo.base.unidades} cadastradas, em {resumo.base.locais_vivos} locais.</li>
               </ul>
-              <p className="text-[11px] text-teal-700 mt-2">Clique em qualquer cartão para ver quem são.</p>
+              <p className="text-[11px] text-teal-700 mt-2">
+                Clique em qualquer cartão para ver quem são. Os números da regra ficam na aba Critérios.
+              </p>
             </div>
 
             <Curva dados={curva} primeiro={resumo.base.primeiro_mes} ultimo={resumo.base.ultimo_mes} />
@@ -1003,6 +1377,10 @@ function Painel({ token, sair }) {
           <Escalas token={token} podeEditar={podeEditar} pedir={pedir} gravar={gravar} />
         )}
         {aba === "safra" && <Safra token={token} aoAtualizar={carregar} podeEditar={podeEditar} />}
+        {aba === "criterios" && (
+          <Criterios token={token} aoAtualizar={carregar} podeEditar={podeEditar}
+                     souAdmin={eu.perfil === "admin"} />
+        )}
 
         {aba === "locais" && (
           <>
