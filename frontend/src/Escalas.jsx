@@ -43,6 +43,27 @@ const NATUREZAS = {
              ajuda: "Correção de uma quinzena já publicada — a escala original fica intacta." },
 };
 
+/* 16/09/2026 — IMPRESSÃO. Os dados do sindicato ficam aqui por
+   enquanto; quando houver mais de um sindicato no sistema, saem da
+   tabela `sindicatos`. */
+const SINDICATO = {
+  nome: "MMG · Movimentação de Mercadorias em Geral",
+  cnpj: "75.527.028/0001-80",
+  endereco: "Rua Elis Regina, 205 · Cascavel/PR",
+};
+
+/* Na impressão só o documento aparece: tudo o mais fica invisível. */
+const ESTILO_IMPRESSAO = `
+@media print {
+  @page { size: A4; margin: 14mm 14mm 16mm; }
+  body * { visibility: hidden !important; }
+  #doc-escala, #doc-escala * { visibility: visible !important; }
+  #doc-escala { display: block !important; position: absolute; left: 0; top: 0; width: 100%; }
+  #doc-escala table { page-break-inside: auto; }
+  #doc-escala tr { page-break-inside: avoid; }
+  #doc-escala .quebra { page-break-before: always; }
+}`;
+
 const Selo = ({ status }) => {
   const cor =
     status === "publicada" ? "bg-emerald-50 text-emerald-700"
@@ -368,7 +389,15 @@ function Detalhe({ token, id, podeEditar, pedir, gravar, aoVoltar }) {
         <span className="text-[12px] text-slate-500">
           {dataBR(e.periodo_inicio)} a {dataBR(e.periodo_fim)}
         </span>
+        {e.itens?.length > 0 && (
+          <button onClick={() => window.print()}
+            className="ml-auto bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px] text-slate-700 hover:border-slate-500">
+            Imprimir
+          </button>
+        )}
       </div>
+
+      <DocumentoImpresso e={e} titulo={titulo} />
 
       {erro && (
         <div className="bg-rose-50 border border-rose-200 rounded-xl p-3">
@@ -696,6 +725,123 @@ function Detalhe({ token, id, podeEditar, pedir, gravar, aoVoltar }) {
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+/* ==================================================================
+ * O documento que vai para o papel. Fica escondido na tela e só
+ * aparece na impressão (ver ESTILO_IMPRESSAO).
+ * ================================================================ */
+function DocumentoImpresso({ e, titulo }) {
+  const inicial = e.natureza === "inicial";
+  const rascunho = e.status === "rascunho";
+  const nat = NATUREZAS[e.natureza]?.rotulo || "Rodízio";
+
+  const grupos = useMemo(() => {
+    const m = new Map();
+    (e.itens || []).forEach((i) => {
+      const k = i.destino_codigo || "—";
+      if (!m.has(k)) m.set(k, { codigo: k, nome: i.destino_nome, local: i.destino_local, cidade: i.destino_cidade, itens: [] });
+      m.get(k).itens.push(i);
+    });
+    return [...m.values()].sort((a, b) => String(a.codigo).localeCompare(String(b.codigo), "pt-BR", { numeric: true }));
+  }, [e.itens]);
+
+  return (
+    <div id="doc-escala" className="hidden text-slate-900" style={{ fontSize: "11px" }}>
+      <style>{ESTILO_IMPRESSAO}</style>
+
+      <div className="flex items-start justify-between gap-6 border-b-2 border-slate-900 pb-3">
+        <div>
+          <p className="text-[15px] font-semibold">{SINDICATO.nome}</p>
+          <p>CNPJ {SINDICATO.cnpj} · {SINDICATO.endereco}</p>
+          <p className="mt-1">Escala de trabalho de trabalhadores avulsos · Lei 12.023/2009, art. 4º e art. 5º, I</p>
+        </div>
+        <div className="text-right">
+          <p className="text-[17px] font-semibold">{titulo}</p>
+          <p className="font-medium">{nat}{inicial ? " · linha de base, sem rodízio" : ""}</p>
+          <p>{dataBR(e.periodo_inicio)} a {dataBR(e.periodo_fim)}</p>
+          {rascunho && <p className="mt-1 inline-block border border-slate-900 px-2 py-0.5 font-semibold uppercase tracking-wide">Rascunho · sem valor de documento</p>}
+        </div>
+      </div>
+
+      <div className="grid grid-cols-3 gap-4 py-3 border-b border-slate-300">
+        <div>
+          <p className="text-slate-500">Pessoas · dias-pessoa · unidades</p>
+          <p className="font-medium">{e.itens?.length || 0} · {e.dias_pessoa} · {grupos.length}</p>
+        </div>
+        <div>
+          <p className="text-slate-500">Publicação</p>
+          <p className="font-medium">
+            {e.publicada_em ? `${horaBR(e.publicada_em)} por ${e.publicada_por}` : "não publicada"}
+          </p>
+        </div>
+        <div>
+          <p className="text-slate-500">Impressão digital</p>
+          <p className="font-mono break-all" style={{ fontSize: "9px" }}>{e.hash_publicacao || "—"}</p>
+        </div>
+      </div>
+
+      {inicial && (
+        <p className="py-2 text-slate-700">
+          Escala inicial: registra onde cada trabalhador ativo estava nesta quinzena, na unidade
+          requisitada. Não configura rodízio; o rodízio é praticado nas escalas seguintes.
+        </p>
+      )}
+
+      {grupos.map((g) => (
+        <div key={g.codigo} className="mt-3">
+          <div className="flex items-baseline justify-between bg-slate-100 px-2 py-1 border-t border-slate-400">
+            <p className="font-semibold">{g.codigo} · {g.local || g.nome}{g.cidade ? ` · ${g.cidade}` : ""}</p>
+            <p>{g.nome !== (g.local || g.nome) ? g.nome + " · " : ""}{g.itens.length} {g.itens.length === 1 ? "pessoa" : "pessoas"}</p>
+          </div>
+          <table className="w-full" style={{ borderCollapse: "collapse" }}>
+            <thead>
+              <tr className="text-slate-500 text-left">
+                <th className="px-2 py-0.5 font-medium w-16">Código</th>
+                <th className="px-2 py-0.5 font-medium">Nome</th>
+                {!inicial && <th className="px-2 py-0.5 font-medium">Sai de</th>}
+                {!inicial && <th className="px-2 py-0.5 font-medium">Movimento</th>}
+                <th className="px-2 py-0.5 font-medium w-36">Período</th>
+                <th className="px-2 py-0.5 font-medium text-right w-10">Dias</th>
+              </tr>
+            </thead>
+            <tbody>
+              {g.itens.map((i) => (
+                <tr key={i.id} className="border-t border-slate-200">
+                  <td className="px-2 py-0.5 tabular-nums">{i.trabalhador_codigo}</td>
+                  <td className="px-2 py-0.5">{i.trabalhador_nome || "sem cadastro no MMG+"}</td>
+                  {!inicial && <td className="px-2 py-0.5">{i.origem_local || "—"}</td>}
+                  {!inicial && <td className="px-2 py-0.5">{i.tipo_movimento}</td>}
+                  <td className="px-2 py-0.5">{dataBR(i.data_inicio)} a {dataBR(i.data_fim)}</td>
+                  <td className="px-2 py-0.5 text-right tabular-nums">{i.dias}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ))}
+
+      <div className="mt-6 pt-3 border-t-2 border-slate-900 grid grid-cols-3 gap-6">
+        <div>
+          <p className="text-slate-500 mb-6">Divulgada em ____/____/______ · mural · aplicativo · fiscal</p>
+          <div className="border-t border-slate-900 pt-1">Responsável pela divulgação</div>
+        </div>
+        <div>
+          <p className="text-slate-500 mb-6">&nbsp;</p>
+          <div className="border-t border-slate-900 pt-1">{e.publicada_por || "Gestor do sindicato"}</div>
+        </div>
+        <div>
+          <p className="text-slate-500 mb-6">&nbsp;</p>
+          <div className="border-t border-slate-900 pt-1">Tomador do serviço · ciência</div>
+        </div>
+      </div>
+      <p className="mt-3 text-slate-500" style={{ fontSize: "9px" }}>
+        Documento gerado pelo MMG Sindicatos em {new Date().toLocaleString("pt-BR")}. Escala publicada não se altera;
+        correções são feitas por aditivo ou retificação, que apontam para este documento.
+        {e.hash_publicacao ? " A impressão digital acima permite conferir a integridade no sistema." : ""}
+      </p>
     </div>
   );
 }
