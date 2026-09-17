@@ -16,6 +16,8 @@ router.use(autenticar);
 
 const ANC = '(select max(data) from apuracao_dia)';
 const n = (x) => Math.trunc(Number(x)) || 0;
+/* Data do banco chega como Date com fuso; para o SQL vai so o dia, em texto */
+const soData = (d) => (d instanceof Date ? d.toISOString() : String(d)).slice(0, 10);
 
 async function criterios() {
   const { rows: [p] } = await consulta('select * from v_janela limit 1');
@@ -239,7 +241,7 @@ router.get('/:id', async (req, res, next) => {
       [req.params.id]);
 
     const requisicoes = e.status === 'rascunho'
-      ? await requisicoesDaQuinzena(e.periodo_inicio, e.periodo_fim, p)
+      ? await requisicoesDaQuinzena(soData(e.periodo_inicio), soData(e.periodo_fim), p)
       : [];
 
     res.json({
@@ -332,7 +334,7 @@ router.post('/:id/gerar-inicial', podeEscrever, async (req, res, next) => {
         returning 1
       )
       select count(*)::int as n from inserido
-    `, [e.id, e.periodo_inicio, e.periodo_fim]);
+    `, [e.id, soData(e.periodo_inicio), soData(e.periodo_fim)]);
 
     await registrar(e.id, 'gerada',
       `Escala inicial gerada com ${c.n} pessoas ativas nas unidades com requisicao`, quem(req));

@@ -62,7 +62,14 @@ async function gravar(caminho, token, corpo, metodo = "PUT") {
   return r.json();
 }
 
-const dataBR = (d) => (d ? new Date(d).toLocaleDateString("pt-BR") : "");
+/* 16/09/2026 — data formatada pelo texto, não pelo relógio do navegador.
+   A API devolve "2026-08-31T00:00:00.000Z"; new Date() disso, em
+   Brasília, cai em 30/08. Cortar os dez primeiros caracteres resolve. */
+const dataBR = (d) => {
+  if (!d) return "";
+  const [ano, mes, dia] = String(d).slice(0, 10).split("-");
+  return ano && mes && dia ? `${dia}/${mes}/${ano}` : "";
+};
 const dataHoraBR = (d) =>
   d ? new Date(d).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "";
 
