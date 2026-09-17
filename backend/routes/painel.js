@@ -95,6 +95,13 @@ const regrasDe = (p) => ({
   meses_a_frente:     n(p.meses_a_frente),
   tipo_meta:          p.tipo_meta,
   meta_dias:          n(p.meta_dias),
+  corte_q1:           n(p.corte_q1),
+  corte_q2:           n(p.corte_q2),
+  encerramento_q1:    n(p.encerramento_q1),
+  encerramento_q2:    n(p.encerramento_q2),
+  repasse_q1:         n(p.repasse_q1),
+  repasse_q2:         n(p.repasse_q2),
+  antecedencia_divulgacao: n(p.antecedencia_divulgacao),
 });
 
 /* ------------------------------------------------------------------
@@ -365,6 +372,14 @@ const CAMPOS_CRITERIO = {
   dias_por_mes:       'int',
   dias_unidade_ativa: 'int',
   meses_a_frente:     'int',
+  /* 16/09/2026 — calendário da requisição e do pagamento */
+  corte_q1:           'int',
+  corte_q2:           'int',
+  encerramento_q1:    'int',
+  encerramento_q2:    'int',
+  repasse_q1:         'int',
+  repasse_q2:         'int',
+  antecedencia_divulgacao: 'int',
 };
 
 async function lerCriterios() {

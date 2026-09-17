@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, useMemo } from "react";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
 
@@ -6,11 +6,8 @@ const TURNOS = [
   ["manha", "Manhã"], ["tarde", "Tarde"], ["noite", "Noite"], ["integral", "Dia inteiro"],
 ];
 
-/* 14/09/2026 — motivos do cancelamento.
-   Lista fechada, os mesmos códigos do backend. Texto livre não vira
-   estatística; com a lista, "Foi engano" e "Duplicado" podem sair da
-   conta de urgência e "Não precisa mais" num pedido urgente mostra a
-   unidade que pede em pânico e desmarca depois. */
+/* 14/09/2026 — motivos do cancelamento. Lista fechada, os mesmos
+   códigos do backend. */
 const MOTIVOS_CANCELAMENTO = [
   ["engano", "Foi engano — não era para ter pedido"],
   ["duplicado", "Duplicado — já havia esse pedido"],
@@ -19,38 +16,33 @@ const MOTIVOS_CANCELAMENTO = [
   ["outro", "Outro"],
 ];
 
-/* O recado da MMG sobre o prazo. Aparece no RECIBO, depois do envio —
-   está escrito no passado ("a solicitação foi realizada"), então só faz
-   sentido ali. O aviso de antes é outro, curto, junto da data. */
-const RECADO_48H = [
-  "Olá! Lembramos que, conforme nosso acordo, as solicitações de colaboradores devem ser realizadas com antecedência mínima de 48 horas. Esse prazo é necessário para organizarmos a disponibilidade e a logística dos trabalhadores e verificarmos documentação, treinamentos e exames antes do início das atividades.",
-  "Como a solicitação foi realizada em prazo inferior ao previsto, já estamos trabalhando para viabilizar o atendimento, sujeito à disponibilidade de trabalhadores aptos.",
-  "Agradecemos a compreensão e contamos com a observância do prazo de 48 horas nas próximas solicitações.",
+/* 16/09/2026 — REQUISIÇÃO POR QUINZENA.
+   A unidade escolhe a quinzena (1 a 15 ou 16 ao fim) e diz quantas
+   pessoas por função. O sistema calcula o corte, o encerramento da
+   requisição e avisa quando o pedido chega depois do corte. Pedido
+   avulso, com início e fim, continua existindo — e o sistema diz em
+   qual escala ele cai. */
+
+/* O recado da MMG sobre o prazo, no RECIBO de pedido fora do prazo. */
+const RECADO_PRAZO = (corte) => [
+  `Olá! Lembramos que, conforme nosso acordo, os pedidos para esta quinzena deveriam entrar até ${corte}. Esse prazo é o que permite montar as escalas de rodízio, conferir documentação, treinamentos e exames, e divulgar a escala aos trabalhadores com antecedência.`,
+  "Como o pedido chegou depois do corte, ele foi registrado como fora do prazo e já estamos trabalhando para viabilizar o atendimento, sujeito à disponibilidade de trabalhadores aptos.",
+  "Agradecemos a compreensão e contamos com a observância do prazo nos próximos pedidos.",
   "MMG.",
 ];
 
 const hoje = () => new Date().toISOString().slice(0, 10);
-const maisDias = (n) => {
-  const d = new Date(); d.setDate(d.getDate() + n);
-  return d.toISOString().slice(0, 10);
-};
-const proximaSegunda = () => {
-  const d = new Date();
-  d.setDate(d.getDate() + ((8 - d.getDay()) % 7 || 7));
-  return d.toISOString().slice(0, 10);
-};
-/* A API devolve a data como ISO completo. Cortar os 10 primeiros
-   caracteres e montar a mao evita fuso horario e "Invalid Date". */
 const dataBR = (d) => {
   if (!d) return "";
   const [ano, mes, dia] = String(d).slice(0, 10).split("-");
   return ano && mes && dia ? `${dia}/${mes}/${ano}` : "";
 };
+const diaMes = (d) => dataBR(d).slice(0, 5);
+const rotuloQuinzena = (q) =>
+  q ? `${q.quinzena_numero === 1 || q.numero === 1 ? "1ª" : "2ª"} quinzena · ${diaMes(q.quinzena_inicio)} a ${dataBR(q.quinzena_fim)}` : "";
 
-/* Fica FORA do componente de proposito. Declarada dentro, ela seria uma
-   funcao nova a cada tecla digitada, e o React destruiria e recriaria
-   tudo que esta dentro dela — o campo perderia o foco e o teclado do
-   celular fecharia a cada letra. */
+/* Fica FORA do componente de propósito: declarada dentro, seria uma
+   função nova a cada tecla e o campo perderia o foco. */
 function Moldura({ children }) {
   return (
     <div className="min-h-screen bg-slate-100 px-4 py-6">
@@ -67,6 +59,18 @@ function Moldura({ children }) {
   );
 }
 
+const Contador = ({ valor, aoMudar, max = 200 }) => (
+  <div className="flex items-center gap-2">
+    <button onClick={() => aoMudar(Math.max(0, valor - 1))}
+      className="w-10 h-10 rounded-lg border border-slate-300 text-lg">−</button>
+    <input type="number" min="0" max={max} value={valor}
+      onChange={(e) => aoMudar(Math.min(max, Math.max(0, parseInt(e.target.value || 0, 10))))}
+      className="w-14 text-center border border-slate-300 rounded-lg py-2 text-[17px] font-semibold tabular-nums" />
+    <button onClick={() => aoMudar(Math.min(max, valor + 1))}
+      className="w-10 h-10 rounded-lg border border-slate-300 text-lg">+</button>
+  </div>
+);
+
 /* ==================================================================
  * TELA PÚBLICA — quem abre o link não tem login
  * ================================================================ */
@@ -74,6 +78,8 @@ export default function Requisicao({ token, unidadeParam }) {
   const [estado, setEstado] = useState("carregando"); // carregando | erro | formulario | pronto
   const [erro, setErro] = useState("");
   const [atividades, setAtividades] = useState([]);
+  const [funcoesRef, setFuncoesRef] = useState([]);
+  const [quinzenas, setQuinzenas] = useState([]);
   const [unidade, setUnidade] = useState(null);
   const [travada, setTravada] = useState(false);
 
@@ -82,14 +88,16 @@ export default function Requisicao({ token, unidadeParam }) {
   const [buscando, setBuscando] = useState(false);
   const debounce = useRef(null);
 
-  const [quantidade, setQuantidade] = useState(1);
+  const [funcoes, setFuncoes] = useState({});      // { codigo: quantidade }
+  const [modo, setModo] = useState("quinzena");    // quinzena | avulsa
+  const [quinzena, setQuinzena] = useState(null);  // objeto da lista
   const [inicio, setInicio] = useState("");
+  const [fim, setFim] = useState("");
   const [nome, setNome] = useState("");
   const [fone, setFone] = useState("");
-  const [tipo, setTipo] = useState("unidade");
+  const [tipoSolic, setTipoSolic] = useState("unidade");
 
   const [detalhado, setDetalhado] = useState(false);
-  const [fim, setFim] = useState("");
   const [turno, setTurno] = useState("");
   const [horaInicio, setHoraInicio] = useState("");
   const [horaFim, setHoraFim] = useState("");
@@ -105,6 +113,11 @@ export default function Requisicao({ token, unidadeParam }) {
         const d = await r.json();
         if (!r.ok) throw new Error(d.error || "Link inválido");
         setAtividades(d.atividades || []);
+        setFuncoesRef(d.funcoes || []);
+        setQuinzenas(d.quinzenas || []);
+        // a próxima quinzena com corte aberto é a sugestão; senão a próxima
+        const abertas = (d.quinzenas || []).filter((q) => q.posicao !== "atual");
+        setQuinzena(abertas.find((q) => !q.corte_passou) || abertas[0] || null);
         if (d.unidade) { setUnidade(d.unidade); setTravada(false); }
         setEstado("formulario");
       })
@@ -125,6 +138,17 @@ export default function Requisicao({ token, unidadeParam }) {
     return () => clearTimeout(debounce.current);
   }, [busca, unidade, token]);
 
+  const total = useMemo(() => Object.values(funcoes).reduce((a, v) => a + (v || 0), 0), [funcoes]);
+
+  /* Em qual quinzena cai o pedido avulso, para avisar antes do envio */
+  const quinzenaDoAvulso = useMemo(() => {
+    if (modo !== "avulsa" || !inicio) return null;
+    return quinzenas.find((q) =>
+      String(q.quinzena_inicio).slice(0, 10) <= inicio && String(q.quinzena_fim).slice(0, 10) >= inicio) || null;
+  }, [modo, inicio, quinzenas]);
+
+  const foraDoPrazo = modo === "quinzena" ? !!quinzena?.corte_passou : !!quinzenaDoAvulso?.corte_passou;
+
   async function enviar() {
     setEnviando(true); setErro("");
     try {
@@ -133,9 +157,11 @@ export default function Requisicao({ token, unidadeParam }) {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           unidade_id: unidade?.id,
-          quantidade,
-          previsao_inicio: inicio,
-          previsao_fim: fim || null,
+          tipo: modo,
+          quinzena_inicio: modo === "quinzena" ? String(quinzena?.quinzena_inicio).slice(0, 10) : null,
+          previsao_inicio: modo === "avulsa" ? inicio : null,
+          previsao_fim: modo === "avulsa" ? fim : null,
+          funcoes: Object.entries(funcoes).filter(([, q]) => q > 0).map(([funcao, quantidade]) => ({ funcao, quantidade })),
           turno: turno || null,
           hora_inicio: horaInicio || null,
           hora_fim: horaFim || null,
@@ -143,7 +169,7 @@ export default function Requisicao({ token, unidadeParam }) {
           observacoes,
           solicitante_nome: nome,
           solicitante_fone: fone,
-          solicitante_tipo: tipo,
+          solicitante_tipo: tipoSolic,
         }),
       });
       const d = await r.json();
@@ -155,16 +181,13 @@ export default function Requisicao({ token, unidadeParam }) {
   function outroPedido() {
     setRecibo(null); setEstado("formulario");
     if (!travada) { setUnidade(null); setBusca(""); }
-    setQuantidade(1); setInicio(""); setFim(""); setTurno("");
+    setFuncoes({}); setInicio(""); setFim(""); setTurno("");
     setHoraInicio(""); setHoraFim(""); setEscolhidas([]); setObservacoes("");
     setDetalhado(false); setErro("");
   }
 
-  const podeEnviar = unidade && quantidade >= 1 && inicio && nome.trim().length >= 3;
-
-  /* Menos de 48 horas: comparação de texto ISO funciona porque as duas
-     datas estão no formato aaaa-mm-dd. Não bloqueia nada — só avisa. */
-  const curtoPrazo = inicio && inicio < maisDias(2);
+  const datasOk = modo === "quinzena" ? !!quinzena : (inicio && fim && fim >= inicio);
+  const podeEnviar = unidade && total >= 1 && datasOk && nome.trim().length >= 3;
 
   if (estado === "carregando") {
     return <Moldura><p className="text-sm text-slate-400">Abrindo…</p></Moldura>;
@@ -184,30 +207,45 @@ export default function Requisicao({ token, unidadeParam }) {
   }
 
   if (estado === "pronto") {
-    const foiCurto = Number(recibo?.dias_antecedencia) < 2;
     return (
       <Moldura>
-        <div className="bg-white rounded-2xl p-6 text-center">
-          <div className="w-14 h-14 rounded-full bg-emerald-100 grid place-items-center mx-auto mb-4">
-            <span className="text-emerald-700 text-2xl">✓</span>
+        <div className="bg-white rounded-2xl p-6">
+          <div className="text-center">
+            <div className="w-14 h-14 rounded-full bg-emerald-100 grid place-items-center mx-auto mb-4">
+              <span className="text-emerald-700 text-2xl">✓</span>
+            </div>
+            <p className="text-[16px] font-semibold text-slate-900">Pedido recebido</p>
+            <p className="text-[13px] text-slate-600 mt-1">
+              Protocolo <b className="tabular-nums">{recibo.protocolo}</b>
+            </p>
           </div>
-          <p className="text-[16px] font-semibold text-slate-900">Pedido recebido</p>
-          <p className="text-[13px] text-slate-600 mt-1">
-            Protocolo <b className="tabular-nums">{recibo.protocolo}</b>
-          </p>
-          {!foiCurto && (
-            <p className="text-[13px] text-slate-600 mt-3 leading-relaxed">
-              {recibo.urgente
-                ? "O pedido é para os próximos dias, então entra como urgente. Se puder, avise o sindicato por telefone também."
-                : "O sindicato vai montar a escala e avisar os trabalhadores."}
+
+          <div className="mt-4 bg-slate-50 rounded-xl p-4 text-[12.5px] text-slate-700 space-y-1">
+            <p><span className="text-slate-500">Unidade</span> · {unidade?.codigo} {unidade?.nome}</p>
+            <p><span className="text-slate-500">Pessoas</span> · {recibo.quantidade} no total</p>
+            {(recibo.funcoes || []).map((f) => (
+              <p key={f.funcao} className="pl-3">{f.quantidade} × {f.nome}</p>
+            ))}
+            {recibo.tipo === "avulsa" ? (
+              <p><span className="text-slate-500">Período</span> · {dataBR(inicio)} a {dataBR(fim)} · entra na escala da {rotuloQuinzena(recibo)}</p>
+            ) : (
+              <p><span className="text-slate-500">Período apurado</span> · {rotuloQuinzena(recibo)}</p>
+            )}
+            <p><span className="text-slate-500">Encerramento da requisição</span> · {dataBR(recibo.encerramento)}</p>
+            {recibo.aditivo && (
+              <p className="text-sky-800">A escala desta quinzena já foi publicada: o pedido entra como aditivo.</p>
+            )}
+          </div>
+
+          {!recibo.fora_do_prazo && (
+            <p className="text-[13px] text-slate-600 mt-4 leading-relaxed text-center">
+              O sindicato vai montar a escala e divulgar aos trabalhadores antes do início da quinzena.
             </p>
           )}
-          {foiCurto && (
-            <div className="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4 text-left">
-              {RECADO_48H.map((p, i) => (
-                <p key={i} className={`text-[12.5px] text-amber-900 leading-relaxed ${i ? "mt-2.5" : ""}`}>
-                  {p}
-                </p>
+          {recibo.fora_do_prazo && (
+            <div className="mt-4 bg-amber-50 border border-amber-200 rounded-xl p-4">
+              {RECADO_PRAZO(dataBR(recibo.corte)).map((p, i) => (
+                <p key={i} className={`text-[12.5px] text-amber-900 leading-relaxed ${i ? "mt-2.5" : ""}`}>{p}</p>
               ))}
             </div>
           )}
@@ -219,6 +257,8 @@ export default function Requisicao({ token, unidadeParam }) {
       </Moldura>
     );
   }
+
+  const quinzenasOferecidas = quinzenas.filter((q) => q.posicao !== "atual");
 
   return (
     <Moldura>
@@ -279,48 +319,97 @@ export default function Requisicao({ token, unidadeParam }) {
           )}
         </div>
 
-        {/* ---- quantas pessoas ---- */}
-        <div className="bg-white rounded-2xl p-4">
-          <p className="text-[13px] font-medium text-slate-900 mb-1">Quantas pessoas no total?</p>
-          <p className="text-[11.5px] text-slate-500 mb-2">Contando as que já estão na unidade. É o total que você quer a partir da data abaixo.</p>
-          <div className="flex items-center gap-3">
-            <button onClick={() => setQuantidade((q) => Math.max(1, q - 1))}
-              className="w-12 h-12 rounded-xl border border-slate-300 text-xl">−</button>
-            <input type="number" min="1" max="200" value={quantidade}
-              onChange={(e) => setQuantidade(Math.min(200, Math.max(1, parseInt(e.target.value || 1, 10))))}
-              className="flex-1 text-center border border-slate-300 rounded-xl py-3 text-2xl font-semibold tabular-nums" />
-            <button onClick={() => setQuantidade((q) => Math.min(200, q + 1))}
-              className="w-12 h-12 rounded-xl border border-slate-300 text-xl">+</button>
-          </div>
-        </div>
-
         {/* ---- quando ---- */}
         <div className="bg-white rounded-2xl p-4">
-          <p className="text-[13px] font-medium text-slate-900 mb-1">A partir de quando?</p>
-          <p className="text-[11.5px] text-slate-500 mb-2">
-            O combinado é pedir com pelo menos 48 horas de antecedência — é o tempo de organizar a
-            logística e conferir documentos, treinamentos e exames. Pedido mais em cima da hora
-            também entra; o sindicato faz o possível.
-          </p>
-          <div className="flex gap-2 mb-2 flex-wrap">
-            {[["Hoje", hoje()], ["Amanhã", maisDias(1)], ["Segunda", proximaSegunda()]].map(([r, v]) => (
-              <button key={r} onClick={() => setInicio(v)}
-                className={`px-3 py-2 rounded-lg text-[13px] border ${
-                  inicio === v ? "bg-slate-900 text-white border-slate-900"
-                               : "bg-white text-slate-600 border-slate-300"}`}>{r}</button>
+          <p className="text-[13px] font-medium text-slate-900 mb-1">Para quando?</p>
+          <div className="flex gap-2 mb-3">
+            {[["quinzena", "Uma quinzena"], ["avulsa", "Datas avulsas"]].map(([v, r]) => (
+              <button key={v} onClick={() => setModo(v)}
+                className={`flex-1 px-3 py-2.5 rounded-xl text-[13px] border ${
+                  modo === v ? "bg-slate-900 text-white border-slate-900"
+                             : "bg-white text-slate-600 border-slate-300"}`}>{r}</button>
             ))}
           </div>
-          <input type="date" value={inicio} min={hoje()} onChange={(e) => setInicio(e.target.value)}
-            className="w-full border border-slate-300 rounded-xl px-4 py-3 text-[15px]" />
-          {curtoPrazo && (
+
+          {modo === "quinzena" && (
+            <div className="space-y-2">
+              {quinzenasOferecidas.map((q) => {
+                const marcada = quinzena?.quinzena_inicio === q.quinzena_inicio;
+                return (
+                  <button key={q.quinzena_inicio} onClick={() => setQuinzena(q)}
+                    className={`w-full text-left rounded-xl border p-3 ${
+                      marcada ? "border-teal-500 bg-teal-50" : "border-slate-200"}`}>
+                    <p className="text-[14px] font-medium text-slate-900">{rotuloQuinzena(q)}</p>
+                    <p className={`text-[11.5px] mt-0.5 ${q.corte_passou ? "text-amber-700" : "text-slate-500"}`}>
+                      {q.corte_passou
+                        ? `o prazo para pedir era ${dataBR(q.corte)} — entra como fora do prazo`
+                        : `pedidos até ${dataBR(q.corte)} · escala divulgada antes de ${diaMes(q.quinzena_inicio)}`}
+                    </p>
+                  </button>
+                );
+              })}
+              {quinzenasOferecidas.length === 0 && (
+                <p className="text-[12px] text-rose-600">Não consegui calcular as quinzenas. Use datas avulsas.</p>
+              )}
+            </div>
+          )}
+
+          {modo === "avulsa" && (
+            <div className="grid grid-cols-2 gap-2">
+              <div>
+                <p className="text-[11px] text-slate-500 mb-1">Começa</p>
+                <input type="date" value={inicio} min={hoje()}
+                  onChange={(e) => { setInicio(e.target.value); if (!fim || fim < e.target.value) setFim(e.target.value); }}
+                  className="w-full border border-slate-300 rounded-xl px-3 py-3 text-[15px]" />
+              </div>
+              <div>
+                <p className="text-[11px] text-slate-500 mb-1">Termina</p>
+                <input type="date" value={fim} min={inicio || hoje()} onChange={(e) => setFim(e.target.value)}
+                  className="w-full border border-slate-300 rounded-xl px-3 py-3 text-[15px]" />
+              </div>
+              {quinzenaDoAvulso && (
+                <p className="col-span-2 text-[11.5px] text-slate-600">
+                  Entra na escala da {rotuloQuinzena(quinzenaDoAvulso)}
+                  {quinzenaDoAvulso.corte_passou && <span className="text-amber-700"> · fora do prazo (corte era {dataBR(quinzenaDoAvulso.corte)})</span>}.
+                  A requisição se encerra no último dia trabalhado.
+                </p>
+              )}
+            </div>
+          )}
+
+          {foraDoPrazo && (
             <div className="mt-2 bg-amber-50 border border-amber-200 rounded-xl p-3">
               <p className="text-[12px] text-amber-900 leading-relaxed">
-                <b>Menos de 48 horas.</b> O pedido entra como urgente e pode não dar tempo de montar
-                a escala e conferir documentos, treinamentos e exames. Se a data estiver certa, pode
-                enviar assim mesmo — e avise o sindicato por telefone também.
+                <b>Depois do corte.</b> O pedido entra, mas fica registrado como fora do prazo. A escala
+                dessa quinzena pode já estar montada — o sindicato faz o possível, e avisa por telefone
+                também se puder.
               </p>
             </div>
           )}
+        </div>
+
+        {/* ---- quantas pessoas, por função ---- */}
+        <div className="bg-white rounded-2xl p-4">
+          <p className="text-[13px] font-medium text-slate-900 mb-1">Quantas pessoas, por função?</p>
+          <p className="text-[11.5px] text-slate-500 mb-3">
+            Contando as que já estão na unidade — é o quadro completo que você quer para o período.
+          </p>
+          <div className="space-y-2">
+            {funcoesRef.map((f) => (
+              <div key={f.codigo} className={`flex items-center justify-between gap-3 rounded-xl border px-3 py-2 ${
+                funcoes[f.codigo] > 0 ? "border-teal-300 bg-teal-50/40" : "border-slate-200"}`}>
+                <div className="min-w-0">
+                  <p className="text-[13px] text-slate-900 leading-tight">{f.nome}</p>
+                  <p className="text-[10.5px] text-slate-500">Lei 12.023, art. 2º, inc. {f.inciso}</p>
+                </div>
+                <Contador valor={funcoes[f.codigo] || 0}
+                  aoMudar={(v) => setFuncoes({ ...funcoes, [f.codigo]: v })} />
+              </div>
+            ))}
+          </div>
+          <p className="text-[13px] text-slate-700 mt-3 text-right">
+            Total: <b className="tabular-nums">{total}</b> {total === 1 ? "pessoa" : "pessoas"}
+          </p>
         </div>
 
         {/* ---- quem está pedindo ---- */}
@@ -333,10 +422,10 @@ export default function Requisicao({ token, unidadeParam }) {
             className="w-full border border-slate-300 rounded-xl px-4 py-3 text-[15px] mb-2" />
           <div className="flex gap-2">
             {[["unidade", "Sou da unidade"], ["mmg", "Sou da MMG"]].map(([v, r]) => (
-              <button key={v} onClick={() => setTipo(v)}
+              <button key={v} onClick={() => setTipoSolic(v)}
                 className={`flex-1 px-3 py-2.5 rounded-xl text-[13px] border ${
-                  tipo === v ? "bg-slate-900 text-white border-slate-900"
-                             : "bg-white text-slate-600 border-slate-300"}`}>{r}</button>
+                  tipoSolic === v ? "bg-slate-900 text-white border-slate-900"
+                                  : "bg-white text-slate-600 border-slate-300"}`}>{r}</button>
             ))}
           </div>
         </div>
@@ -351,13 +440,6 @@ export default function Requisicao({ token, unidadeParam }) {
 
           {detalhado && (
             <div className="mt-4 space-y-4">
-              <div>
-                <p className="text-[12px] text-slate-500 mb-1.5">Até quando</p>
-                <input type="date" value={fim} min={inicio || hoje()}
-                  onChange={(e) => setFim(e.target.value)}
-                  className="w-full border border-slate-300 rounded-xl px-4 py-2.5 text-[14px]" />
-              </div>
-
               <div>
                 <p className="text-[12px] text-slate-500 mb-1.5">Turno</p>
                 <div className="grid grid-cols-2 gap-2">
@@ -430,7 +512,7 @@ export default function Requisicao({ token, unidadeParam }) {
 
         {!podeEnviar && (
           <p className="text-[12px] text-slate-500 text-center">
-            Falta escolher a unidade, a data e escrever seu nome.
+            Falta escolher a unidade, o período, ao menos uma função e escrever seu nome.
           </p>
         )}
         <div className="h-6" />
@@ -445,27 +527,31 @@ export default function Requisicao({ token, unidadeParam }) {
 export function Requisicoes({ token, podeEditar, pedir, gravar }) {
   const [linhas, setLinhas] = useState(null);
   const [links, setLinks] = useState([]);
+  const [quinzenas, setQuinzenas] = useState([]);
   const [filtro, setFiltro] = useState("aberta");
+  const [quinzenaFiltro, setQuinzenaFiltro] = useState("");
   const [erro, setErro] = useState("");
   const [copiado, setCopiado] = useState("");
 
-  /* Cancelamento com motivo (14/09) */
-  const [cancelando, setCancelando] = useState(null); // id da requisição
+  const [cancelando, setCancelando] = useState(null);
   const [motivo, setMotivo] = useState("");
   const [observacao, setObservacao] = useState("");
   const [salvandoCancel, setSalvandoCancel] = useState(false);
 
   async function carregar() {
     try {
-      const [r, l] = await Promise.all([
-        pedir(`/requisicoes${filtro ? `?status=${filtro}` : ""}`, token),
+      const qs = [filtro ? `status=${filtro}` : "", quinzenaFiltro ? `quinzena=${quinzenaFiltro}` : ""]
+        .filter(Boolean).join("&");
+      const [r, l, q] = await Promise.all([
+        pedir(`/requisicoes${qs ? `?${qs}` : ""}`, token),
         pedir("/requisicoes/links/lista", token).catch(() => []),
+        pedir("/requisicoes/quinzenas", token).catch(() => []),
       ]);
-      setLinhas(r); setLinks(l);
+      setLinhas(r); setLinks(l); setQuinzenas(q);
     } catch (e) { setErro(e.message); }
   }
 
-  useEffect(() => { setLinhas(null); carregar(); }, [filtro, token]);
+  useEffect(() => { setLinhas(null); carregar(); }, [filtro, quinzenaFiltro, token]);
 
   async function mudar(id, status) {
     setErro("");
@@ -475,19 +561,13 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
     } catch (e) { setErro(e.message); }
   }
 
-  function abrirCancelamento(id) {
-    setCancelando(id); setMotivo(""); setObservacao(""); setErro("");
-  }
-
-  function fecharCancelamento() {
-    setCancelando(null); setMotivo(""); setObservacao("");
-  }
+  function abrirCancelamento(id) { setCancelando(id); setMotivo(""); setObservacao(""); setErro(""); }
+  function fecharCancelamento() { setCancelando(null); setMotivo(""); setObservacao(""); }
 
   async function confirmarCancelamento(id) {
     setSalvandoCancel(true); setErro("");
     try {
-      await gravar(`/requisicoes/${id}`, token,
-        { status: "cancelada", motivo, observacao }, "PATCH");
+      await gravar(`/requisicoes/${id}`, token, { status: "cancelada", motivo, observacao }, "PATCH");
       fecharCancelamento();
       await carregar();
     } catch (e) { setErro(e.message); } finally { setSalvandoCancel(false); }
@@ -508,7 +588,7 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
           <p className="text-[13px] font-medium text-teal-300">Link do pedido</p>
           <p className="text-[12px] text-slate-300 mt-1 leading-relaxed">
             É este endereço que vai para os gestores das unidades. Ele serve para todas —
-            quem abre escolhe a unidade pelo número.
+            quem abre escolhe a unidade pelo número, a quinzena e as funções.
           </p>
           <div className="mt-3 flex gap-2 items-center flex-wrap">
             <code className="flex-1 min-w-[200px] text-[11.5px] bg-slate-800 rounded-lg px-3 py-2 break-all">
@@ -519,6 +599,30 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
               {copiado || "Copiar"}
             </button>
           </div>
+        </div>
+      )}
+
+      {/* ---- as quinzenas de referência ---- */}
+      {quinzenas.length > 0 && (
+        <div className="grid sm:grid-cols-3 gap-2">
+          {quinzenas.map((q) => {
+            const ativa = quinzenaFiltro === String(q.quinzena_inicio).slice(0, 10);
+            return (
+              <button key={q.quinzena_inicio}
+                onClick={() => setQuinzenaFiltro(ativa ? "" : String(q.quinzena_inicio).slice(0, 10))}
+                className={`text-left rounded-xl border p-3 ${
+                  ativa ? "border-slate-900 bg-slate-900 text-white" : "bg-white border-slate-200"}`}>
+                <p className="text-[10.5px] uppercase tracking-wide opacity-70">{q.posicao}</p>
+                <p className="text-[13px] font-medium">{rotuloQuinzena(q)}</p>
+                <p className={`text-[11px] mt-0.5 ${ativa ? "text-slate-300" : "text-slate-500"}`}>
+                  {q.pedidos} {q.pedidos === 1 ? "pedido" : "pedidos"} · {q.unidades} unidades · {q.pessoas} pessoas
+                </p>
+                <p className={`text-[10.5px] mt-0.5 ${ativa ? "text-slate-400" : q.corte_passou ? "text-amber-700" : "text-slate-400"}`}>
+                  corte {dataBR(q.corte)}{q.corte_passou ? " · passou" : ""} · encerra {dataBR(q.encerramento)}
+                </p>
+              </button>
+            );
+          })}
         </div>
       )}
 
@@ -548,31 +652,43 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
               <div className="flex-1 min-w-[200px]">
                 <p className="text-[14px] font-semibold">
                   {r.quantidade} {r.quantidade === 1 ? "pessoa" : "pessoas"} · {r.unidade_codigo}
-                  {r.urgente && (
-                    <span className="ml-2 text-[10.5px] bg-rose-100 text-rose-700 rounded px-1.5 py-0.5 align-middle">
-                      urgente
-                    </span>
+                  {r.fora_do_prazo && (
+                    <span className="ml-2 text-[10.5px] bg-amber-100 text-amber-800 rounded px-1.5 py-0.5 align-middle">fora do prazo</span>
+                  )}
+                  {r.aditivo && (
+                    <span className="ml-2 text-[10.5px] bg-sky-100 text-sky-800 rounded px-1.5 py-0.5 align-middle">aditivo</span>
+                  )}
+                  {r.tipo === "avulsa" && (
+                    <span className="ml-2 text-[10.5px] bg-slate-100 text-slate-700 rounded px-1.5 py-0.5 align-middle">avulsa</span>
+                  )}
+                  {r.urgente && !r.fora_do_prazo && (
+                    <span className="ml-2 text-[10.5px] bg-rose-100 text-rose-700 rounded px-1.5 py-0.5 align-middle">urgente</span>
                   )}
                 </p>
                 <p className="text-[12.5px] text-slate-600">{r.unidade_nome}</p>
                 <p className="text-[11.5px] text-slate-500 mt-0.5">
-                  {r.local_cidade || "—"} · a partir de {dataBR(r.previsao_inicio)}
-                  {r.previsao_fim ? ` até ${dataBR(r.previsao_fim)}` : ""}
+                  {r.local_cidade || "—"}
+                  {r.quinzena_inicio && ` · ${rotuloQuinzena(r)}`}
+                  {r.tipo === "avulsa" && ` · ${dataBR(r.previsao_inicio)} a ${dataBR(r.previsao_fim)}`}
+                  {r.encerramento && ` · encerra ${dataBR(r.encerramento)}`}
                   {r.turno ? ` · ${r.turno}` : ""}
-                  {r.dias_antecedencia != null && ` · pedido com ${r.dias_antecedencia} ${
-                    r.dias_antecedencia === 1 ? "dia" : "dias"} de antecedência`}
                 </p>
+                {(r.funcoes || []).length > 0 && (
+                  <p className="text-[11.5px] text-slate-700 mt-1">
+                    {r.funcoes.map((f) => `${f.quantidade} × ${f.nome}`).join(" · ")}
+                  </p>
+                )}
                 <p className="text-[11.5px] text-slate-500 mt-1">
                   {r.solicitante_nome}
                   {r.solicitante_fone ? ` · ${r.solicitante_fone}` : ""}
                   {r.solicitante_tipo === "mmg" && <span className="text-sky-700"> · da MMG</span>}
+                  {r.dias_antecedencia != null && ` · pedido com ${r.dias_antecedencia} ${
+                    r.dias_antecedencia === 1 ? "dia" : "dias"} de antecedência`}
                 </p>
                 {(r.atividades_nomes || r.atividades)?.length > 0 && (
                   <p className="text-[11.5px] text-slate-600 mt-1">
                     {(r.atividades_nomes || r.atividades).join(", ")}
-                    {r.atividades_de_risco > 0 && (
-                      <span className="text-amber-700"> · exige NR em dia</span>
-                    )}
+                    {r.atividades_de_risco > 0 && <span className="text-amber-700"> · exige NR em dia</span>}
                   </p>
                 )}
                 {r.observacoes && (
@@ -603,18 +719,12 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
               <div className="flex gap-2 mt-3 flex-wrap">
                 {r.status === "aberta" && (
                   <button onClick={() => mudar(r.id, "em_atendimento")}
-                    className="px-3 py-1.5 rounded-lg text-[12px] bg-sky-600 text-white">
-                    Assumir
-                  </button>
+                    className="px-3 py-1.5 rounded-lg text-[12px] bg-sky-600 text-white">Assumir</button>
                 )}
                 <button onClick={() => mudar(r.id, "atendida")}
-                  className="px-3 py-1.5 rounded-lg text-[12px] bg-emerald-600 text-white">
-                  Marcar atendida
-                </button>
+                  className="px-3 py-1.5 rounded-lg text-[12px] bg-emerald-600 text-white">Marcar atendida</button>
                 <button onClick={() => abrirCancelamento(r.id)}
-                  className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600">
-                  Cancelar
-                </button>
+                  className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600">Cancelar</button>
               </div>
             )}
 
@@ -623,38 +733,29 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
                 <p className="text-[12.5px] font-medium text-slate-800">Por que está cancelando?</p>
                 <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
                   O pedido não é apagado: ele fica no arquivo com o motivo. Engano e duplicado ficam
-                  de fora da estatística de urgência; "não precisa mais" continua contando.
+                  de fora da estatística; "não precisa mais" continua contando.
                 </p>
                 <div className="mt-2.5 space-y-1.5">
                   {MOTIVOS_CANCELAMENTO.map(([codigo, rotulo]) => (
                     <button key={codigo} onClick={() => setMotivo(codigo)}
                       className={`w-full text-left px-3 py-2 rounded-lg text-[12.5px] border ${
                         motivo === codigo ? "bg-slate-900 text-white border-slate-900"
-                                          : "bg-white text-slate-600 border-slate-200"}`}>
-                      {rotulo}
-                    </button>
+                                          : "bg-white text-slate-600 border-slate-200"}`}>{rotulo}</button>
                   ))}
                 </div>
-
                 {motivo && (
                   <textarea value={observacao} onChange={(e) => setObservacao(e.target.value)} rows={2}
-                    placeholder={motivo === "outro"
-                      ? "Escreva o motivo (obrigatório)"
-                      : "Quer acrescentar alguma coisa? (opcional)"}
+                    placeholder={motivo === "outro" ? "Escreva o motivo (obrigatório)" : "Quer acrescentar alguma coisa? (opcional)"}
                     className="mt-2.5 w-full border border-slate-200 rounded-lg px-3 py-2 text-[12.5px]" />
                 )}
-
                 <div className="flex gap-2 mt-2.5 flex-wrap">
                   <button onClick={() => confirmarCancelamento(r.id)}
-                    disabled={!motivo || salvandoCancel ||
-                              (motivo === "outro" && observacao.trim().length < 5)}
+                    disabled={!motivo || salvandoCancel || (motivo === "outro" && observacao.trim().length < 5)}
                     className="px-3 py-1.5 rounded-lg text-[12px] bg-slate-900 text-white disabled:opacity-40">
                     {salvandoCancel ? "Cancelando…" : "Confirmar cancelamento"}
                   </button>
                   <button onClick={fecharCancelamento}
-                    className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600">
-                    Voltar
-                  </button>
+                    className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600">Voltar</button>
                 </div>
               </div>
             )}
@@ -663,9 +764,9 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
       </div>
 
       <p className="text-[11px] text-slate-400">
-        A antecedência é calculada no momento do envio, não declarada por quem pede. Pedido com
-        três dias ou menos entra como urgente — e a soma desses casos por unidade é o que mostra
-        quem sempre pede em cima da hora.
+        Fora do prazo é o pedido que chegou depois do corte da quinzena — a data está nos Critérios.
+        O encerramento é a data em que a requisição se encerra para faturamento; o período apurado é o
+        que a escala e a folha cobrem.
       </p>
     </div>
   );

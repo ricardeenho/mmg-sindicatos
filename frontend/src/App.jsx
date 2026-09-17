@@ -614,6 +614,35 @@ const CRITERIOS = [
     campo: "meses_a_frente", rotulo: "Projeção da Safra", unidade: "meses", min: 1, max: 12,
     ajuda: "Quantos meses o bloco \"o que vem pela frente\" mostra na aba Safra.",
   },
+  /* 16/09/2026 — calendário da requisição, da escala e do pagamento */
+  {
+    campo: "corte_q1", rotulo: "Corte do pedido · 1ª quinzena", unidade: "dia do mês anterior", min: 1, max: 28, grupo: "calendario",
+    ajuda: "Até este dia do mês anterior a unidade pede para a quinzena de 1 a 15. Depois, o pedido entra fora do prazo.",
+  },
+  {
+    campo: "corte_q2", rotulo: "Corte do pedido · 2ª quinzena", unidade: "dia do mesmo mês", min: 1, max: 28, grupo: "calendario",
+    ajuda: "Até este dia a unidade pede para a quinzena de 16 ao fim do mês.",
+  },
+  {
+    campo: "antecedencia_divulgacao", rotulo: "Divulgação da escala", unidade: "dias antes da quinzena", min: 0, max: 15, grupo: "calendario",
+    ajuda: "Quantos dias antes do início da quinzena a escala precisa estar publicada. A tela de Escalas mostra a data-limite.",
+  },
+  {
+    campo: "encerramento_q1", rotulo: "Encerramento · 1ª quinzena", unidade: "dia do mesmo mês", min: 1, max: 28, grupo: "calendario",
+    ajuda: "Dia em que a requisição da quinzena de 1 a 15 se encerra para faturamento. É a data que dispara o prazo de 72 horas úteis da empresa (Lei 12.023, art. 6º).",
+  },
+  {
+    campo: "encerramento_q2", rotulo: "Encerramento · 2ª quinzena", unidade: "dia do mês seguinte", min: 1, max: 28, grupo: "calendario",
+    ajuda: "Dia do mês seguinte em que a requisição da quinzena de 16 ao fim se encerra para faturamento.",
+  },
+  {
+    campo: "repasse_q1", rotulo: "Repasse · 1ª quinzena", unidade: "dia do mesmo mês", min: 1, max: 28, grupo: "calendario",
+    ajuda: "Dia em que o sindicato paga os trabalhadores pelo que foi apurado de 1 a 15.",
+  },
+  {
+    campo: "repasse_q2", rotulo: "Repasse · 2ª quinzena", unidade: "dia do mês seguinte", min: 1, max: 28, grupo: "calendario",
+    ajuda: "Dia do mês seguinte em que o sindicato paga pelo que foi apurado de 16 ao fim do mês.",
+  },
 ];
 const ROTULO_CAMPO = Object.fromEntries(CRITERIOS.map((c) => [c.campo, c.rotulo]));
 ROTULO_CAMPO.janela = "Janela";
@@ -763,8 +792,11 @@ function Criterios({ token, aoAtualizar, podeEditar, souAdmin }) {
 
       {/* -------- os critérios -------- */}
       <div className="bg-white rounded-xl border border-slate-200 p-4">
+        {[["apuracao", "Apuração do rodízio"], ["calendario", "Calendário da requisição, da escala e do pagamento"]].map(([g, rot], gi) => (
+        <div key={g} className={gi ? "mt-5 pt-5 border-t border-slate-100" : ""}>
+        <p className="text-[12px] font-medium text-slate-500 uppercase tracking-wide mb-3">{rot}</p>
         <div className="grid sm:grid-cols-2 lg:grid-cols-3 gap-3">
-          {CRITERIOS.map((c) => {
+          {CRITERIOS.filter((c) => (c.grupo || "apuracao") === g).map((c) => {
             const escondido = c.so && form.tipo_meta !== c.so;
             if (escondido) return null;
             const mudou = mudancas.some((m) => m.campo === c.campo);
@@ -797,6 +829,8 @@ function Criterios({ token, aoAtualizar, podeEditar, souAdmin }) {
             );
           })}
         </div>
+        </div>
+        ))}
 
         {podeEditar && !congelado && (
           <div className="mt-4 border-t border-slate-100 pt-4">

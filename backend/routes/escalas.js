@@ -5,10 +5,23 @@ const { autenticar, autorizar } = require('../middlewares/auth');
 const router = express.Router();
 router.use(autenticar);
 
-const DIAS_ATIVO = 14;
-const DIAS_POR_MES = 5;        // bloco de segunda a sexta
-const DIAS_UNIDADE_ATIVA = 5;
+/* 16/09/2026 — ESCALA POR QUINZENA E NATUREZA.
+   As constantes (14, 5, 5) sairam daqui e sao lidas dos Criterios.
+   A escala ganhou NATUREZA: rodizio (bloco de segunda a sexta, fila
+   de quem esta ha mais tempo sem sair), inicial (a de outubro: quem
+   esta ativo em cada unidade com requisicao, na unidade em que esta,
+   a quinzena inteira) ou aditivo (correcao de quinzena em curso).
+   A escala nasce das requisicoes da quinzena: o rascunho mostra, por
+   unidade, o que foi pedido por funcao e quantos estao ativos. */
+
 const ANC = '(select max(data) from apuracao_dia)';
+const n = (x) => Math.trunc(Number(x)) || 0;
+
+async function criterios() {
+  const { rows: [p] } = await consulta('select * from v_janela limit 1');
+  if (!p) throw new Error('Criterios do sindicato nao encontrados');
+  return p;
+}
 
 const podeEscrever = autorizar('admin', 'gestor');
 const quem = (req) => req.usuario.nome || req.usuario.usuario;
@@ -18,6 +31,35 @@ async function registrar(escalaId, tipo, descricao, autor) {
     'insert into escala_eventos (escala_id, tipo, descricao, quem) values ($1,$2,$3,$4)',
     [escalaId, tipo, descricao, autor]
   );
+}
+
+/* Requisicoes vivas de uma quinzena, por unidade, com quantos estao
+   ativos la (movimento nos ultimos dias_ativo contados do ultimo dia
+   apurado). E o que sustenta a escala: pedido x gente. */
+async function requisicoesDaQuinzena(inicio, fim, p) {
+  const { rows } = await consulta(`
+    with anc as (select max(data) as fim from apuracao_dia),
+    ativos as (
+      select distinct on (a.trabalhador_id) a.trabalhador_id, a.unidade_id
+        from apuracao_dia a
+       where a.data > (select fim from anc) - ${n(p.dias_ativo)}
+       group by a.trabalhador_id, a.unidade_id
+       order by a.trabalhador_id, count(*) desc, max(a.data) desc
+    ),
+    por_unidade as (
+      select unidade_id, count(*)::int as ativos from ativos group by unidade_id
+    )
+    select r.id, r.unidade_id, r.unidade_codigo, r.unidade_nome, r.local_nome, r.local_cidade,
+           r.quantidade, r.funcoes, r.tipo, r.status, r.fora_do_prazo, r.aditivo,
+           r.previsao_inicio, r.previsao_fim, r.encerramento, r.solicitante_nome,
+           coalesce(pu.ativos, 0) as ativos
+      from v_requisicoes r
+      left join por_unidade pu on pu.unidade_id = r.unidade_id
+     where r.status in ('aberta', 'em_atendimento')
+       and r.previsao_inicio <= $2::date and coalesce(r.previsao_fim, date '9999-12-31') >= $1::date
+     order by r.unidade_codigo, r.criado_em desc
+  `, [inicio, fim]);
+  return rows;
 }
 
 /* ------------------------------------------------------------------
@@ -31,8 +73,10 @@ router.get('/', async (req, res, next) => {
              e.cancelada_em, e.cancelada_por, e.motivo_cancelamento,
              e.retifica_id, e.hash_publicacao,
              e.pessoas, e.destinos, e.dias_pessoa, e.retificacoes,
+             es.natureza,
              r.numero as retifica_numero, r.ano as retifica_ano
         from v_escalas e
+        join escalas es on es.id = e.id
         left join escalas r on r.id = e.retifica_id
        order by (e.status = 'rascunho') desc, e.periodo_inicio desc, e.criado_em desc
        limit 200
@@ -42,11 +86,47 @@ router.get('/', async (req, res, next) => {
 });
 
 /* ------------------------------------------------------------------
+ * GET /escalas/quinzenas — as tres quinzenas de referencia (atual,
+ * proxima, seguinte), com quantas requisicoes e se ja ha escala.
+ * ---------------------------------------------------------------- */
+router.get('/quinzenas', async (req, res, next) => {
+  try {
+    const p = await criterios();
+    const { rows } = await consulta(`
+      with q1 as (select * from calc_quinzena(current_date, $1)),
+           q2 as (select * from calc_quinzena((select quinzena_fim from q1) + 1, $1)),
+           q3 as (select * from calc_quinzena((select quinzena_fim from q2) + 1, $1))
+      select * from q1 union all select * from q2 union all select * from q3
+    `, [p.sindicato_id]);
+    const hoje = new Date().toISOString().slice(0, 10);
+    for (const [i, q] of rows.entries()) {
+      q.posicao = i === 0 ? 'atual' : i === 1 ? 'proxima' : 'seguinte';
+      q.corte_passou = String(q.corte).slice(0, 10) < hoje;
+      const { rows: [c] } = await consulta(`
+        select count(*)::int as pedidos, count(distinct unidade_id)::int as unidades,
+               coalesce(sum(quantidade),0)::int as pessoas
+          from requisicoes
+         where quinzena_inicio = $1::date and status in ('aberta','em_atendimento')
+      `, [q.quinzena_inicio]);
+      Object.assign(q, c);
+      const { rows: esc } = await consulta(`
+        select id, numero, ano, status, natureza from escalas
+         where periodo_inicio = $1::date and periodo_fim = $2::date and status <> 'cancelada'
+         order by criado_em
+      `, [q.quinzena_inicio, q.quinzena_fim]);
+      q.escalas = esc;
+    }
+    res.json(rows);
+  } catch (e) { next(e); }
+});
+
+/* ------------------------------------------------------------------
  * GET /escalas/candidatos — a fila, na ordem de quem esta ha mais
- * tempo sem sair. Este e o primeiro criterio, sempre.
+ * tempo sem sair. Primeiro criterio, sempre.
  * ---------------------------------------------------------------- */
 router.get('/candidatos', async (req, res, next) => {
   try {
+    const p = await criterios();
     const { rows } = await consulta(`
       with anc as (select max(data) as fim from apuracao_dia),
       ult_unidade as (
@@ -57,14 +137,15 @@ router.get('/candidatos', async (req, res, next) => {
       ),
       setores_vivos as (
         select local_id, count(*)::int as n from ult_unidade
-         where ultimo > (select fim from anc) - ${DIAS_UNIDADE_ATIVA}
+         where ultimo > (select fim from anc) - ${n(p.dias_unidade_ativa)}
          group by local_id
       ),
       ja_escalado as (
         select i.trabalhador_id, min(i.data_inicio) as proxima
           from escala_itens i
           join escalas e on e.id = i.escala_id
-         where e.status = 'publicada' and i.data_fim >= (select fim from anc)
+         where e.status = 'publicada' and e.natureza = 'rodizio'
+           and i.data_fim >= (select fim from anc)
          group by i.trabalhador_id
       )
       select f.trabalhador_id, f.codigo, f.nome, f.local_base, f.local_base_id,
@@ -73,13 +154,12 @@ router.get('/candidatos', async (req, res, next) => {
              f.setores_no_local,
              coalesce(sv.n, 0)::int          as setores_vivos,
              l.cidade                        as cidade,
-             ceil(f.falta::numeric / ${DIAS_POR_MES})::int as semanas,
+             ceil(f.falta::numeric / ${n(p.dias_por_mes)})::int as semanas,
              ja.proxima                      as ja_escalado_em
         from v_fila_fixos f
         left join locais        l  on l.id = f.local_base_id
         left join setores_vivos sv on sv.local_id = f.local_base_id
         left join ja_escalado   ja on ja.trabalhador_id = f.trabalhador_id
-       where f.ultimo_dia > (select fim from anc) - ${DIAS_ATIVO}
        order by f.dias_fora asc, f.falta desc, f.dias desc
        limit 300
     `);
@@ -88,13 +168,12 @@ router.get('/candidatos', async (req, res, next) => {
 });
 
 /* ------------------------------------------------------------------
- * GET /escalas/destinos/:localId — para onde esta pessoa pode ir.
- * Ordena por natureza do movimento, do mais barato ao mais caro:
- * outro setor no mesmo local, outro local na mesma cidade, fora.
- * So aparece unidade VIVA.
+ * GET /escalas/destinos/:localId — para onde esta pessoa pode ir,
+ * do mais barato ao mais caro. So unidade VIVA.
  * ---------------------------------------------------------------- */
 router.get('/destinos/:localId', async (req, res, next) => {
   try {
+    const p = await criterios();
     const { rows } = await consulta(`
       with anc as (select max(data) as fim from apuracao_dia),
       viva as (
@@ -103,7 +182,7 @@ router.get('/destinos/:localId', async (req, res, next) => {
           from unidades u
           left join apuracao_dia a on a.unidade_id = u.id
          group by u.id
-        having max(a.data) > (select fim from anc) - ${DIAS_UNIDADE_ATIVA}
+        having max(a.data) > (select fim from anc) - ${n(p.dias_unidade_ativa)}
       ),
       base as (select id, cidade from locais where id = $1)
       select v.id, v.codigo, v.nome_completo, v.setor,
@@ -129,8 +208,6 @@ router.get('/destinos/:localId', async (req, res, next) => {
         left join v_local_jornada jo on jo.local_id = v.local_id
         left join v_local_distancia d
                on d.local_id = $1 and d.destino_id = v.local_id
-       where v.local_id is distinct from $1
-          or v.local_id = $1
        order by nivel, d.km nulls last, v.codigo
        limit 60
     `, [req.params.localId]);
@@ -139,13 +216,16 @@ router.get('/destinos/:localId', async (req, res, next) => {
 });
 
 /* ------------------------------------------------------------------
- * GET /escalas/:id — a escala com as linhas e a trilha
+ * GET /escalas/:id — a escala com as linhas, a trilha e, se for
+ * rascunho, as requisicoes da quinzena que ela cobre.
  * ---------------------------------------------------------------- */
 router.get('/:id', async (req, res, next) => {
   try {
+    const p = await criterios();
     const { rows: [e] } = await consulta(`
-      select e.*, r.numero as retifica_numero, r.ano as retifica_ano
+      select e.*, es.natureza, r.numero as retifica_numero, r.ano as retifica_ano
         from v_escalas e
+        join escalas es on es.id = e.id
         left join escalas r on r.id = e.retifica_id
        where e.id = $1
     `, [req.params.id]);
@@ -158,7 +238,15 @@ router.get('/:id', async (req, res, next) => {
       'select tipo, descricao, quem, quando from escala_eventos where escala_id = $1 order by quando',
       [req.params.id]);
 
-    res.json({ ...e, itens, eventos });
+    const requisicoes = e.status === 'rascunho'
+      ? await requisicoesDaQuinzena(e.periodo_inicio, e.periodo_fim, p)
+      : [];
+
+    res.json({
+      ...e, itens, eventos, requisicoes,
+      dias_por_mes: n(p.dias_por_mes),
+      antecedencia_divulgacao: n(p.antecedencia_divulgacao),
+    });
   } catch (e) { next(e); }
 });
 
@@ -167,6 +255,8 @@ router.get('/:id', async (req, res, next) => {
  * ---------------------------------------------------------------- */
 router.post('/', podeEscrever, async (req, res, next) => {
   const { periodo_inicio, periodo_fim, titulo, retifica_id } = req.body || {};
+  const natureza = ['rodizio', 'inicial', 'aditivo'].includes(req.body?.natureza)
+    ? req.body.natureza : 'rodizio';
   if (!periodo_inicio || !periodo_fim) {
     return res.status(400).json({ error: 'Informe o periodo da escala' });
   }
@@ -176,16 +266,83 @@ router.post('/', podeEscrever, async (req, res, next) => {
   try {
     const { rows: [e] } = await consulta(`
       insert into escalas (sindicato_id, ano, periodo_inicio, periodo_fim,
-                           titulo, retifica_id, criado_por)
+                           titulo, retifica_id, criado_por, natureza)
       values ((select id from sindicatos order by criado_em limit 1),
-              extract(year from $1::date)::int, $1, $2, $3, $4, $5)
-      returning id, ano, periodo_inicio, periodo_fim, titulo, status, retifica_id
-    `, [periodo_inicio, periodo_fim, titulo || null, retifica_id || null, quem(req)]);
+              extract(year from $1::date)::int, $1, $2, $3, $4, $5, $6)
+      returning id, ano, periodo_inicio, periodo_fim, titulo, status, retifica_id, natureza
+    `, [periodo_inicio, periodo_fim, titulo || null, retifica_id || null, quem(req), natureza]);
 
+    const nomes = { rodizio: 'Rascunho de escala de rodizio aberto',
+                    inicial: 'Rascunho de escala inicial aberto (sem rodizio, linha de base)',
+                    aditivo: 'Rascunho de aditivo aberto' };
     await registrar(e.id, 'criada',
-      retifica_id ? 'Rascunho aberto como retificacao' : 'Rascunho aberto', quem(req));
+      retifica_id ? 'Rascunho aberto como retificacao' : nomes[natureza], quem(req));
     res.status(201).json(e);
   } catch (e) { next(e); }
+});
+
+/* ------------------------------------------------------------------
+ * POST /escalas/:id/gerar-inicial
+ * Escala inicial: para cada unidade com requisicao viva na quinzena,
+ * inclui quem esta ativo la, na propria unidade, a quinzena inteira.
+ * Nao e rodizio — e o retrato de onde cada um esta, publicado com
+ * data e autor. Quem ja esta na escala nao entra de novo.
+ * ---------------------------------------------------------------- */
+router.post('/:id/gerar-inicial', podeEscrever, async (req, res, next) => {
+  try {
+    const p = await criterios();
+    const { rows: [e] } = await consulta(
+      'select id, status, natureza, periodo_inicio, periodo_fim from escalas where id = $1',
+      [req.params.id]);
+    if (!e) return res.status(404).json({ error: 'Escala nao encontrada' });
+    if (e.status !== 'rascunho') return res.status(409).json({ error: 'Esta escala nao e mais um rascunho' });
+    if (e.natureza !== 'inicial') {
+      return res.status(400).json({ error: 'So a escala inicial e gerada a partir dos ativos' });
+    }
+
+    const { rows: [c] } = await consulta(`
+      with anc as (select max(data) as fim from apuracao_dia),
+      ativos as (
+        select distinct on (a.trabalhador_id) a.trabalhador_id, a.unidade_id
+          from apuracao_dia a
+         where a.data > (select fim from anc) - ${n(p.dias_ativo)}
+         group by a.trabalhador_id, a.unidade_id
+         order by a.trabalhador_id, count(*) desc, max(a.data) desc
+      ),
+      req as (
+        select distinct on (r.unidade_id) r.id, r.unidade_id
+          from requisicoes r
+         where r.status in ('aberta','em_atendimento')
+           and r.previsao_inicio <= $3::date and coalesce(r.previsao_fim, date '9999-12-31') >= $2::date
+         order by r.unidade_id, r.criado_em desc
+      ),
+      inserido as (
+        insert into escala_itens
+          (escala_id, trabalhador_id, origem_local_id, destino_unidade_id,
+           data_inicio, data_fim, requisicao_id, motivo, ordem)
+        select $1, at.trabalhador_id, u.local_id, at.unidade_id, $2::date, $3::date, rq.id,
+               'escala inicial: permanece na unidade onde esta ativo',
+               row_number() over (order by u.codigo, at.trabalhador_id)
+                 + (select coalesce(max(ordem),0) from escala_itens where escala_id = $1)
+          from ativos at
+          join unidades u on u.id = at.unidade_id
+          join req rq on rq.unidade_id = at.unidade_id
+         where not exists (select 1 from escala_itens i
+                            where i.escala_id = $1 and i.trabalhador_id = at.trabalhador_id)
+        returning 1
+      )
+      select count(*)::int as n from inserido
+    `, [e.id, e.periodo_inicio, e.periodo_fim]);
+
+    await registrar(e.id, 'gerada',
+      `Escala inicial gerada com ${c.n} pessoas ativas nas unidades com requisicao`, quem(req));
+    res.json({ incluidos: c.n });
+  } catch (e) {
+    if (e && e.message && e.message.includes('ja esta na escala')) {
+      return res.status(409).json({ error: e.message });
+    }
+    next(e);
+  }
 });
 
 /* ------------------------------------------------------------------
@@ -198,7 +355,9 @@ router.post('/:id/itens', podeEscrever, async (req, res, next) => {
     return res.status(400).json({ error: 'Faltam a pessoa, o destino ou as datas' });
   }
   try {
-    const { rows: [e] } = await consulta('select status from escalas where id = $1', [req.params.id]);
+    const p = await criterios();
+    const { rows: [e] } = await consulta(
+      'select status, natureza from escalas where id = $1', [req.params.id]);
     if (!e) return res.status(404).json({ error: 'Escala nao encontrada' });
     if (e.status !== 'rascunho') {
       return res.status(409).json({ error: 'Esta escala nao e mais um rascunho' });
@@ -207,9 +366,10 @@ router.post('/:id/itens', podeEscrever, async (req, res, next) => {
     const dias = Math.round(
       (new Date(data_fim) - new Date(data_inicio)) / 86400000) + 1;
     if (dias < 1) return res.status(400).json({ error: 'As datas estao invertidas' });
-    if (dias > DIAS_POR_MES) {
+    const limite = n(p.dias_por_mes);
+    if (e.natureza === 'rodizio' && dias > limite) {
       return res.status(400).json({
-        error: `O bloco de rodizio vai de segunda a sexta, no maximo ${DIAS_POR_MES} dias. Este tem ${dias}.`,
+        error: `O bloco de rodizio vai de segunda a sexta, no maximo ${limite} dias. Este tem ${dias}.`,
       });
     }
 
@@ -257,14 +417,12 @@ router.delete('/:id/itens/:itemId', podeEscrever, async (req, res, next) => {
 });
 
 /* ------------------------------------------------------------------
- * POST /escalas/:id/publicar
- * Aqui o rascunho vira documento: ganha numero, hora, autor e hash.
- * Depois disto, nada mais muda.
+ * POST /escalas/:id/publicar — o rascunho vira documento
  * ---------------------------------------------------------------- */
 router.post('/:id/publicar', podeEscrever, async (req, res, next) => {
   try {
     const { rows: [e] } = await consulta(
-      'select id, sindicato_id, ano, status from escalas where id = $1', [req.params.id]);
+      'select id, sindicato_id, ano, status, natureza from escalas where id = $1', [req.params.id]);
     if (!e) return res.status(404).json({ error: 'Escala nao encontrada' });
     if (e.status !== 'rascunho') {
       return res.status(409).json({ error: 'So rascunho pode ser publicado' });
@@ -287,8 +445,9 @@ router.post('/:id/publicar', podeEscrever, async (req, res, next) => {
       returning id, ano, numero, publicada_em, publicada_por, hash_publicacao
     `, [e.id, quem(req)]);
 
+    const nat = { rodizio: 'de rodizio', inicial: 'inicial (linha de base, sem rodizio)', aditivo: 'aditivo' }[e.natureza] || '';
     await registrar(e.id, 'publicada',
-      `Escala ${pub.numero}/${pub.ano} publicada com ${c.n} pessoas`, quem(req));
+      `Escala ${pub.numero}/${pub.ano} ${nat} publicada com ${c.n} pessoas`, quem(req));
     res.json(pub);
   } catch (e) { next(e); }
 });
@@ -331,7 +490,6 @@ router.delete('/:id', podeEscrever, async (req, res, next) => {
 
 /* ------------------------------------------------------------------
  * GET /escalas/:id/conferir — o hash ainda bate?
- * Recalcula e compara com o que foi gravado na publicacao.
  * ---------------------------------------------------------------- */
 router.get('/:id/conferir', async (req, res, next) => {
   try {
