@@ -88,6 +88,21 @@ const VIZINHANCA = `
       from locais l
   )`;
 
+/* 28/09/2026 — EMPRESA DO LOCAL.
+   O vinculo mora na UNIDADE (unidades.empresa_id, carregado do MMG+ pelo
+   28_empresas.sql); o local herda a empresa das suas unidades. Quando um
+   local tem unidades de mais de uma empresa, vale a que tem mais unidades
+   nele. Aliases eid/enome para nao colidir com v_situacao.nome. */
+const EMPRESA_DO_LOCAL = (col) => `
+  left join lateral (
+    select e.id as eid, e.nome as enome
+      from unidades ux join empresas e on e.id = ux.empresa_id
+     where ux.local_id = ${col}
+     group by e.id, e.nome
+     order by count(*) desc, e.nome
+     limit 1
+  ) emp on true`;
+
 const regrasDe = (p) => ({
   dias_ativo:         n(p.dias_ativo),
   dias_por_mes:       n(p.dias_por_mes),
@@ -169,11 +184,70 @@ router.get('/resumo', async (req, res, next) => {
 });
 
 /* ------------------------------------------------------------------
- * GET /painel/tomadora/:localId — 28/09/2026
+ * TOMADORA — por UNIDADE TOMADORA (local) ou por EMPRESA — 28/09/2026
  * A visao que o gestor abre na frente da empresa: quem esta ativo com
- * base neste local e a situacao de cada um, os pedidos que a unidade
- * fez e o que ja foi escalado para ca.
+ * base nela e a situacao de cada um, os pedidos que fez e o que ja foi
+ * escalado para la. As duas rotas usam o mesmo miolo, que trabalha com
+ * uma lista de UNIDADES.
  * ---------------------------------------------------------------- */
+async function situacaoDasUnidades(unidadeIds, p) {
+  const { rows: pessoas } = await consulta(`
+    select s.codigo, s.nome, s.local_base, s.situacao, s.perfil, s.dias, s.dias_entressafra,
+           s.dias_fora, s.meta, s.falta, round(s.pct_no_local_base)::int as pct_no_local_base,
+           s.ultimo_dia, ceil(s.falta::numeric / ${n(p.dias_por_mes)})::int as semanas
+      from v_situacao s
+     where s.ativo
+       and s.local_base_id in (select local_id from unidades where id = any($1::uuid[]) and local_id is not null)
+     order by (s.situacao = 'Precisa rodar') desc, s.falta desc, s.dias desc
+  `, [unidadeIds]);
+
+  const { rows: [resumo] } = await consulta(`
+    select count(*)::int                                                        as ativos,
+           count(*) filter (where perfil = 'permanente')::int                   as obrigados,
+           count(*) filter (where perfil = 'permanente' and falta > 0)::int     as precisam,
+           count(*) filter (where perfil = 'permanente' and falta = 0)::int     as em_dia,
+           count(*) filter (where perfil = 'isento')::int                       as isentos,
+           count(*) filter (where perfil = 'safrista')::int                     as safristas,
+           coalesce(sum(falta) filter (where perfil = 'permanente'), 0)::int    as dias_a_cumprir
+      from v_situacao
+     where ativo
+       and local_base_id in (select local_id from unidades where id = any($1::uuid[]) and local_id is not null)
+  `, [unidadeIds]);
+
+  const { rows: pedidos } = await consulta(`
+    select r.id, r.unidade_codigo, r.unidade_nome, r.quantidade, r.tipo,
+           r.quinzena_numero, r.quinzena_inicio, r.quinzena_fim, r.encerramento,
+           r.previsao_inicio, r.previsao_fim, r.fora_do_prazo, r.aditivo, r.urgente,
+           r.status, r.solicitante_nome, r.solicitante_tipo, r.criado_em,
+           r.atendida_em, r.atendida_por, r.atendida_obs, r.funcoes
+      from v_requisicoes r
+     where r.unidade_id = any($1::uuid[])
+     order by r.criado_em desc
+     limit 150
+  `, [unidadeIds]);
+
+  const { rows: escalados } = await consulta(`
+    select e.id as escala_id, e.numero, e.ano, e.status, e.natureza,
+           e.periodo_inicio, e.periodo_fim, e.publicada_em,
+           t.codigo, t.nome, u.codigo as unidade_codigo, u.setor,
+           i.data_inicio, i.data_fim, (i.data_fim - i.data_inicio + 1)::int as dias,
+           lo.nome as origem_local
+      from escala_itens i
+      join escalas e        on e.id = i.escala_id
+      join trabalhadores t  on t.id = i.trabalhador_id
+      join unidades u       on u.id = i.destino_unidade_id
+      left join locais lo   on lo.id = i.origem_local_id
+     where u.id = any($1::uuid[])
+       and e.status <> 'cancelada'
+       and e.periodo_fim >= current_date - 45
+     order by e.periodo_inicio desc, e.numero desc nulls first, u.codigo, t.nome
+     limit 600
+  `, [unidadeIds]);
+
+  return { resumo, pessoas, pedidos, escalados, regras: regrasDe(p) };
+}
+
+/* GET /painel/tomadora/:localId — uma unidade tomadora */
 router.get('/tomadora/:localId', async (req, res, next) => {
   try {
     const p = await criterios();
@@ -181,67 +255,99 @@ router.get('/tomadora/:localId', async (req, res, next) => {
       with ${vivos(p)}
       select l.id, l.nome, l.cidade, lv.vivo, lv.dias_parado,
              (select count(*) from unidades u where u.local_id = l.id)::int as setores,
-             coalesce((select n from setores_vivos sv where sv.local_id = l.id), 0)::int as setores_vivos
+             coalesce((select n from setores_vivos sv where sv.local_id = l.id), 0)::int as setores_vivos,
+             (select e.nome from unidades u join empresas e on e.id = u.empresa_id
+               where u.local_id = l.id group by e.nome order by count(*) desc limit 1) as empresa
         from locais l
         left join local_vivo lv on lv.id = l.id
        where l.id = $1
     `, [req.params.localId]);
     if (!local) return res.status(404).json({ error: 'Local nao encontrado' });
 
-    const { rows: pessoas } = await consulta(`
-      select codigo, nome, situacao, perfil, dias, dias_entressafra, dias_fora, meta, falta,
-             round(pct_no_local_base)::int as pct_no_local_base, ultimo_dia,
-             ceil(falta::numeric / ${n(p.dias_por_mes)})::int as semanas
-        from v_situacao
-       where local_base_id = $1 and ativo
-       order by (situacao = 'Precisa rodar') desc, falta desc, dias desc
-    `, [req.params.localId]);
+    const { rows: us } = await consulta('select id from unidades where local_id = $1', [req.params.localId]);
+    const corpo = await situacaoDasUnidades(us.map((u) => u.id), p);
+    res.json({ tipo: 'local', alvo: { ...local, titulo: local.nome }, local, ...corpo });
+  } catch (e) { next(e); }
+});
 
-    const { rows: [resumo] } = await consulta(`
-      select count(*)::int                                                        as ativos,
-             count(*) filter (where perfil = 'permanente')::int                   as obrigados,
-             count(*) filter (where perfil = 'permanente' and falta > 0)::int     as precisam,
-             count(*) filter (where perfil = 'permanente' and falta = 0)::int     as em_dia,
-             count(*) filter (where perfil = 'isento')::int                       as isentos,
-             count(*) filter (where perfil = 'safrista')::int                     as safristas,
-             coalesce(sum(falta) filter (where perfil = 'permanente'), 0)::int    as dias_a_cumprir
-        from v_situacao where local_base_id = $1 and ativo
-    `, [req.params.localId]);
+/* GET /painel/tomadora-empresa/:empresaId — a empresa inteira */
+router.get('/tomadora-empresa/:empresaId', async (req, res, next) => {
+  try {
+    const p = await criterios();
+    const { rows: [emp] } = await consulta(`
+      with ${vivos(p)}
+      select e.id, e.nome, e.cnpj,
+             (select count(*) from unidades u where u.empresa_id = e.id)::int                       as unidades,
+             (select count(distinct u.local_id) from unidades u where u.empresa_id = e.id)::int     as locais,
+             (select count(distinct lo.cidade) from unidades u join locais lo on lo.id = u.local_id
+               where u.empresa_id = e.id and lo.cidade is not null)::int                            as cidades,
+             (select count(*) from ult_unidade uu join unidades u on u.id = uu.id
+               where u.empresa_id = e.id and uu.ultimo > ${ANC} - ${n(p.dias_unidade_ativa)})::int  as unidades_vivas
+        from empresas e
+       where e.id = $1
+    `, [req.params.empresaId]);
+    if (!emp) return res.status(404).json({ error: 'Empresa nao encontrada' });
 
-    const { rows: pedidos } = await consulta(`
-      select r.id, r.unidade_codigo, r.unidade_nome, r.quantidade, r.tipo,
-             r.quinzena_numero, r.quinzena_inicio, r.quinzena_fim, r.encerramento,
-             r.previsao_inicio, r.previsao_fim, r.fora_do_prazo, r.aditivo, r.urgente,
-             r.status, r.solicitante_nome, r.solicitante_tipo, r.criado_em,
-             r.atendida_em, r.atendida_por, r.atendida_obs, r.funcoes,
-             (select array_agg(ar.nome order by ar.ordem)
-                from atividades_ref ar where ar.codigo = any(r.atividades)) as atividades_nomes
-        from v_requisicoes r
-        join unidades u on u.id = r.unidade_id
-       where u.local_id = $1
-       order by r.criado_em desc
-       limit 100
-    `, [req.params.localId]);
+    const { rows: us } = await consulta('select id from unidades where empresa_id = $1', [req.params.empresaId]);
+    const corpo = await situacaoDasUnidades(us.map((u) => u.id), p);
+    res.json({ tipo: 'empresa', alvo: { ...emp, titulo: emp.nome }, ...corpo });
+  } catch (e) { next(e); }
+});
 
-    const { rows: escalados } = await consulta(`
-      select e.id as escala_id, e.numero, e.ano, e.status, e.natureza,
-             e.periodo_inicio, e.periodo_fim, e.publicada_em,
-             t.codigo, t.nome, u.codigo as unidade_codigo, u.setor,
-             i.data_inicio, i.data_fim, (i.data_fim - i.data_inicio + 1)::int as dias,
-             lo.nome as origem_local
-        from escala_itens i
-        join escalas e        on e.id = i.escala_id
-        join trabalhadores t  on t.id = i.trabalhador_id
-        join unidades u       on u.id = i.destino_unidade_id
-        left join locais lo   on lo.id = i.origem_local_id
-       where u.local_id = $1
-         and e.status <> 'cancelada'
-         and e.periodo_fim >= current_date - 45
-       order by e.periodo_inicio desc, e.numero desc nulls first, t.nome
-       limit 400
-    `, [req.params.localId]);
+/* GET /painel/empresas — para a busca da Tomadora e para os seletores */
+router.get('/empresas', async (req, res, next) => {
+  try {
+    const { rows } = await consulta(`
+      with le as (
+        select distinct empresa_id, local_id from unidades
+         where empresa_id is not null and local_id is not null
+      ),
+      sit as (
+        select le.empresa_id,
+               count(*) filter (where s.ativo)::int                                                      as ativos,
+               count(*) filter (where s.ativo and s.perfil = 'permanente' and s.falta > 0)::int          as precisam
+          from le join v_situacao s on s.local_base_id = le.local_id
+         group by le.empresa_id
+      )
+      select e.id, e.nome, e.cnpj,
+             (select count(*) from unidades u where u.empresa_id = e.id)::int as unidades,
+             (select count(*) from le where le.empresa_id = e.id)::int        as locais,
+             coalesce(sit.ativos, 0)                                          as ativos,
+             coalesce(sit.precisam, 0)                                        as precisam
+        from empresas e
+        left join sit on sit.empresa_id = e.id
+       where e.ativa
+       order by coalesce(sit.ativos, 0) desc, e.nome
+    `);
+    res.json(rows);
+  } catch (e) { next(e); }
+});
 
-    res.json({ local, resumo, pessoas, pedidos, escalados, regras: regrasDe(p) });
+/* PUT /painel/local/:id/empresa — liga ao local (as unidades dele que ainda
+ * nao tem empresa) a empresa escolhida. Serve para o que o MMG+ nao conhece. */
+router.put('/local/:id/empresa', async (req, res, next) => {
+  try {
+    const { empresa_id } = req.body || {};
+    if (!empresa_id) return res.status(400).json({ error: 'Escolha a empresa' });
+    const { rows: [e] } = await consulta('select id, nome from empresas where id = $1', [empresa_id]);
+    if (!e) return res.status(404).json({ error: 'Empresa nao encontrada' });
+    const { rowCount } = await consulta(
+      'update unidades set empresa_id = $2 where local_id = $1 and empresa_id is null',
+      [req.params.id, empresa_id]);
+    res.json({ empresa: e.nome, unidades_ligadas: rowCount });
+  } catch (e) { next(e); }
+});
+
+/* PUT /painel/local/:id/cidade — texto livre; a distancia so passa a valer
+ * quando a cidade existe na tabela de referencia ou o ponto e colado do mapa */
+router.put('/local/:id/cidade', async (req, res, next) => {
+  try {
+    const cidade = String((req.body || {}).cidade || '').trim();
+    if (cidade.length < 3) return res.status(400).json({ error: 'Informe o nome da cidade' });
+    const { rows: [l] } = await consulta(
+      'update locais set cidade = $2 where id = $1 returning id, cidade', [req.params.id, cidade]);
+    if (!l) return res.status(404).json({ error: 'Local nao encontrado' });
+    res.json(l);
   } catch (e) { next(e); }
 });
 
@@ -268,8 +374,10 @@ router.get('/trabalhadores', async (req, res, next) => {
              meta, falta, perfil, situacao, ultimo_dia,
              round(pct_no_local_base)::int as pct_no_local_base,
              meses_com_movimento,
-             ceil(falta::numeric / ${n(p.dias_por_mes)})::int as semanas
+             ceil(falta::numeric / ${n(p.dias_por_mes)})::int as semanas,
+             emp.eid as empresa_id, emp.enome as empresa
         from v_situacao
+        ${EMPRESA_DO_LOCAL('v_situacao.local_base_id')}
        where ${onde}
        order by dias desc
        limit 2000
@@ -584,12 +692,14 @@ router.get('/fila', async (req, res, next) => {
              pt.cidade,
              pt.aproximada                                  as ponto_aproximado,
              coalesce(v.locais_mesma_cidade, 0)::int        as locais_mesma_cidade,
-             v.km_mais_proximo
+             v.km_mais_proximo,
+             emp.eid as empresa_id, emp.enome as empresa
         from v_fila_fixos f
         left join locais        l  on l.id = f.local_base_id
         left join v_local_ponto pt on pt.id  = l.id
         left join setores_vivos sv on sv.local_id = l.id
         left join viz           v  on v.local_id  = l.id
+        ${EMPRESA_DO_LOCAL('f.local_base_id')}
        order by f.dias desc
        limit 500
     `);
@@ -628,13 +738,15 @@ router.get('/locais', async (req, res, next) => {
              coalesce(f.semanas, 0)                     as semanas,
              coalesce(v.locais_mesma_cidade, 0)::int    as locais_mesma_cidade,
              v.km_mais_proximo,
-             lv.vivo, lv.ultimo as ultimo_movimento, lv.dias_parado
+             lv.vivo, lv.ultimo as ultimo_movimento, lv.dias_parado,
+             emp.eid as empresa_id, emp.enome as empresa
         from v_local_ponto pt
         left join fila          f  on f.local_base_id = pt.id
         left join viz           v  on v.local_id   = pt.id
         left join setores       s  on s.local_id   = pt.id
         left join setores_vivos sv on sv.local_id  = pt.id
         left join local_vivo    lv on lv.id        = pt.id
+        ${EMPRESA_DO_LOCAL('pt.id')}
        order by lv.vivo desc nulls last, coalesce(f.pessoas,0) desc, pt.nome
     `);
     res.json(rows);

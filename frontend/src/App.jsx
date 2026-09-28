@@ -297,11 +297,12 @@ function Ficha({ token, codigo, aoFechar }) {
 }
 
 /* ------------------------------------------------------------------ */
-function Lista({ token, grupo, locais, aoVoltar, diasPorMes, aoAbrirFicha }) {
+function Lista({ token, grupo, locais, empresas, aoVoltar, diasPorMes, aoAbrirFicha }) {
   const [linhas, setLinhas] = useState(null);
   const [erro, setErro] = useState("");
   const [busca, setBusca] = useState("");
   const [local, setLocal] = useState("");
+  const [empresa, setEmpresa] = useState("");
 
   useEffect(() => {
     setLinhas(null); setErro("");
@@ -313,9 +314,10 @@ function Lista({ token, grupo, locais, aoVoltar, diasPorMes, aoAbrirFicha }) {
     const t = busca.trim().toLowerCase();
     return linhas.filter((x) =>
       (!t || (x.nome || "").toLowerCase().includes(t) || x.codigo.includes(t)) &&
+      (!empresa || x.empresa_id === empresa) &&
       (!local || x.local_base === local)
     );
-  }, [linhas, busca, local]);
+  }, [linhas, busca, local, empresa]);
 
   if (erro) return <p className="text-sm text-rose-600">{erro}</p>;
   if (!linhas) return <p className="text-sm text-slate-400">Carregando…</p>;
@@ -326,10 +328,16 @@ function Lista({ token, grupo, locais, aoVoltar, diasPorMes, aoAbrirFicha }) {
         <button onClick={aoVoltar} className="text-[13px] text-slate-600 underline">← Painel</button>
         <span className="text-sm font-medium">{GRUPOS[grupo]}</span>
         <Busca valor={busca} aoMudar={setBusca} dica="Buscar nome ou código…" />
+        <select value={empresa} onChange={(e) => { setEmpresa(e.target.value); setLocal(""); }}
+          className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
+          <option value="">Todas as empresas</option>
+          {(empresas || []).map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
+        </select>
         <select value={local} onChange={(e) => setLocal(e.target.value)}
           className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
           <option value="">Todos os locais</option>
-          {locais.map((l) => <option key={l.local_base} value={l.local_base}>{l.local_base}</option>)}
+          {locais.filter((l) => !empresa || l.empresa_id === empresa)
+            .map((l) => <option key={l.local_base} value={l.local_base}>{l.local_base}</option>)}
         </select>
         <span className="text-[12px] text-slate-500">{filtradas.length} de {linhas.length}</span>
       </div>
@@ -994,57 +1002,99 @@ const SITUACAO_COR = {
 const rotuloQz = (r) =>
   r.quinzena_inicio ? `${r.quinzena_numero === 1 ? "1ª" : "2ª"} quinzena · ${dataBR(r.quinzena_inicio).slice(0, 5)} a ${dataBR(r.quinzena_fim)}` : "";
 
-function Tomadora({ token, locais, aoAbrirFicha }) {
+function Tomadora({ token, locais, empresas, inicial, aoAbrirFicha }) {
   const [busca, setBusca] = useState("");
-  const [localId, setLocalId] = useState("");
+  const [alvo, setAlvo] = useState(null);     // { tipo: "empresa" | "local", id }
   const [d, setD] = useState(null);
   const [erro, setErro] = useState("");
   const [carregando, setCarregando] = useState(false);
 
-  const opcoes = useMemo(() => {
-    const t = busca.trim().toLowerCase();
-    return locais
-      .filter((l) => !t || l.local_base.toLowerCase().includes(t) || (l.cidade || "").toLowerCase().includes(t))
-      .slice(0, 12);
-  }, [locais, busca]);
+  useEffect(() => { if (inicial) setAlvo({ tipo: inicial.tipo, id: inicial.id }); }, [inicial]);
+
+  const t = busca.trim().toLowerCase();
+  const opcoesEmpresas = useMemo(
+    () => (t.length >= 2 ? (empresas || []).filter((e) => e.nome.toLowerCase().includes(t)).slice(0, 6) : []),
+    [empresas, t]);
+  const opcoesLocais = useMemo(
+    () => (t.length >= 2
+      ? locais.filter((l) => l.local_base.toLowerCase().includes(t)
+          || (l.cidade || "").toLowerCase().includes(t)
+          || (l.empresa || "").toLowerCase().includes(t)).slice(0, 12)
+      : []),
+    [locais, t]);
 
   useEffect(() => {
-    if (!localId) { setD(null); return; }
-    setCarregando(true); setErro("");
-    pedir(`/painel/tomadora/${localId}`, token).then(setD).catch((e) => setErro(e.message)).finally(() => setCarregando(false));
-  }, [localId, token]);
+    if (!alvo) { setD(null); return; }
+    setD(null); setCarregando(true); setErro("");
+    const rota = alvo.tipo === "empresa" ? `/painel/tomadora-empresa/${alvo.id}` : `/painel/tomadora/${alvo.id}`;
+    pedir(rota, token).then(setD).catch((e) => setErro(e.message)).finally(() => setCarregando(false));
+  }, [alvo, token]);
 
-  const l = d?.local, r = d?.resumo;
+  const a = d?.alvo, r = d?.resumo;
+  const ehEmpresa = d?.tipo === "empresa";
   const pedidosAbertos = (d?.pedidos || []).filter((p) => p.status === "aberta" || p.status === "em_atendimento");
+  const escolher = (tipo, id) => { setAlvo({ tipo, id }); setBusca(""); };
 
   return (
     <div className="space-y-4">
-      {/* ---- escolher a unidade ---- */}
+      {/* ---- escolher a empresa ou a unidade ---- */}
       <div className="bg-white rounded-xl border border-slate-200 p-4">
-        <p className="text-sm font-medium">Situação por unidade tomadora</p>
+        <p className="text-sm font-medium">Situação por empresa ou unidade tomadora</p>
         <p className="text-[11px] text-slate-500 mt-1 mb-3">
-          Escolha a unidade. A tela mostra quem está ativo com base nela e a situação de cada um no
-          rodízio, os pedidos que a unidade fez e o que já foi escalado para lá.
+          Escolha a empresa inteira (todas as unidades dela somadas) ou uma unidade só. A tela mostra quem está
+          ativo com base nela e a situação de cada um no rodízio, os pedidos que fez e o que já foi escalado.
         </p>
         <div className="flex gap-2 items-center flex-wrap">
-          <Busca valor={busca} aoMudar={setBusca} dica="Buscar unidade ou cidade…" />
-          {l && (
+          <Busca valor={busca} aoMudar={setBusca} dica="Buscar empresa, unidade ou cidade…" />
+          {a && (
             <span className="text-[12px] text-slate-600">
-              selecionada: <b>{l.nome}</b>
-              <button onClick={() => { setLocalId(""); setBusca(""); }} className="ml-2 text-teal-700 underline">trocar</button>
+              selecionada: <b>{a.titulo}</b>{ehEmpresa && " · empresa"}
+              <button onClick={() => { setAlvo(null); setBusca(""); }} className="ml-2 text-teal-700 underline">trocar</button>
             </span>
           )}
         </div>
-        {!localId && busca.trim().length >= 2 && (
-          <div className="mt-2 border border-slate-200 rounded-lg overflow-hidden max-h-80 overflow-y-auto">
-            {opcoes.map((o) => (
-              <button key={o.id} onClick={() => setLocalId(o.id)}
-                className="w-full text-left px-3 py-2 border-b border-slate-100 last:border-0 hover:bg-slate-50">
-                <span className="text-[13px] font-medium">{o.local_base}</span>
-                <span className="text-[11.5px] text-slate-500"> · {o.cidade || "sem cidade"} · {o.vivo ? "ativa" : "parada"} · {o.pessoas} na fila</span>
+
+        {!alvo && t.length < 2 && (empresas || []).length > 0 && (
+          <div className="mt-3">
+            <p className="text-[11px] text-slate-500 mb-1.5">Maiores empresas, por trabalhadores ativos:</p>
+            <div className="flex gap-1.5 flex-wrap">
+              {empresas.slice(0, 10).map((e) => (
+                <button key={e.id} onClick={() => escolher("empresa", e.id)}
+                  className="px-3 py-1.5 rounded-lg border border-slate-200 text-[12.5px] hover:border-slate-400">
+                  {e.nome} <span className="text-slate-400">· {e.ativos}</span>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {!alvo && t.length >= 2 && (
+          <div className="mt-2 border border-slate-200 rounded-lg overflow-hidden max-h-96 overflow-y-auto">
+            {opcoesEmpresas.length > 0 && (
+              <p className="px-3 py-1.5 text-[10.5px] uppercase tracking-wide text-slate-500 bg-slate-50">Empresas</p>
+            )}
+            {opcoesEmpresas.map((e) => (
+              <button key={e.id} onClick={() => escolher("empresa", e.id)}
+                className="w-full text-left px-3 py-2 border-b border-slate-100 hover:bg-slate-50">
+                <span className="text-[13px] font-medium">{e.nome}</span>
+                <span className="text-[11.5px] text-slate-500"> · {e.unidades} unidades · {e.ativos} ativos · {e.precisam} precisam rodar</span>
               </button>
             ))}
-            {opcoes.length === 0 && <p className="px-3 py-2 text-[12px] text-slate-500">Nenhuma unidade com isso.</p>}
+            {opcoesLocais.length > 0 && (
+              <p className="px-3 py-1.5 text-[10.5px] uppercase tracking-wide text-slate-500 bg-slate-50">Unidades</p>
+            )}
+            {opcoesLocais.map((o) => (
+              <button key={o.id} onClick={() => escolher("local", o.id)}
+                className="w-full text-left px-3 py-2 border-b border-slate-100 last:border-0 hover:bg-slate-50">
+                <span className="text-[13px] font-medium">{o.local_base}</span>
+                <span className="text-[11.5px] text-slate-500">
+                  {o.empresa ? ` · ${o.empresa}` : ""} · {o.cidade || "sem cidade"} · {o.vivo ? "ativa" : "parada"} · {o.pessoas} na fila
+                </span>
+              </button>
+            ))}
+            {opcoesEmpresas.length === 0 && opcoesLocais.length === 0 && (
+              <p className="px-3 py-2 text-[12px] text-slate-500">Nada com isso.</p>
+            )}
           </div>
         )}
       </div>
@@ -1052,17 +1102,26 @@ function Tomadora({ token, locais, aoAbrirFicha }) {
       {erro && <p className="text-[13px] text-rose-600">{erro}</p>}
       {carregando && <p className="text-sm text-slate-400">Carregando…</p>}
 
-      {d && l && (
+      {d && a && (
         <>
           {/* ---- cabeçalho + resumo ---- */}
           <div className="bg-white rounded-xl border border-slate-200 p-4">
             <div className="flex items-start justify-between gap-4 flex-wrap">
               <div>
-                <p className="text-[16px] font-semibold">{l.nome}</p>
-                <p className="text-[12px] text-slate-500 mt-0.5">
-                  {l.cidade || "sem cidade"} · {l.setores_vivos} de {l.setores} {l.setores === 1 ? "setor ativo" : "setores ativos"} ·{" "}
-                  {l.vivo ? <span className="text-emerald-700">ativa</span> : <span className="text-slate-400">parada{l.dias_parado != null ? ` há ${l.dias_parado} dias` : ""}</span>}
-                </p>
+                <p className="text-[16px] font-semibold">{a.titulo}</p>
+                {ehEmpresa ? (
+                  <p className="text-[12px] text-slate-500 mt-0.5">
+                    Empresa · {a.unidades} {a.unidades === 1 ? "unidade" : "unidades"} em {a.locais} {a.locais === 1 ? "local" : "locais"}
+                    {a.cidades > 0 && ` · ${a.cidades} ${a.cidades === 1 ? "cidade" : "cidades"}`}
+                    {" · "}{a.unidades_vivas} com movimento recente
+                    {a.cnpj ? ` · CNPJ ${a.cnpj}` : ""}
+                  </p>
+                ) : (
+                  <p className="text-[12px] text-slate-500 mt-0.5">
+                    {a.empresa ? `${a.empresa} · ` : ""}{a.cidade || "sem cidade"} · {a.setores_vivos} de {a.setores} {a.setores === 1 ? "setor ativo" : "setores ativos"} ·{" "}
+                    {a.vivo ? <span className="text-emerald-700">ativa</span> : <span className="text-slate-400">parada{a.dias_parado != null ? ` há ${a.dias_parado} dias` : ""}</span>}
+                  </p>
+                )}
               </div>
               <button onClick={() => window.print()}
                 className="bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px] text-slate-700 hover:border-slate-500">
@@ -1084,7 +1143,7 @@ function Tomadora({ token, locais, aoAbrirFicha }) {
           {/* ---- pessoas ---- */}
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-100">
-              <p className="text-[13px] font-medium">Trabalhadores ativos com base nesta unidade · {d.pessoas.length}</p>
+              <p className="text-[13px] font-medium">Trabalhadores ativos com base {ehEmpresa ? "nesta empresa" : "nesta unidade"} · {d.pessoas.length}</p>
               <p className="text-[11px] text-slate-500 mt-0.5">
                 Ativo = movimento nos últimos {d.regras.dias_ativo} dias da janela. Quem precisa rodar aparece primeiro.
               </p>
@@ -1095,6 +1154,7 @@ function Tomadora({ token, locais, aoAbrirFicha }) {
                   <tr>
                     <th className="text-left px-3 py-2">Código</th>
                     <th className="text-left px-3 py-2">Nome</th>
+                    {ehEmpresa && <th className="text-left px-3 py-2">Local-base</th>}
                     <th className="text-left px-3 py-2">Situação</th>
                     <th className="text-right px-3 py-2">Dias</th>
                     <th className="text-right px-3 py-2">Entressafra</th>
@@ -1106,25 +1166,26 @@ function Tomadora({ token, locais, aoAbrirFicha }) {
                   </tr>
                 </thead>
                 <tbody>
-                  {d.pessoas.map((t) => (
-                    <tr key={t.codigo} onClick={() => aoAbrirFicha(t.codigo)}
+                  {d.pessoas.map((p) => (
+                    <tr key={p.codigo} onClick={() => aoAbrirFicha(p.codigo)}
                         className="border-t border-slate-50 hover:bg-slate-50 cursor-pointer">
-                      <td className="px-3 py-2 font-medium">{t.codigo}</td>
-                      <td className="px-3 py-2">{t.nome || <span className="text-amber-700 text-[11px]">sem cadastro no MMG+</span>}</td>
+                      <td className="px-3 py-2 font-medium">{p.codigo}</td>
+                      <td className="px-3 py-2">{p.nome || <span className="text-amber-700 text-[11px]">sem cadastro no MMG+</span>}</td>
+                      {ehEmpresa && <td className="px-3 py-2 text-slate-600">{p.local_base}</td>}
                       <td className="px-3 py-2">
-                        <span className={`text-[11px] px-1.5 py-0.5 rounded ${SITUACAO_COR[t.situacao] || "bg-slate-100 text-slate-600"}`}>{t.situacao}</span>
+                        <span className={`text-[11px] px-1.5 py-0.5 rounded ${SITUACAO_COR[p.situacao] || "bg-slate-100 text-slate-600"}`}>{p.situacao}</span>
                       </td>
-                      <td className="px-3 py-2 text-right tabular-nums">{t.dias}</td>
-                      <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.dias_entressafra}</td>
-                      <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.dias_fora}</td>
-                      <td className="px-3 py-2 text-right tabular-nums">{t.meta}</td>
-                      <td className={`px-3 py-2 text-right tabular-nums font-semibold ${t.falta > 0 ? "text-amber-600" : "text-emerald-600"}`}>{t.falta}</td>
-                      <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.pct_no_local_base}%</td>
-                      <td className="px-3 py-2 text-slate-500">{dataBR(t.ultimo_dia)}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{p.dias}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-slate-500">{p.dias_entressafra}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-slate-500">{p.dias_fora}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{p.meta}</td>
+                      <td className={`px-3 py-2 text-right tabular-nums font-semibold ${p.falta > 0 ? "text-amber-600" : "text-emerald-600"}`}>{p.falta}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-slate-500">{p.pct_no_local_base}%</td>
+                      <td className="px-3 py-2 text-slate-500">{dataBR(p.ultimo_dia)}</td>
                     </tr>
                   ))}
                   {d.pessoas.length === 0 && (
-                    <tr><td colSpan="10" className="px-3 py-4 text-slate-400">Ninguém ativo com base nesta unidade.</td></tr>
+                    <tr><td colSpan="11" className="px-3 py-4 text-slate-400">Ninguém ativo com base {ehEmpresa ? "nesta empresa" : "nesta unidade"}.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -1135,19 +1196,19 @@ function Tomadora({ token, locais, aoAbrirFicha }) {
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-100">
               <p className="text-[13px] font-medium">
-                Pedidos desta unidade · {d.pedidos.length}
+                Pedidos {ehEmpresa ? "da empresa" : "desta unidade"} · {d.pedidos.length}
                 {pedidosAbertos.length > 0 && <span className="ml-2 text-[11px] text-amber-700">{pedidosAbertos.length} em aberto</span>}
               </p>
             </div>
             {d.pedidos.length === 0 ? (
-              <p className="px-4 py-5 text-[13px] text-slate-500">Nenhum pedido registrado para esta unidade.</p>
+              <p className="px-4 py-5 text-[13px] text-slate-500">Nenhum pedido registrado.</p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-[12px]">
                   <thead className="bg-slate-50 text-slate-500">
                     <tr>
                       <th className="text-left px-3 py-2">Pedido em</th>
-                      <th className="text-left px-3 py-2">Setor</th>
+                      <th className="text-left px-3 py-2">Unidade</th>
                       <th className="text-left px-3 py-2">Para</th>
                       <th className="text-right px-3 py-2">Pessoas</th>
                       <th className="text-left px-3 py-2">Quem pediu</th>
@@ -1174,9 +1235,7 @@ function Tomadora({ token, locais, aoAbrirFicha }) {
                             </span>
                           )}
                         </td>
-                        <td className="px-3 py-2 text-slate-600">
-                          {pd.solicitante_nome}{pd.solicitante_tipo === "mmg" ? " · MMG" : ""}
-                        </td>
+                        <td className="px-3 py-2 text-slate-600">{pd.solicitante_nome}{pd.solicitante_tipo === "mmg" ? " · MMG" : ""}</td>
                         <td className="px-3 py-2">
                           <span className={`text-[11px] px-1.5 py-0.5 rounded ${
                             pd.status === "aberta" ? "bg-amber-50 text-amber-700"
@@ -1196,11 +1255,11 @@ function Tomadora({ token, locais, aoAbrirFicha }) {
           {/* ---- escalados para cá ---- */}
           <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
             <div className="px-4 py-3 border-b border-slate-100">
-              <p className="text-[13px] font-medium">Escalados para esta unidade · {d.escalados.length}</p>
+              <p className="text-[13px] font-medium">Escalados para {ehEmpresa ? "esta empresa" : "esta unidade"} · {d.escalados.length}</p>
               <p className="text-[11px] text-slate-500 mt-0.5">Escalas dos últimos 45 dias e futuras, rascunhos incluídos.</p>
             </div>
             {d.escalados.length === 0 ? (
-              <p className="px-4 py-5 text-[13px] text-slate-500">Nenhuma escala com destino nesta unidade.</p>
+              <p className="px-4 py-5 text-[13px] text-slate-500">Nenhuma escala com destino aqui.</p>
             ) : (
               <div className="overflow-x-auto">
                 <table className="w-full text-[12px]">
@@ -1210,7 +1269,7 @@ function Tomadora({ token, locais, aoAbrirFicha }) {
                       <th className="text-left px-3 py-2">Código</th>
                       <th className="text-left px-3 py-2">Nome</th>
                       <th className="text-left px-3 py-2">Vem de</th>
-                      <th className="text-left px-3 py-2">Setor</th>
+                      <th className="text-left px-3 py-2">Unidade</th>
                       <th className="text-left px-3 py-2">Período</th>
                       <th className="text-right px-3 py-2">Dias</th>
                     </tr>
@@ -1245,11 +1304,14 @@ function Tomadora({ token, locais, aoAbrirFicha }) {
             <div className="border-b-2 border-slate-900 pb-2 flex items-start justify-between">
               <div>
                 <p className="text-[15px] font-semibold">MMG · Movimentação de Mercadorias em Geral</p>
-                <p>Situação do rodízio por unidade tomadora · Lei 12.023/2009, art. 5º, I e II</p>
+                <p>Situação do rodízio por {ehEmpresa ? "empresa tomadora" : "unidade tomadora"} · Lei 12.023/2009, art. 5º, I e II</p>
               </div>
               <div className="text-right">
-                <p className="text-[15px] font-semibold">{l.nome}</p>
-                <p>{l.cidade || ""} · emitido em {new Date().toLocaleString("pt-BR")}</p>
+                <p className="text-[15px] font-semibold">{a.titulo}</p>
+                <p>
+                  {ehEmpresa ? `${a.unidades} unidades em ${a.locais} locais` : (a.cidade || "")}
+                  {" · "}emitido em {new Date().toLocaleString("pt-BR")}
+                </p>
               </div>
             </div>
             <p className="py-2">
@@ -1260,31 +1322,34 @@ function Tomadora({ token, locais, aoAbrirFicha }) {
             </p>
             <table className="w-full" style={{ borderCollapse: "collapse" }}>
               <thead><tr className="text-left text-slate-500">
-                <th className="px-1 py-0.5">Código</th><th className="px-1 py-0.5">Nome</th><th className="px-1 py-0.5">Situação</th>
+                <th className="px-1 py-0.5">Código</th><th className="px-1 py-0.5">Nome</th>
+                {ehEmpresa && <th className="px-1 py-0.5">Local-base</th>}
+                <th className="px-1 py-0.5">Situação</th>
                 <th className="px-1 py-0.5 text-right">Dias</th><th className="px-1 py-0.5 text-right">Entressafra</th>
                 <th className="px-1 py-0.5 text-right">Fora</th><th className="px-1 py-0.5 text-right">Meta</th><th className="px-1 py-0.5 text-right">Falta</th>
               </tr></thead>
               <tbody>
-                {d.pessoas.map((t) => (
-                  <tr key={t.codigo} className="border-t border-slate-200">
-                    <td className="px-1 py-0.5 tabular-nums">{t.codigo}</td>
-                    <td className="px-1 py-0.5">{t.nome || "sem cadastro"}</td>
-                    <td className="px-1 py-0.5">{t.situacao}</td>
-                    <td className="px-1 py-0.5 text-right tabular-nums">{t.dias}</td>
-                    <td className="px-1 py-0.5 text-right tabular-nums">{t.dias_entressafra}</td>
-                    <td className="px-1 py-0.5 text-right tabular-nums">{t.dias_fora}</td>
-                    <td className="px-1 py-0.5 text-right tabular-nums">{t.meta}</td>
-                    <td className="px-1 py-0.5 text-right tabular-nums">{t.falta}</td>
+                {d.pessoas.map((p) => (
+                  <tr key={p.codigo} className="border-t border-slate-200">
+                    <td className="px-1 py-0.5 tabular-nums">{p.codigo}</td>
+                    <td className="px-1 py-0.5">{p.nome || "sem cadastro"}</td>
+                    {ehEmpresa && <td className="px-1 py-0.5">{p.local_base}</td>}
+                    <td className="px-1 py-0.5">{p.situacao}</td>
+                    <td className="px-1 py-0.5 text-right tabular-nums">{p.dias}</td>
+                    <td className="px-1 py-0.5 text-right tabular-nums">{p.dias_entressafra}</td>
+                    <td className="px-1 py-0.5 text-right tabular-nums">{p.dias_fora}</td>
+                    <td className="px-1 py-0.5 text-right tabular-nums">{p.meta}</td>
+                    <td className="px-1 py-0.5 text-right tabular-nums">{p.falta}</td>
                   </tr>
                 ))}
               </tbody>
             </table>
             {d.pedidos.length > 0 && (
               <>
-                <p className="mt-3 font-semibold">Pedidos da unidade</p>
+                <p className="mt-3 font-semibold">Pedidos</p>
                 <table className="w-full" style={{ borderCollapse: "collapse" }}>
                   <tbody>
-                    {d.pedidos.slice(0, 20).map((pd) => (
+                    {d.pedidos.slice(0, 30).map((pd) => (
                       <tr key={pd.id} className="border-t border-slate-200">
                         <td className="px-1 py-0.5">{dataBR(pd.criado_em)}</td>
                         <td className="px-1 py-0.5">{pd.unidade_codigo}</td>
@@ -1304,6 +1369,55 @@ function Tomadora({ token, locais, aoAbrirFicha }) {
           </div>
         </>
       )}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+ * AJUSTES DO LOCAL — 28/09/2026
+ * O que o MMG+ não conhece: local sem empresa ou sem cidade. Só aparece
+ * quando falta alguma das duas, e só para quem pode editar.
+ * ---------------------------------------------------------------- */
+function AjustesDoLocal({ token, local, empresas, podeEditar, aoAtualizar }) {
+  const [empresaId, setEmpresaId] = useState("");
+  const [cidade, setCidade] = useState("");
+  const [salvando, setSalvando] = useState(false);
+  const [erro, setErro] = useState("");
+  if (!podeEditar || (local.empresa && local.cidade)) return null;
+
+  async function ligar() {
+    setSalvando(true); setErro("");
+    try { await gravar(`/painel/local/${local.id}/empresa`, token, { empresa_id: empresaId }); await aoAtualizar(); }
+    catch (e) { setErro(e.message); } finally { setSalvando(false); }
+  }
+  async function definirCidade() {
+    setSalvando(true); setErro("");
+    try { await gravar(`/painel/local/${local.id}/cidade`, token, { cidade }); await aoAtualizar(); }
+    catch (e) { setErro(e.message); } finally { setSalvando(false); }
+  }
+
+  return (
+    <div className="mt-2 flex gap-2 flex-wrap items-center">
+      {!local.empresa && (
+        <>
+          <select value={empresaId} onChange={(e) => setEmpresaId(e.target.value)}
+            className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12px]">
+            <option value="">Sem empresa — escolher…</option>
+            {(empresas || []).map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
+          </select>
+          <button onClick={ligar} disabled={!empresaId || salvando}
+            className="bg-teal-600 text-white rounded-lg px-3 py-1.5 text-[12px] disabled:opacity-40">Ligar</button>
+        </>
+      )}
+      {!local.cidade && (
+        <>
+          <input value={cidade} onChange={(e) => setCidade(e.target.value)} placeholder="Cidade do local"
+            className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12px] w-44" />
+          <button onClick={definirCidade} disabled={cidade.trim().length < 3 || salvando}
+            className="bg-teal-600 text-white rounded-lg px-3 py-1.5 text-[12px] disabled:opacity-40">Gravar cidade</button>
+        </>
+      )}
+      {erro && <span className="text-[11px] text-rose-600">{erro}</span>}
     </div>
   );
 }
@@ -1522,6 +1636,9 @@ function Painel({ token, sair }) {
   const [raio, setRaio] = useState("");
   const [buscaLocal, setBuscaLocal] = useState("");
   const [soSemPonto, setSoSemPonto] = useState(false);
+  const [filtroEmpresa, setFiltroEmpresa] = useState("");
+  const [soSemEmpresa, setSoSemEmpresa] = useState(false);
+  const [alvoTomadora, setAlvoTomadora] = useState(null);
 
   const carregar = useCallback(
     () =>
@@ -1533,9 +1650,10 @@ function Painel({ token, sair }) {
         pedir("/painel/sem-cadastro", token),
         pedir("/painel/safristas-fixos", token),
         pedir("/requisicoes/resumo", token).catch(() => null),
+        pedir("/painel/empresas", token).catch(() => []),
       ])
-        .then(([resumo, curva, locais, fila, semCadastro, safristas, reqs]) =>
-          setD({ resumo, curva, locais, fila, semCadastro, safristas, reqs }))
+        .then(([resumo, curva, locais, fila, semCadastro, safristas, reqs, empresas]) =>
+          setD({ resumo, curva, locais, fila, semCadastro, safristas, reqs, empresas }))
         .catch((e) => setErro(e.message)),
     [token]
   );
@@ -1554,12 +1672,13 @@ function Painel({ token, sair }) {
           (c.nivel <= 2 || (x.km_mais_proximo != null && x.km_mais_proximo <= Number(raio))));
       return (
         (!t || (x.nome || "").toLowerCase().includes(t) || x.codigo.includes(t)) &&
+        (!filtroEmpresa || x.empresa_id === filtroEmpresa) &&
         (!filtroLocal || x.local_base === filtroLocal) &&
         (!soSemNivel1 || c.nivel >= 3) &&
         passaRaio
       );
     });
-  }, [d, buscaFila, filtroLocal, soSemNivel1, raio]);
+  }, [d, buscaFila, filtroEmpresa, filtroLocal, soSemNivel1, raio]);
 
   const locaisFiltrados = useMemo(() => {
     if (!d) return [];
@@ -1567,9 +1686,10 @@ function Painel({ token, sair }) {
     return d.locais.filter(
       (l) =>
         (!t || l.local_base.toLowerCase().includes(t) || (l.cidade || "").toLowerCase().includes(t)) &&
-        (!soSemPonto || l.fonte !== "mapa")
+        (!soSemPonto || l.fonte !== "mapa") &&
+        (!soSemEmpresa || !l.empresa)
     );
-  }, [d, buscaLocal, soSemPonto]);
+  }, [d, buscaLocal, soSemPonto, soSemEmpresa]);
 
   function abrirGrupo(g) { setGrupo(g); setAba("lista"); }
 
@@ -1594,6 +1714,7 @@ function Painel({ token, sair }) {
   if (!d) return <div className="min-h-screen grid place-items-center text-slate-400 text-sm">Carregando…</div>;
 
   const { resumo, curva, locais, fila, semCadastro, safristas, reqs } = d;
+  const empresas = d.empresas || [];
   const j = resumo.janela, a = resumo.ativos, r = resumo.regras, fx = resumo.fixos;
   const comPonto = resumo.base.locais_com_ponto ?? 0;
   const metaTexto = r.tipo_meta === "dias"
@@ -1657,7 +1778,7 @@ function Painel({ token, sair }) {
         {ficha && <Ficha token={token} codigo={ficha} aoFechar={() => setFicha(null)} />}
 
         {aba === "lista" && (
-          <Lista token={token} grupo={grupo} locais={locais} aoAbrirFicha={setFicha}
+          <Lista token={token} grupo={grupo} locais={locais} empresas={empresas} aoAbrirFicha={setFicha}
                  aoVoltar={() => setAba("painel")} diasPorMes={r.dias_por_mes} />
         )}
 
@@ -1757,7 +1878,7 @@ function Painel({ token, sair }) {
           <Escalas token={token} podeEditar={podeEditar} pedir={pedir} gravar={gravar} />
         )}
         {aba === "safra" && <Safra token={token} aoAtualizar={carregar} podeEditar={podeEditar} />}
-        {aba === "tomadora" && <Tomadora token={token} locais={locais} aoAbrirFicha={setFicha} />}
+        {aba === "tomadora" && <Tomadora token={token} locais={locais} empresas={empresas} inicial={alvoTomadora} aoAbrirFicha={setFicha} />}
         {aba === "criterios" && (
           <Criterios token={token} aoAtualizar={carregar} podeEditar={podeEditar}
                      souAdmin={eu.perfil === "admin"} />
@@ -1773,6 +1894,12 @@ function Painel({ token, sair }) {
                              : "bg-white text-slate-600 border-slate-200"}`}>
                 Só quem falta definir no mapa
               </button>
+              <button onClick={() => setSoSemEmpresa((v) => !v)}
+                className={`px-3 py-2 rounded-lg text-[13px] border ${
+                  soSemEmpresa ? "bg-slate-900 text-white border-slate-900"
+                               : "bg-white text-slate-600 border-slate-200"}`}>
+                Só quem está sem empresa
+              </button>
               <span className="text-[12px] text-slate-500">{locaisFiltrados.length} de {locais.length}</span>
             </div>
 
@@ -1781,7 +1908,12 @@ function Painel({ token, sair }) {
                 <div key={l.id} className="px-4 py-3 border-b border-slate-50">
                   <div className="flex items-start gap-3">
                     <div className="flex-1 min-w-0">
-                      <p className="text-sm truncate">{l.local_base}</p>
+                      <p className="text-sm truncate">
+                        {l.local_base}
+                        {l.empresa
+                          ? <span className="ml-2 text-[11px] text-slate-500">· {l.empresa}</span>
+                          : <span className="ml-2 text-[10px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700">sem empresa</span>}
+                      </p>
                       <p className="text-[11px] text-slate-500">
                         {l.vivo
                           ? <span className="text-emerald-700">ativa</span>
@@ -1803,6 +1935,8 @@ function Painel({ token, sair }) {
                       </p>
                       <PontoDoLocal token={token} local={l} aoGravar={atualizarPonto}
                                     podeEditar={podeEditar} />
+                      <AjustesDoLocal token={token} local={l} empresas={empresas}
+                                      podeEditar={podeEditar} aoAtualizar={carregar} />
                     </div>
                     <div className="text-right shrink-0">
                       <p className="text-sm font-semibold tabular-nums">{l.pessoas}</p>
@@ -1823,11 +1957,23 @@ function Painel({ token, sair }) {
           <>
             <div className="flex gap-2 items-center flex-wrap">
               <Busca valor={buscaFila} aoMudar={setBuscaFila} dica="Buscar nome ou código…" />
+              <select value={filtroEmpresa} onChange={(e) => { setFiltroEmpresa(e.target.value); setFiltroLocal(""); }}
+                className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
+                <option value="">Todas as empresas</option>
+                {empresas.map((e) => <option key={e.id} value={e.id}>{e.nome}</option>)}
+              </select>
               <select value={filtroLocal} onChange={(e) => setFiltroLocal(e.target.value)}
                 className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
                 <option value="">Todos os locais</option>
-                {locais.map((l) => <option key={l.id} value={l.local_base}>{l.local_base}</option>)}
+                {locais.filter((l) => !filtroEmpresa || l.empresa_id === filtroEmpresa)
+                  .map((l) => <option key={l.id} value={l.local_base}>{l.local_base}</option>)}
               </select>
+              {filtroEmpresa && (
+                <button onClick={() => { setAlvoTomadora({ tipo: "empresa", id: filtroEmpresa, n: Date.now() }); setAba("tomadora"); }}
+                  className="px-3 py-2 rounded-lg text-[13px] border border-teal-300 text-teal-700 bg-white">
+                  Abrir a tela da empresa →
+                </button>
+              )}
               <select value={raio} onChange={(e) => setRaio(e.target.value)}
                 className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
                 <option value="">Qualquer distância</option>
