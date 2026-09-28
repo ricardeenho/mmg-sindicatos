@@ -18,6 +18,11 @@ const ACENTOS_DE = 'áàâãäéèêëíìîïóòôõöúùûüç';
 const ACENTOS_PARA = 'aaaaaeeeeiiiiooooouuuuc';
 const semAcento = (campo) => `translate(lower(${campo}), '${ACENTOS_DE}', '${ACENTOS_PARA}')`;
 const n = (x) => Math.trunc(Number(x)) || 0;
+/* 27/09/2026 — data do banco chega como objeto Date; para comparar e
+   para o SQL vai so o dia, em texto (String(Date) daria "Thu Oct 01..."
+   e a conferencia da quinzena nunca batia: pedido por quinzena era
+   recusado com "Quinzena invalida"). */
+const soData = (d) => (d instanceof Date ? d.toISOString() : String(d || '')).slice(0, 10);
 
 async function criterios() {
   const { rows: [p] } = await consulta('select * from v_janela limit 1');
@@ -38,7 +43,7 @@ async function quinzenas(sindicatoId) {
   return rows.map((q, i) => ({
     ...q,
     posicao: i === 0 ? 'atual' : i === 1 ? 'proxima' : 'seguinte',
-    corte_passou: q.corte && String(q.corte).slice(0, 10) < new Date().toISOString().slice(0, 10),
+    corte_passou: !!q.corte && soData(q.corte) < new Date().toISOString().slice(0, 10),
   }));
 }
 
@@ -206,11 +211,11 @@ router.post('/publico/:token', async (req, res, next) => {
       if (!b.quinzena_inicio) return res.status(400).json({ error: 'Escolha a quinzena' });
       const { rows: [q] } = await consulta(
         'select * from calc_quinzena($1::date, $2)', [b.quinzena_inicio, l.sindicato_id]);
-      if (!q || String(q.quinzena_inicio).slice(0, 10) !== String(b.quinzena_inicio).slice(0, 10)) {
+      if (!q || soData(q.quinzena_inicio) !== soData(b.quinzena_inicio)) {
         return res.status(400).json({ error: 'Quinzena invalida: use o primeiro dia dela' });
       }
-      inicioTxt = String(q.quinzena_inicio).slice(0, 10);
-      fimTxt = String(q.quinzena_fim).slice(0, 10);
+      inicioTxt = soData(q.quinzena_inicio);
+      fimTxt = soData(q.quinzena_fim);
     } else {
       if (!b.previsao_inicio || !b.previsao_fim) {
         return res.status(400).json({ error: 'Pedido avulso precisa de inicio e fim' });

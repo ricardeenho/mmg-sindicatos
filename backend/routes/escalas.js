@@ -103,7 +103,7 @@ router.get('/quinzenas', async (req, res, next) => {
     const hoje = new Date().toISOString().slice(0, 10);
     for (const [i, q] of rows.entries()) {
       q.posicao = i === 0 ? 'atual' : i === 1 ? 'proxima' : 'seguinte';
-      q.corte_passou = String(q.corte).slice(0, 10) < hoje;
+      q.corte_passou = soData(q.corte) < hoje;
       const { rows: [c] } = await consulta(`
         select count(*)::int as pedidos, count(distinct unidade_id)::int as unidades,
                coalesce(sum(quantidade),0)::int as pessoas
