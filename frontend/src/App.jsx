@@ -969,6 +969,345 @@ function Criterios({ token, aoAtualizar, podeEditar, souAdmin }) {
   );
 }
 
+/* ------------------------------------------------------------------
+ * TOMADORA — 28/09/2026
+ * A tela que se abre na frente da empresa: uma unidade tomadora, os
+ * ativos com base nela e a situação de cada um, os pedidos que ela fez
+ * e o que já foi escalado para lá. Com impressão.
+ * ---------------------------------------------------------------- */
+const ESTILO_IMPRESSAO_TOMADORA = `
+@media print {
+  @page { size: A4; margin: 14mm; }
+  body * { visibility: hidden !important; }
+  #doc-tomadora, #doc-tomadora * { visibility: visible !important; }
+  #doc-tomadora { display: block !important; position: absolute; left: 0; top: 0; width: 100%; }
+  #doc-tomadora tr { page-break-inside: avoid; }
+}`;
+
+const SITUACAO_COR = {
+  "Precisa rodar": "bg-amber-50 text-amber-700",
+  "Em dia": "bg-emerald-50 text-emerald-700",
+  "Safrista": "bg-sky-50 text-sky-700",
+  "Isento": "bg-slate-100 text-slate-600",
+  "Sem movimento": "bg-slate-100 text-slate-500",
+};
+const rotuloQz = (r) =>
+  r.quinzena_inicio ? `${r.quinzena_numero === 1 ? "1ª" : "2ª"} quinzena · ${dataBR(r.quinzena_inicio).slice(0, 5)} a ${dataBR(r.quinzena_fim)}` : "";
+
+function Tomadora({ token, locais, aoAbrirFicha }) {
+  const [busca, setBusca] = useState("");
+  const [localId, setLocalId] = useState("");
+  const [d, setD] = useState(null);
+  const [erro, setErro] = useState("");
+  const [carregando, setCarregando] = useState(false);
+
+  const opcoes = useMemo(() => {
+    const t = busca.trim().toLowerCase();
+    return locais
+      .filter((l) => !t || l.local_base.toLowerCase().includes(t) || (l.cidade || "").toLowerCase().includes(t))
+      .slice(0, 12);
+  }, [locais, busca]);
+
+  useEffect(() => {
+    if (!localId) { setD(null); return; }
+    setCarregando(true); setErro("");
+    pedir(`/painel/tomadora/${localId}`, token).then(setD).catch((e) => setErro(e.message)).finally(() => setCarregando(false));
+  }, [localId, token]);
+
+  const l = d?.local, r = d?.resumo;
+  const pedidosAbertos = (d?.pedidos || []).filter((p) => p.status === "aberta" || p.status === "em_atendimento");
+
+  return (
+    <div className="space-y-4">
+      {/* ---- escolher a unidade ---- */}
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <p className="text-sm font-medium">Situação por unidade tomadora</p>
+        <p className="text-[11px] text-slate-500 mt-1 mb-3">
+          Escolha a unidade. A tela mostra quem está ativo com base nela e a situação de cada um no
+          rodízio, os pedidos que a unidade fez e o que já foi escalado para lá.
+        </p>
+        <div className="flex gap-2 items-center flex-wrap">
+          <Busca valor={busca} aoMudar={setBusca} dica="Buscar unidade ou cidade…" />
+          {l && (
+            <span className="text-[12px] text-slate-600">
+              selecionada: <b>{l.nome}</b>
+              <button onClick={() => { setLocalId(""); setBusca(""); }} className="ml-2 text-teal-700 underline">trocar</button>
+            </span>
+          )}
+        </div>
+        {!localId && busca.trim().length >= 2 && (
+          <div className="mt-2 border border-slate-200 rounded-lg overflow-hidden max-h-80 overflow-y-auto">
+            {opcoes.map((o) => (
+              <button key={o.id} onClick={() => setLocalId(o.id)}
+                className="w-full text-left px-3 py-2 border-b border-slate-100 last:border-0 hover:bg-slate-50">
+                <span className="text-[13px] font-medium">{o.local_base}</span>
+                <span className="text-[11.5px] text-slate-500"> · {o.cidade || "sem cidade"} · {o.vivo ? "ativa" : "parada"} · {o.pessoas} na fila</span>
+              </button>
+            ))}
+            {opcoes.length === 0 && <p className="px-3 py-2 text-[12px] text-slate-500">Nenhuma unidade com isso.</p>}
+          </div>
+        )}
+      </div>
+
+      {erro && <p className="text-[13px] text-rose-600">{erro}</p>}
+      {carregando && <p className="text-sm text-slate-400">Carregando…</p>}
+
+      {d && l && (
+        <>
+          {/* ---- cabeçalho + resumo ---- */}
+          <div className="bg-white rounded-xl border border-slate-200 p-4">
+            <div className="flex items-start justify-between gap-4 flex-wrap">
+              <div>
+                <p className="text-[16px] font-semibold">{l.nome}</p>
+                <p className="text-[12px] text-slate-500 mt-0.5">
+                  {l.cidade || "sem cidade"} · {l.setores_vivos} de {l.setores} {l.setores === 1 ? "setor ativo" : "setores ativos"} ·{" "}
+                  {l.vivo ? <span className="text-emerald-700">ativa</span> : <span className="text-slate-400">parada{l.dias_parado != null ? ` há ${l.dias_parado} dias` : ""}</span>}
+                </p>
+              </div>
+              <button onClick={() => window.print()}
+                className="bg-white border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px] text-slate-700 hover:border-slate-500">
+                Imprimir
+              </button>
+            </div>
+            <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-2 mt-4">
+              {[["Ativos", r.ativos, ""], ["Obrigados", r.obrigados, ""], ["Precisam rodar", r.precisam, "text-amber-600"],
+                ["Em dia", r.em_dia, "text-emerald-600"], ["Isentos", r.isentos, "text-slate-500"], ["Safristas", r.safristas, "text-sky-600"],
+                ["Dias a cumprir", r.dias_a_cumprir, "text-amber-600"]].map(([rot, v, cor]) => (
+                <div key={rot} className="bg-slate-50 rounded-lg p-3">
+                  <p className="text-[10.5px] text-slate-500">{rot}</p>
+                  <p className={`text-xl font-semibold tabular-nums ${cor}`}>{v}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* ---- pessoas ---- */}
+          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100">
+              <p className="text-[13px] font-medium">Trabalhadores ativos com base nesta unidade · {d.pessoas.length}</p>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Ativo = movimento nos últimos {d.regras.dias_ativo} dias da janela. Quem precisa rodar aparece primeiro.
+              </p>
+            </div>
+            <div className="overflow-x-auto">
+              <table className="w-full text-[12px]">
+                <thead className="bg-slate-50 text-slate-500">
+                  <tr>
+                    <th className="text-left px-3 py-2">Código</th>
+                    <th className="text-left px-3 py-2">Nome</th>
+                    <th className="text-left px-3 py-2">Situação</th>
+                    <th className="text-right px-3 py-2">Dias</th>
+                    <th className="text-right px-3 py-2">Entressafra</th>
+                    <th className="text-right px-3 py-2">Fora</th>
+                    <th className="text-right px-3 py-2">Meta</th>
+                    <th className="text-right px-3 py-2">Falta</th>
+                    <th className="text-right px-3 py-2">% aqui</th>
+                    <th className="text-left px-3 py-2">Último dia</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {d.pessoas.map((t) => (
+                    <tr key={t.codigo} onClick={() => aoAbrirFicha(t.codigo)}
+                        className="border-t border-slate-50 hover:bg-slate-50 cursor-pointer">
+                      <td className="px-3 py-2 font-medium">{t.codigo}</td>
+                      <td className="px-3 py-2">{t.nome || <span className="text-amber-700 text-[11px]">sem cadastro no MMG+</span>}</td>
+                      <td className="px-3 py-2">
+                        <span className={`text-[11px] px-1.5 py-0.5 rounded ${SITUACAO_COR[t.situacao] || "bg-slate-100 text-slate-600"}`}>{t.situacao}</span>
+                      </td>
+                      <td className="px-3 py-2 text-right tabular-nums">{t.dias}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.dias_entressafra}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.dias_fora}</td>
+                      <td className="px-3 py-2 text-right tabular-nums">{t.meta}</td>
+                      <td className={`px-3 py-2 text-right tabular-nums font-semibold ${t.falta > 0 ? "text-amber-600" : "text-emerald-600"}`}>{t.falta}</td>
+                      <td className="px-3 py-2 text-right tabular-nums text-slate-500">{t.pct_no_local_base}%</td>
+                      <td className="px-3 py-2 text-slate-500">{dataBR(t.ultimo_dia)}</td>
+                    </tr>
+                  ))}
+                  {d.pessoas.length === 0 && (
+                    <tr><td colSpan="10" className="px-3 py-4 text-slate-400">Ninguém ativo com base nesta unidade.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* ---- pedidos ---- */}
+          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100">
+              <p className="text-[13px] font-medium">
+                Pedidos desta unidade · {d.pedidos.length}
+                {pedidosAbertos.length > 0 && <span className="ml-2 text-[11px] text-amber-700">{pedidosAbertos.length} em aberto</span>}
+              </p>
+            </div>
+            {d.pedidos.length === 0 ? (
+              <p className="px-4 py-5 text-[13px] text-slate-500">Nenhum pedido registrado para esta unidade.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-[12px]">
+                  <thead className="bg-slate-50 text-slate-500">
+                    <tr>
+                      <th className="text-left px-3 py-2">Pedido em</th>
+                      <th className="text-left px-3 py-2">Setor</th>
+                      <th className="text-left px-3 py-2">Para</th>
+                      <th className="text-right px-3 py-2">Pessoas</th>
+                      <th className="text-left px-3 py-2">Quem pediu</th>
+                      <th className="text-left px-3 py-2">Situação</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {d.pedidos.map((pd) => (
+                      <tr key={pd.id} className="border-t border-slate-50 align-top">
+                        <td className="px-3 py-2 text-slate-600 whitespace-nowrap">{dataHoraBR(pd.criado_em)}</td>
+                        <td className="px-3 py-2"><b>{pd.unidade_codigo}</b> <span className="text-slate-500">{pd.unidade_nome}</span></td>
+                        <td className="px-3 py-2">
+                          {pd.tipo === "avulsa"
+                            ? `${dataBR(pd.previsao_inicio)}${pd.previsao_fim ? ` a ${dataBR(pd.previsao_fim)}` : " em diante"}`
+                            : rotuloQz(pd)}
+                          {pd.fora_do_prazo && <span className="ml-1.5 text-[10.5px] bg-amber-100 text-amber-800 rounded px-1">fora do prazo</span>}
+                          {pd.aditivo && <span className="ml-1.5 text-[10.5px] bg-sky-100 text-sky-800 rounded px-1">aditivo</span>}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">
+                          {pd.quantidade}
+                          {(pd.funcoes || []).length > 0 && (
+                            <span className="block text-[10.5px] text-slate-500 text-right">
+                              {pd.funcoes.map((f) => `${f.quantidade} ${f.nome}`).join(" · ")}
+                            </span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-slate-600">
+                          {pd.solicitante_nome}{pd.solicitante_tipo === "mmg" ? " · MMG" : ""}
+                        </td>
+                        <td className="px-3 py-2">
+                          <span className={`text-[11px] px-1.5 py-0.5 rounded ${
+                            pd.status === "aberta" ? "bg-amber-50 text-amber-700"
+                            : pd.status === "em_atendimento" ? "bg-sky-50 text-sky-700"
+                            : pd.status === "atendida" ? "bg-emerald-50 text-emerald-700"
+                            : "bg-slate-100 text-slate-500"}`}>{pd.status.replace("_", " ")}</span>
+                          {pd.atendida_obs && <span className="block text-[10.5px] text-slate-400 mt-0.5">{pd.atendida_obs}</span>}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* ---- escalados para cá ---- */}
+          <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+            <div className="px-4 py-3 border-b border-slate-100">
+              <p className="text-[13px] font-medium">Escalados para esta unidade · {d.escalados.length}</p>
+              <p className="text-[11px] text-slate-500 mt-0.5">Escalas dos últimos 45 dias e futuras, rascunhos incluídos.</p>
+            </div>
+            {d.escalados.length === 0 ? (
+              <p className="px-4 py-5 text-[13px] text-slate-500">Nenhuma escala com destino nesta unidade.</p>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-[12px]">
+                  <thead className="bg-slate-50 text-slate-500">
+                    <tr>
+                      <th className="text-left px-3 py-2">Escala</th>
+                      <th className="text-left px-3 py-2">Código</th>
+                      <th className="text-left px-3 py-2">Nome</th>
+                      <th className="text-left px-3 py-2">Vem de</th>
+                      <th className="text-left px-3 py-2">Setor</th>
+                      <th className="text-left px-3 py-2">Período</th>
+                      <th className="text-right px-3 py-2">Dias</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {d.escalados.map((i, k) => (
+                      <tr key={k} className="border-t border-slate-50">
+                        <td className="px-3 py-2 whitespace-nowrap">
+                          {i.numero ? `${String(i.numero).padStart(3, "0")}/${i.ano}` : "rascunho"}
+                          <span className={`ml-1.5 text-[10.5px] px-1 rounded ${
+                            i.natureza === "inicial" ? "bg-slate-100 text-slate-600" : i.natureza === "aditivo" ? "bg-sky-50 text-sky-700" : "bg-teal-50 text-teal-700"}`}>
+                            {i.natureza}
+                          </span>
+                        </td>
+                        <td className="px-3 py-2 font-medium">{i.codigo}</td>
+                        <td className="px-3 py-2">{i.nome || "—"}</td>
+                        <td className="px-3 py-2 text-slate-600">{i.natureza === "inicial" ? "permanece" : (i.origem_local || "—")}</td>
+                        <td className="px-3 py-2 text-slate-600">{i.unidade_codigo} · {i.setor || "—"}</td>
+                        <td className="px-3 py-2 text-slate-600">{dataBR(i.data_inicio)} a {dataBR(i.data_fim)}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{i.dias}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* ---- documento impresso ---- */}
+          <div id="doc-tomadora" className="hidden text-slate-900" style={{ fontSize: "11px" }}>
+            <style>{ESTILO_IMPRESSAO_TOMADORA}</style>
+            <div className="border-b-2 border-slate-900 pb-2 flex items-start justify-between">
+              <div>
+                <p className="text-[15px] font-semibold">MMG · Movimentação de Mercadorias em Geral</p>
+                <p>Situação do rodízio por unidade tomadora · Lei 12.023/2009, art. 5º, I e II</p>
+              </div>
+              <div className="text-right">
+                <p className="text-[15px] font-semibold">{l.nome}</p>
+                <p>{l.cidade || ""} · emitido em {new Date().toLocaleString("pt-BR")}</p>
+              </div>
+            </div>
+            <p className="py-2">
+              Ativos {r.ativos} · obrigados ao rodízio {r.obrigados} · precisam rodar {r.precisam} · em dia {r.em_dia} ·
+              isentos {r.isentos} · safristas {r.safristas} · dias a cumprir {r.dias_a_cumprir}.
+              Meta: {d.regras.tipo_meta === "dias" ? `${d.regras.meta_dias} dias fixos` : "percentual dos dias de entressafra"} ·
+              ativo = movimento nos últimos {d.regras.dias_ativo} dias da janela.
+            </p>
+            <table className="w-full" style={{ borderCollapse: "collapse" }}>
+              <thead><tr className="text-left text-slate-500">
+                <th className="px-1 py-0.5">Código</th><th className="px-1 py-0.5">Nome</th><th className="px-1 py-0.5">Situação</th>
+                <th className="px-1 py-0.5 text-right">Dias</th><th className="px-1 py-0.5 text-right">Entressafra</th>
+                <th className="px-1 py-0.5 text-right">Fora</th><th className="px-1 py-0.5 text-right">Meta</th><th className="px-1 py-0.5 text-right">Falta</th>
+              </tr></thead>
+              <tbody>
+                {d.pessoas.map((t) => (
+                  <tr key={t.codigo} className="border-t border-slate-200">
+                    <td className="px-1 py-0.5 tabular-nums">{t.codigo}</td>
+                    <td className="px-1 py-0.5">{t.nome || "sem cadastro"}</td>
+                    <td className="px-1 py-0.5">{t.situacao}</td>
+                    <td className="px-1 py-0.5 text-right tabular-nums">{t.dias}</td>
+                    <td className="px-1 py-0.5 text-right tabular-nums">{t.dias_entressafra}</td>
+                    <td className="px-1 py-0.5 text-right tabular-nums">{t.dias_fora}</td>
+                    <td className="px-1 py-0.5 text-right tabular-nums">{t.meta}</td>
+                    <td className="px-1 py-0.5 text-right tabular-nums">{t.falta}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {d.pedidos.length > 0 && (
+              <>
+                <p className="mt-3 font-semibold">Pedidos da unidade</p>
+                <table className="w-full" style={{ borderCollapse: "collapse" }}>
+                  <tbody>
+                    {d.pedidos.slice(0, 20).map((pd) => (
+                      <tr key={pd.id} className="border-t border-slate-200">
+                        <td className="px-1 py-0.5">{dataBR(pd.criado_em)}</td>
+                        <td className="px-1 py-0.5">{pd.unidade_codigo}</td>
+                        <td className="px-1 py-0.5">{pd.tipo === "avulsa" ? `${dataBR(pd.previsao_inicio)}${pd.previsao_fim ? ` a ${dataBR(pd.previsao_fim)}` : " em diante"}` : rotuloQz(pd)}</td>
+                        <td className="px-1 py-0.5 text-right tabular-nums">{pd.quantidade}</td>
+                        <td className="px-1 py-0.5">{pd.solicitante_nome}</td>
+                        <td className="px-1 py-0.5">{pd.status.replace("_", " ")}{pd.fora_do_prazo ? " · fora do prazo" : ""}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </>
+            )}
+            <p className="mt-3 text-slate-500" style={{ fontSize: "9px" }}>
+              Documento gerado pelo MMG Sindicatos. Situação apurada pela janela de doze meses do sistema, a partir do ponto das unidades tomadoras.
+            </p>
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+
 /* ------------------------------------------------------------------ */
 function PontoDoLocal({ token, local, aoGravar, podeEditar }) {
   const [aberto, setAberto] = useState(false);
@@ -1287,7 +1626,7 @@ function Painel({ token, sair }) {
 
       <div className="max-w-6xl mx-auto px-4 py-4 space-y-4">
         <div className="flex gap-1.5 flex-wrap">
-          {[["painel","Painel"],["safra","Safra"],["criterios","Critérios"],["locais","Locais"],["fila","Fila"],
+          {[["painel","Painel"],["safra","Safra"],["criterios","Critérios"],["locais","Locais"],["tomadora","Tomadora"],["fila","Fila"],
             ["requisicoes","Requisições"],["escalas","Escalas"],
             ["safristas","Safristas fixos"],["cadastro","Sem cadastro"],
             ...(podeEditar ? [["importar","Importar"]] : []),
@@ -1418,6 +1757,7 @@ function Painel({ token, sair }) {
           <Escalas token={token} podeEditar={podeEditar} pedir={pedir} gravar={gravar} />
         )}
         {aba === "safra" && <Safra token={token} aoAtualizar={carregar} podeEditar={podeEditar} />}
+        {aba === "tomadora" && <Tomadora token={token} locais={locais} aoAbrirFicha={setFicha} />}
         {aba === "criterios" && (
           <Criterios token={token} aoAtualizar={carregar} podeEditar={podeEditar}
                      souAdmin={eu.perfil === "admin"} />

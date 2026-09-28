@@ -169,6 +169,83 @@ router.get('/resumo', async (req, res, next) => {
 });
 
 /* ------------------------------------------------------------------
+ * GET /painel/tomadora/:localId — 28/09/2026
+ * A visao que o gestor abre na frente da empresa: quem esta ativo com
+ * base neste local e a situacao de cada um, os pedidos que a unidade
+ * fez e o que ja foi escalado para ca.
+ * ---------------------------------------------------------------- */
+router.get('/tomadora/:localId', async (req, res, next) => {
+  try {
+    const p = await criterios();
+    const { rows: [local] } = await consulta(`
+      with ${vivos(p)}
+      select l.id, l.nome, l.cidade, lv.vivo, lv.dias_parado,
+             (select count(*) from unidades u where u.local_id = l.id)::int as setores,
+             coalesce((select n from setores_vivos sv where sv.local_id = l.id), 0)::int as setores_vivos
+        from locais l
+        left join local_vivo lv on lv.id = l.id
+       where l.id = $1
+    `, [req.params.localId]);
+    if (!local) return res.status(404).json({ error: 'Local nao encontrado' });
+
+    const { rows: pessoas } = await consulta(`
+      select codigo, nome, situacao, perfil, dias, dias_entressafra, dias_fora, meta, falta,
+             round(pct_no_local_base)::int as pct_no_local_base, ultimo_dia,
+             ceil(falta::numeric / ${n(p.dias_por_mes)})::int as semanas
+        from v_situacao
+       where local_base_id = $1 and ativo
+       order by (situacao = 'Precisa rodar') desc, falta desc, dias desc
+    `, [req.params.localId]);
+
+    const { rows: [resumo] } = await consulta(`
+      select count(*)::int                                                        as ativos,
+             count(*) filter (where perfil = 'permanente')::int                   as obrigados,
+             count(*) filter (where perfil = 'permanente' and falta > 0)::int     as precisam,
+             count(*) filter (where perfil = 'permanente' and falta = 0)::int     as em_dia,
+             count(*) filter (where perfil = 'isento')::int                       as isentos,
+             count(*) filter (where perfil = 'safrista')::int                     as safristas,
+             coalesce(sum(falta) filter (where perfil = 'permanente'), 0)::int    as dias_a_cumprir
+        from v_situacao where local_base_id = $1 and ativo
+    `, [req.params.localId]);
+
+    const { rows: pedidos } = await consulta(`
+      select r.id, r.unidade_codigo, r.unidade_nome, r.quantidade, r.tipo,
+             r.quinzena_numero, r.quinzena_inicio, r.quinzena_fim, r.encerramento,
+             r.previsao_inicio, r.previsao_fim, r.fora_do_prazo, r.aditivo, r.urgente,
+             r.status, r.solicitante_nome, r.solicitante_tipo, r.criado_em,
+             r.atendida_em, r.atendida_por, r.atendida_obs, r.funcoes,
+             (select array_agg(ar.nome order by ar.ordem)
+                from atividades_ref ar where ar.codigo = any(r.atividades)) as atividades_nomes
+        from v_requisicoes r
+        join unidades u on u.id = r.unidade_id
+       where u.local_id = $1
+       order by r.criado_em desc
+       limit 100
+    `, [req.params.localId]);
+
+    const { rows: escalados } = await consulta(`
+      select e.id as escala_id, e.numero, e.ano, e.status, e.natureza,
+             e.periodo_inicio, e.periodo_fim, e.publicada_em,
+             t.codigo, t.nome, u.codigo as unidade_codigo, u.setor,
+             i.data_inicio, i.data_fim, (i.data_fim - i.data_inicio + 1)::int as dias,
+             lo.nome as origem_local
+        from escala_itens i
+        join escalas e        on e.id = i.escala_id
+        join trabalhadores t  on t.id = i.trabalhador_id
+        join unidades u       on u.id = i.destino_unidade_id
+        left join locais lo   on lo.id = i.origem_local_id
+       where u.local_id = $1
+         and e.status <> 'cancelada'
+         and e.periodo_fim >= current_date - 45
+       order by e.periodo_inicio desc, e.numero desc nulls first, t.nome
+       limit 400
+    `, [req.params.localId]);
+
+    res.json({ local, resumo, pessoas, pedidos, escalados, regras: regrasDe(p) });
+  } catch (e) { next(e); }
+});
+
+/* ------------------------------------------------------------------
  * GET /painel/trabalhadores?grupo=...
  * ---------------------------------------------------------------- */
 router.get('/trabalhadores', async (req, res, next) => {
