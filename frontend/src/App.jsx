@@ -3,6 +3,7 @@ import Importar from "./Importar.jsx";
 import Requisicao, { Requisicoes } from "./Requisicao.jsx";
 import Escalas from "./Escalas.jsx";
 import Convocacao from "./Convocacao.jsx";
+import { AssinarRequisicao, ValidarAssinatura } from "./Assinaturas.jsx";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
 const MESES = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
@@ -2144,6 +2145,23 @@ export default function App() {
   const linkRequisicao = params.get("r");
   if (linkRequisicao) {
     return <Requisicao token={linkRequisicao} unidadeParam={params.get("u")} />;
+  }
+
+  /* QR público de validação da assinatura. Não exige login. */
+  const codigoValidacao = params.get("validar");
+  if (codigoValidacao) {
+    return <ValidarAssinatura codigo={codigoValidacao} />;
+  }
+
+  /* QR de assinatura. O token `st` é da solicitação e não substitui o login:
+     o usuário ainda precisa entrar com seu acesso próprio. */
+  const assinaturaId = params.get("assinar");
+  const hashParams = new URLSearchParams(window.location.hash.replace(/^#/, ""));
+  const tokenAssinatura = hashParams.get("st") || params.get("st"); // compatibilidade com links antigos
+  if (assinaturaId && tokenAssinatura) {
+    return token
+      ? <AssinarRequisicao jwt={token} assinaturaId={assinaturaId} tokenAssinatura={tokenAssinatura} sair={sair} />
+      : <Login aoEntrar={setToken} />;
   }
 
   /* Endereço público da convocação: ?c=token */

@@ -14,6 +14,12 @@ const ORIGENS = [
   /\.vercel\.app$/,
 ];
 
+// A mesma URL usada nos QR Codes de assinatura também pode ser liberada
+// explicitamente no CORS (útil quando o frontend usa domínio próprio).
+if (process.env.FRONTEND_URL) {
+  try { ORIGENS.push(new URL(process.env.FRONTEND_URL).origin); } catch (_e) {}
+}
+
 app.use(cors({
   origin: (origem, cb) => {
     if (!origem) return cb(null, true);
@@ -36,6 +42,7 @@ app.use('/auth', require('./routes/auth'));
 app.use('/painel', require('./routes/painel'));
 app.use('/importacao', require('./routes/importacao'));
 app.use('/requisicoes', require('./routes/requisicoes'));
+app.use('/assinaturas', require('./routes/assinaturas'));
 app.use('/escalas', require('./routes/escalas'));
 app.use('/convocacoes', require('./routes/convocacoes'));
 

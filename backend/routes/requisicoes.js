@@ -312,7 +312,23 @@ router.get('/', autenticar, async (req, res, next) => {
              r.tipo, r.quinzena_numero, r.quinzena_inicio, r.quinzena_fim, r.corte,
              r.encerramento, r.fora_do_prazo, r.aditivo, r.funcoes,
              (select array_agg(ar.nome order by ar.ordem)
-                from atividades_ref ar where ar.codigo = any(r.atividades)) as atividades_nomes
+                from atividades_ref ar where ar.codigo = any(r.atividades)) as atividades_nomes,
+             coalesce((
+               select json_agg(json_build_object(
+                 'id', a.id,
+                 'usuario_id', a.usuario_id,
+                 'assinante_nome', au.nome,
+                 'assinante_usuario', au.usuario,
+                 'status', case when a.status = 'pendente' and a.expira_em < now() then 'expirada' else a.status end,
+                 'criado_em', a.criado_em,
+                 'expira_em', a.expira_em,
+                 'assinada_em', a.assinada_em,
+                 'validation_code', a.validation_code
+               ) order by a.criado_em desc)
+                 from requisicao_assinaturas a
+                 join usuarios au on au.id = a.usuario_id
+                where a.requisicao_id = r.id
+             ), '[]'::json) as assinaturas
         from v_requisicoes r
         ${onde.length ? 'where ' + onde.join(' and ') : ''}
        order by (r.status = 'aberta') desc, r.fora_do_prazo desc, r.urgente desc,

@@ -532,6 +532,12 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
   const [quinzenaFiltro, setQuinzenaFiltro] = useState("");
   const [erro, setErro] = useState("");
   const [copiado, setCopiado] = useState("");
+  const [assinantes, setAssinantes] = useState([]);
+  const [assinaturaPara, setAssinaturaPara] = useState(null);
+  const [usuarioAssinante, setUsuarioAssinante] = useState("");
+  const [gerandoAssinatura, setGerandoAssinatura] = useState(false);
+  const [assinaturaGerada, setAssinaturaGerada] = useState(null);
+  const [qrAssinatura, setQrAssinatura] = useState("");
 
   const [cancelando, setCancelando] = useState(null);
   const [motivo, setMotivo] = useState("");
@@ -542,12 +548,13 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
     try {
       const qs = [filtro ? `status=${filtro}` : "", quinzenaFiltro ? `quinzena=${quinzenaFiltro}` : ""]
         .filter(Boolean).join("&");
-      const [r, l, q] = await Promise.all([
+      const [r, l, q, a] = await Promise.all([
         pedir(`/requisicoes${qs ? `?${qs}` : ""}`, token),
         pedir("/requisicoes/links/lista", token).catch(() => []),
         pedir("/requisicoes/quinzenas", token).catch(() => []),
+        podeEditar ? pedir("/assinaturas/usuarios", token).catch(() => []) : Promise.resolve([]),
       ]);
-      setLinhas(r); setLinks(l); setQuinzenas(q);
+      setLinhas(r); setLinks(l); setQuinzenas(q); setAssinantes(a);
     } catch (e) { setErro(e.message); }
   }
 
@@ -571,6 +578,53 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
       fecharCancelamento();
       await carregar();
     } catch (e) { setErro(e.message); } finally { setSalvandoCancel(false); }
+  }
+
+  function abrirAssinatura(requisicao) {
+    setAssinaturaPara(requisicao);
+    setUsuarioAssinante("");
+    setAssinaturaGerada(null);
+    if (qrAssinatura) URL.revokeObjectURL(qrAssinatura);
+    setQrAssinatura("");
+    setErro("");
+  }
+
+  function fecharAssinatura() {
+    if (qrAssinatura) URL.revokeObjectURL(qrAssinatura);
+    setQrAssinatura("");
+    setAssinaturaGerada(null);
+    setAssinaturaPara(null);
+    setUsuarioAssinante("");
+  }
+
+  async function gerarAssinatura() {
+    if (!assinaturaPara || !usuarioAssinante) return;
+    setGerandoAssinatura(true); setErro("");
+    try {
+      const d = await gravar(`/assinaturas/requisicao/${assinaturaPara.id}`, token,
+        { usuario_id: usuarioAssinante }, "POST");
+      const r = await fetch(`${API}/assinaturas/${d.assinaturaId}/qr`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ token: d.token }),
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({}));
+        throw new Error(e.error || "Não consegui gerar o QR da assinatura");
+      }
+      const url = URL.createObjectURL(await r.blob());
+      if (qrAssinatura) URL.revokeObjectURL(qrAssinatura);
+      setQrAssinatura(url);
+      setAssinaturaGerada(d);
+      await carregar();
+    } catch (e) { setErro(e.message); } finally { setGerandoAssinatura(false); }
+  }
+
+  function copiarAssinatura() {
+    if (!assinaturaGerada?.signingUrl) return;
+    navigator.clipboard?.writeText(assinaturaGerada.signingUrl);
+    setCopiado("assinatura");
+    setTimeout(() => setCopiado(""), 2000);
   }
 
   const universal = links.find((l) => !l.unidade_codigo);
@@ -699,6 +753,35 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
                     <span className="text-slate-400">Motivo:</span> {r.atendida_obs}
                   </p>
                 )}
+
+                {(r.assinaturas || []).length > 0 && (
+                  <>
+                    <div className="mt-2.5 flex gap-1.5 flex-wrap">
+                      {(r.assinaturas || []).map((a) => (
+                        <span key={a.id} className={`text-[10.5px] rounded-full px-2 py-1 ${
+                          a.status === "assinada" ? "bg-emerald-100 text-emerald-800"
+                          : a.status === "expirada" ? "bg-rose-100 text-rose-700"
+                          : "bg-amber-100 text-amber-800"}`}>
+                          {a.assinante_nome} · {a.status}
+                          {a.status === "assinada" && a.validation_code && (
+                            <a href={`/?validar=${encodeURIComponent(a.validation_code)}`}
+                              className="ml-1 underline font-medium">validar</a>
+                          )}
+                        </span>
+                      ))}
+                    </div>
+                    <div className="flex gap-2 mt-2 flex-wrap">
+                      {(r.assinaturas || []).filter((a) => a.status === "assinada" && a.validation_code).map((a) => (
+                        <a key={`qr-${a.id}`} href={`/?validar=${encodeURIComponent(a.validation_code)}`}
+                          title={`Validar assinatura de ${a.assinante_nome}`}>
+                          <img src={`${API}/assinaturas/validar/${encodeURIComponent(a.validation_code)}/qr`}
+                            alt={`QR de validação de ${a.assinante_nome}`}
+                            className="w-20 h-20 bg-white border border-slate-200 rounded-lg p-1" />
+                        </a>
+                      ))}
+                    </div>
+                  </>
+                )}
               </div>
 
               <div className="text-right shrink-0">
@@ -723,6 +806,8 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
                 )}
                 <button onClick={() => mudar(r.id, "atendida")}
                   className="px-3 py-1.5 rounded-lg text-[12px] bg-emerald-600 text-white">Marcar atendida</button>
+                <button onClick={() => abrirAssinatura(r)}
+                  className="px-3 py-1.5 rounded-lg text-[12px] bg-violet-600 text-white">Solicitar assinatura</button>
                 <button onClick={() => abrirCancelamento(r.id)}
                   className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600">Cancelar</button>
               </div>
@@ -762,6 +847,62 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
           </div>
         ))}
       </div>
+
+      {assinaturaPara && (
+        <div className="fixed inset-0 z-40 bg-slate-900/55 p-4 overflow-y-auto" onClick={fecharAssinatura}>
+          <div className="bg-white rounded-2xl max-w-lg mx-auto mt-10 p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start gap-3">
+              <div className="flex-1">
+                <p className="text-[11px] uppercase tracking-wide text-violet-700 font-semibold">Assinatura da requisição</p>
+                <p className="text-[16px] font-semibold mt-1">{assinaturaPara.unidade_codigo} · {assinaturaPara.unidade_nome}</p>
+                <p className="text-[12px] text-slate-500">Escolha o usuário que precisa confirmar este pedido.</p>
+              </div>
+              <button onClick={fecharAssinatura} className="text-slate-400 text-xl">×</button>
+            </div>
+
+            {!assinaturaGerada && (
+              <div className="mt-4">
+                <select value={usuarioAssinante} onChange={(e) => setUsuarioAssinante(e.target.value)}
+                  className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-[13px]">
+                  <option value="">Selecione quem vai assinar…</option>
+                  {assinantes.map((u) => (
+                    <option key={u.id} value={u.id}>{u.nome} · {u.usuario}</option>
+                  ))}
+                </select>
+                <button onClick={gerarAssinatura} disabled={!usuarioAssinante || gerandoAssinatura}
+                  className="w-full mt-3 bg-violet-600 text-white rounded-xl py-3 text-[13px] font-semibold disabled:opacity-40">
+                  {gerandoAssinatura ? "Gerando…" : "Gerar token e QR de assinatura"}
+                </button>
+              </div>
+            )}
+
+            {assinaturaGerada && (
+              <div className="mt-4 space-y-3">
+                <div className="bg-amber-50 border border-amber-200 rounded-xl p-3">
+                  <p className="text-[12px] font-medium text-amber-900">Este token é mostrado somente agora</p>
+                  <p className="text-[11px] text-amber-800 mt-0.5">Apresente o QR ao usuário ou copie o link antes de fechar.</p>
+                </div>
+                {qrAssinatura && (
+                  <img src={qrAssinatura} alt="QR para assinar" className="w-64 h-64 mx-auto rounded-xl border border-slate-200 p-2" />
+                )}
+                <div className="bg-slate-50 rounded-xl p-3">
+                  <p className="text-[11px] text-slate-500">Destinatário</p>
+                  <p className="text-[13px] font-medium">{assinaturaGerada.usuario?.nome}</p>
+                  <p className="text-[11px] text-slate-500 mt-2">Token</p>
+                  <code className="block text-[11px] break-all bg-white border border-slate-200 rounded p-2 mt-1">{assinaturaGerada.token}</code>
+                  <p className="text-[11px] text-slate-500 mt-2">Expira em {new Date(assinaturaGerada.expiraEm).toLocaleString("pt-BR")}</p>
+                </div>
+                <button onClick={copiarAssinatura}
+                  className="w-full border border-slate-200 rounded-xl py-2.5 text-[12px] font-medium text-slate-700">
+                  {copiado === "assinatura" ? "Link copiado" : "Copiar link de assinatura"}
+                </button>
+              </div>
+            )}
+
+            {erro && <p className="text-[12px] text-rose-600 mt-3">{erro}</p>}
+          </div>
+        </div>
+      )}
 
       <p className="text-[11px] text-slate-400">
         Fora do prazo é o pedido que chegou depois do corte da quinzena — a data está nos Critérios.

@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "start": "node index.js",
-    "dev": "node index.js"
+    "dev": "node index.js",
+    "dev:memory": "node memory-server.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
