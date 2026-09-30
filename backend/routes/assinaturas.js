@@ -1,11 +1,11 @@
-const express = require('express');
+﻿const express = require('express');
 const crypto = require('crypto');
 const QRCode = require('qrcode');
 const { consulta, pool } = require('../db');
 const { autenticar, autorizar } = require('../middlewares/auth');
 
 const router = express.Router();
-const TOKEN_MINUTOS = Math.max(2, Math.min(120, Number(process.env.ASSINATURA_TOKEN_MINUTOS || 15)));
+const TOKEN_MINUTOS = Math.max(5, Math.min(10080, Number(process.env.ASSINATURA_TOKEN_MINUTOS || 1440)));
 
 const abrirParaLeitura = (req, _res, next) => {
   req.permitirEscritaLeitura = true;
@@ -148,8 +148,13 @@ function resumoDocumento(documento) {
     previsao_inicio: documento.previsao_inicio,
     previsao_fim: documento.previsao_fim,
     turno: documento.turno,
+    hora_inicio: documento.hora_inicio,
+    hora_fim: documento.hora_fim,
+    atividades: documento.atividades,
+    observacoes: documento.observacoes,
     funcoes: documento.funcoes,
     solicitante_nome: documento.solicitante_nome,
+    solicitante_tipo: documento.solicitante_tipo,
     tipo: documento.tipo,
   };
 }
@@ -265,30 +270,17 @@ router.post('/requisicao/:requisicaoId', autenticar, autorizar('admin', 'gestor'
       });
     }
 
-    await consulta(`
+    // Um token secreto nunca é salvo em texto puro, apenas o hash.
+    // Por isso, se o gestor perdeu o QR/link de uma solicitação pendente,
+    // não existe forma segura de "recuperar" o mesmo link.
+    // Gerar novamente cancela o pendente anterior e cria um token novo.
+    const cancelamento = await consulta(`
       update requisicao_assinaturas
          set status = 'cancelada'
        where requisicao_id = $1
          and status = 'pendente'
-         and (usuario_id <> $2 or expira_em < now())
-    `, [req.params.requisicaoId, u.id]);
-
-    const { rows: [pendente] } = await consulta(`
-      select id, expira_em
-        from requisicao_assinaturas
-       where requisicao_id = $1 and usuario_id = $2
-         and status = 'pendente' and expira_em >= now()
-       order by criado_em desc
-       limit 1
-    `, [req.params.requisicaoId, u.id]);
-    if (pendente) {
-      return res.status(409).json({
-        error: `Ja existe uma assinatura pendente para ${u.nome}. Use o QR ja gerado ou aguarde o vencimento para gerar outro.`,
-        codigo: 'ASSINATURA_JA_PENDENTE',
-        assinaturaId: pendente.id,
-        expiraEm: pendente.expira_em,
-      });
-    }
+    `, [req.params.requisicaoId]);
+    const pendentesSubstituidas = Number(cancelamento.rowCount || 0);
 
     const token = gerarToken();
     const tokenHash = hashToken(token);
@@ -320,7 +312,10 @@ router.post('/requisicao/:requisicaoId', autenticar, autorizar('admin', 'gestor'
       expiraEm: a.expira_em,
       token,
       signingUrl: urlAssinatura(a.id, token),
-      aviso: `QR destinado automaticamente a ${u.nome}, gerente responsavel pela unidade.`,
+      substituiuPendente: pendentesSubstituidas > 0,
+      aviso: pendentesSubstituidas > 0
+        ? `Um link pendente anterior foi cancelado e substituido por este novo link para ${u.nome}.`
+        : `QR destinado automaticamente a ${u.nome}, gerente responsavel pela unidade.`,
     });
   } catch (e) {
     if (e?.code === '23505') {
@@ -400,6 +395,13 @@ router.post('/:id/assinar', abrirParaLeitura, autenticar, async (req, res, next)
     if (String(a.usuario_id) !== String(req.usuario.id)) {
       await client.query('rollback');
       return res.status(403).json({ error: 'Esta solicitacao pertence a outro usuario' });
+    }
+    if (a.status === 'cancelada') {
+      await client.query('rollback');
+      return res.status(409).json({
+        error: 'Este link foi substituido por uma nova solicitacao de assinatura. Use o link mais recente enviado pela MMG.',
+        codigo: 'LINK_SUBSTITUIDO',
+      });
     }
     if (a.status !== 'pendente') {
       await client.query('rollback');
@@ -576,3 +578,4 @@ router.get('/validar/:codigo/qr', async (req, res, next) => {
 });
 
 module.exports = router;
+
