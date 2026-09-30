@@ -127,8 +127,10 @@ function Login({ aoEntrar }) {
     <div className="min-h-screen bg-slate-900 grid place-items-center px-4">
       <div className="bg-white rounded-2xl p-8 w-full max-w-sm">
         <div className="mb-6">
-          <img src="/logo-mmg.png" alt="MMG · Movimentação de Mercadorias em Geral"
-               className="h-12 w-auto mb-3" />
+          <div className="logo-shell inline-flex mb-3">
+            <img src="/logo-mmg.png" alt="MMG · Movimentação de Mercadorias em Geral"
+                 className="h-12 w-auto block" />
+          </div>
           <h1 className="font-semibold text-slate-900">MMG Sindicatos</h1>
           <p className="text-xs text-slate-500">Módulo Rodízio</p>
         </div>
@@ -1923,7 +1925,7 @@ function Painel({ token, sair }) {
     <div className="min-h-screen bg-slate-50 pb-16">
       <header className="bg-slate-900 text-white px-4 py-3 sticky top-0 z-20">
         <div className="max-w-6xl mx-auto flex items-center gap-3">
-          <span className="bg-white rounded-lg px-2 py-1.5 shrink-0">
+          <span className="logo-shell bg-white rounded-lg px-2 py-1.5 shrink-0">
             <img src="/logo-mmg-letras.png" alt="MMG" className="h-4 w-auto block" />
           </span>
           <div className="flex-1">
@@ -2401,4 +2403,5 @@ export default function App() {
 
   return token ? <Painel token={token} sair={sair} /> : <Login aoEntrar={setToken} />;
 }
+
 

@@ -434,3 +434,28 @@ footer {
 
   .validation { grid-template-columns: 1fr; }
 }
+
+/* Logo MMG sempre visível */
+.logoWrap {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: #ffffff;
+  border: 1px solid #e2e8f0;
+  border-radius: 14px;
+  padding: 10px 12px;
+  margin-bottom: 16px;
+  box-shadow:
+    0 10px 15px -3px rgb(15 23 42 / 0.08),
+    0 4px 6px -4px rgb(15 23 42 / 0.08);
+}
+
+.logoWrap img {
+  display: block;
+}
+
+@media (max-width: 520px) {
+  .logoWrap {
+    margin-bottom: 14px;
+  }
+}
