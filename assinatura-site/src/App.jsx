@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 
 const API = String(import.meta.env.VITE_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const STORAGE = 'mmg_assinatura_jwt';
