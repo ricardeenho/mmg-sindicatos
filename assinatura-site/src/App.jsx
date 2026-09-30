@@ -26,8 +26,16 @@ function authHeaders(jwt, body = false) {
 function Logo() {
   return (
     <div className="brand">
-      <div className="brandMark">M</div>
-      <div><strong>MMG</strong><span>Assinaturas</span></div>
+      <img
+        src="/logo-mmg.png"
+        alt="MMG · Movimentação de Mercadorias em Geral"
+        className="brandLogo"
+      />
+
+      <div className="brandText">
+        <strong>MMG Sindicatos</strong>
+        <span>Portal de assinaturas</span>
+      </div>
     </div>
   );
 }
