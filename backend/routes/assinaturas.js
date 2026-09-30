@@ -239,6 +239,105 @@ router.get('/requisicao/:requisicaoId', autenticar, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
+
+/* Central interna de auditoria das assinaturas.
+   Somente admin/gestor consegue consultar estes dados. */
+router.get('/auditoria', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
+  try {
+    const statusPedido = String(req.query.status || 'assinada').trim();
+    const q = String(req.query.q || '').trim().toLowerCase();
+    const filtros = [];
+    const valores = [];
+
+    if (statusPedido) {
+      valores.push(statusPedido);
+      filtros.push(`(
+        case when a.status = 'pendente' and a.expira_em < now()
+             then 'expirada' else a.status end
+      ) = $${valores.length}`);
+    }
+
+    if (q) {
+      valores.push(`%${q}%`);
+      const p = `$${valores.length}`;
+      filtros.push(`(
+        lower(coalesce(a.assinante_nome_snapshot, u.nome, '')) like ${p}
+        or lower(coalesce(a.assinante_usuario_snapshot, u.usuario, '')) like ${p}
+        or lower(coalesce(a.validation_code, '')) like ${p}
+        or lower(a.requisicao_id::text) like ${p}
+        or lower(a.id::text) like ${p}
+        or lower(coalesce(a.document_snapshot->>'unidade_codigo', '')) like ${p}
+        or lower(coalesce(a.document_snapshot->>'unidade_nome', '')) like ${p}
+      )`);
+    }
+
+    const where = filtros.length ? `where ${filtros.join(' and ')}` : '';
+
+    const { rows } = await consulta(`
+      select a.id, a.requisicao_id, a.usuario_id,
+             coalesce(a.assinante_nome_snapshot, u.nome) as assinante_nome,
+             coalesce(a.assinante_usuario_snapshot, u.usuario) as assinante_usuario,
+             case when a.status = 'pendente' and a.expira_em < now()
+                  then 'expirada' else a.status end as status,
+             a.criado_em, a.expira_em, a.assinada_em, a.validation_code,
+             a.criado_por, a.ip_assinatura,
+             a.document_snapshot->>'unidade_codigo' as unidade_codigo,
+             a.document_snapshot->>'unidade_nome' as unidade_nome
+        from requisicao_assinaturas a
+        left join usuarios u on u.id = a.usuario_id
+        ${where}
+       order by coalesce(a.assinada_em, a.criado_em) desc
+       limit 500
+    `, valores);
+
+    res.json(rows);
+  } catch (e) { next(e); }
+});
+
+router.get('/auditoria/:id', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
+  try {
+    const { rows: [a] } = await consulta(`
+      select a.*,
+             coalesce(a.assinante_nome_snapshot, u.nome) as assinante_nome,
+             coalesce(a.assinante_usuario_snapshot, u.usuario) as assinante_usuario
+        from requisicao_assinaturas a
+        left join usuarios u on u.id = a.usuario_id
+       where a.id = $1
+    `, [req.params.id]);
+
+    if (!a) return res.status(404).json({ error: 'Registro de assinatura nao encontrado' });
+
+    const atual = await carregarDocumento(a.requisicao_id);
+    const hashAtual = atual ? hashDocumento(atual) : null;
+    const confere = !!atual && !!a.document_hash && hashAtual === a.document_hash;
+
+    res.json({
+      id: a.id,
+      requisicao_id: a.requisicao_id,
+      usuario_id: a.usuario_id,
+      assinante_nome: a.assinante_nome,
+      assinante_usuario: a.assinante_usuario,
+      status: a.status,
+      criado_em: a.criado_em,
+      expira_em: a.expira_em,
+      assinada_em: a.assinada_em,
+      validation_code: a.validation_code,
+      document_hash: a.document_hash,
+      documento_assinado: a.document_snapshot,
+      criado_por: a.criado_por,
+      ip_assinatura: a.ip_assinatura,
+      navegador_assinatura: a.navegador_assinatura,
+      aceite_texto: a.aceite_texto,
+      aceite_versao: a.aceite_versao,
+      validacaoUrl: a.validation_code ? urlValidacao(a.validation_code) : null,
+      integridade: {
+        confere,
+        hashAssinado: a.document_hash,
+        hashAtual,
+      },
+    });
+  } catch (e) { next(e); }
+});
 /* Gestor solicita a assinatura do gerente que ja esta vinculado a unidade.
    A escolha manual foi removida para evitar mandar a requisicao para a pessoa errada. */
 router.post('/requisicao/:requisicaoId', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
@@ -446,41 +545,32 @@ router.post('/:id/assinar', abrirParaLeitura, autenticar, async (req, res, next)
 
     const codigo = codigoValidacao();
 
-    // A assinatura principal nao depende dos campos de auditoria. Isso evita
-    // que uma instalacao antiga da tabela que ainda nao tenha ip_assinatura /
-    // navegador_assinatura derrube a assinatura inteira com erro 500.
-    const { rows: [gravada] } = await client.query(`
-      update requisicao_assinaturas set
-        status = 'assinada', assinada_em = now(), validation_code = $2
-       where id = $1
-      returning id, requisicao_id, status, assinada_em, validation_code
-    `, [a.id, codigo]);
-
-    await client.query('commit');
-
-    /* Auditoria acontece DEPOIS do commit principal. Assim uma coluna de
-       auditoria ausente jamais desfaz a assinatura que acabou de ser gravada. */
     const forwarded = req.headers['x-forwarded-for'];
     const forwardedPrimeiro = Array.isArray(forwarded)
       ? String(forwarded[0] || '')
       : String(forwarded || '').split(',')[0];
     const ip = String(forwardedPrimeiro.trim() || req.socket?.remoteAddress || '').slice(0, 100);
     const navegador = String(req.headers['user-agent'] || '').slice(0, 300);
+    const nomeAssinante = String(req.usuario.nome || req.usuario.usuario || '').slice(0, 200);
+    const usuarioAssinante = String(req.usuario.usuario || '').slice(0, 120);
+    const aceiteTexto = 'Confirmo que conferi os dados desta requisição e aprovo o conteúdo exibido para assinatura.';
 
-    try {
-      await consulta(`
-        update requisicao_assinaturas
-           set ip_assinatura = $2, navegador_assinatura = $3
-         where id = $1
-      `, [a.id, ip, navegador]);
-    } catch (auditError) {
-      console.warn('AUDITORIA_ASSINATURA_FALHOU', {
-        assinaturaId: a.id,
-        codigo: auditError?.code || null,
-        mensagem: auditError?.message || String(auditError),
-      });
-    }
+    const { rows: [gravada] } = await client.query(`
+      update requisicao_assinaturas set
+        status = 'assinada',
+        assinada_em = now(),
+        validation_code = $2,
+        ip_assinatura = $3,
+        navegador_assinatura = $4,
+        assinante_nome_snapshot = $5,
+        assinante_usuario_snapshot = $6,
+        aceite_texto = $7,
+        aceite_versao = '1'
+       where id = $1
+      returning id, requisicao_id, status, assinada_em, validation_code
+    `, [a.id, codigo, ip, navegador, nomeAssinante, usuarioAssinante, aceiteTexto]);
 
+    await client.query('commit');
     res.json({
       ...gravada,
       validacaoUrl: urlValidacao(gravada.validation_code),
@@ -578,4 +668,5 @@ router.get('/validar/:codigo/qr', async (req, res, next) => {
 });
 
 module.exports = router;
+
 

@@ -1,9 +1,10 @@
-import { useState, useEffect, useMemo, useCallback } from "react";
+﻿import { useState, useEffect, useMemo, useCallback } from "react";
 import Importar from "./Importar.jsx";
 import Requisicao, { Requisicoes } from "./Requisicao.jsx";
 import Escalas from "./Escalas.jsx";
 import Convocacao from "./Convocacao.jsx";
 import { AssinarRequisicao, ValidarAssinatura } from "./Assinaturas.jsx";
+import Validacoes from "./Validacoes.jsx";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
 const ASSINATURA_SITE = String(import.meta.env.VITE_ASSINATURA_URL || "").replace(/\/$/, "");
@@ -1819,6 +1820,12 @@ function Painel({ token, sair }) {
   const [d, setD] = useState(null);
   const [erro, setErro] = useState("");
   const [aba, setAba] = useState("painel");
+  const [temaEscuro, setTemaEscuro] = useState(() => localStorage.getItem("mmg_tema") === "escuro");
+
+  useEffect(() => {
+    document.documentElement.classList.toggle("mmg-dark", temaEscuro);
+    localStorage.setItem("mmg_tema", temaEscuro ? "escuro" : "claro");
+  }, [temaEscuro]);
   const [grupo, setGrupo] = useState(null);
   const [ficha, setFicha] = useState(null);
   const [buscaFila, setBuscaFila] = useState("");
@@ -1932,6 +1939,14 @@ function Painel({ token, sair }) {
               {eu.perfil === "leitura" ? "somente leitura" : eu.perfil}
             </p>
           </div>
+          <button
+            onClick={() => setTemaEscuro((v) => !v)}
+            title={temaEscuro ? "Usar tema claro" : "Usar tema escuro"}
+            aria-label={temaEscuro ? "Usar tema claro" : "Usar tema escuro"}
+            className="w-9 h-9 rounded-lg border border-slate-700 text-[17px] grid place-items-center text-slate-200 hover:bg-slate-800"
+          >
+            {temaEscuro ? "☀" : "☾"}
+          </button>
           <button onClick={sair} className="text-[11px] text-slate-400 hover:text-white">Sair</button>
         </div>
       </header>
@@ -1940,7 +1955,7 @@ function Painel({ token, sair }) {
         <div className="flex gap-1.5 flex-wrap">
           {[["painel","Painel"],["safra","Safra"],["criterios","Critérios"],["locais","Locais"],["tomadora","Tomadora"],["fila","Fila"],
             ["requisicoes","Requisições"],["escalas","Escalas"],
-            ["safristas","Safristas fixos"],["cadastro","Sem cadastro"],
+            ["safristas","Safristas fixos"],["cadastro","Sem cadastro"],...(podeEditar ? [["validacoes","Validações"]] : []),
             ...(podeEditar ? [["importar","Importar"]] : []),
             ...(eu.perfil === "admin" ? [["usuarios","Acessos"]] : [])].map(([k, rot]) => (
             <button key={k} onClick={() => setAba(k)}
@@ -2062,6 +2077,7 @@ function Painel({ token, sair }) {
 
         {aba === "importar" && podeEditar && <Importar token={token} />}
         {aba === "usuarios" && eu.perfil === "admin" && <Usuarios token={token} />}
+        {aba === "validacoes" && <Validacoes token={token} pedir={pedir} />}
         {aba === "requisicoes" && (
           <Requisicoes token={token} podeEditar={podeEditar} pedir={pedir} gravar={gravar} />
         )}
@@ -2385,3 +2401,4 @@ export default function App() {
 
   return token ? <Painel token={token} sair={sair} /> : <Login aoEntrar={setToken} />;
 }
+

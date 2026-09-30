@@ -1,0 +1,96 @@
+﻿/* Tema escuro do painel principal.
+   O projeto usa Tailwind via CDN; estes overrides preservam o layout atual
+   sem obrigar a reescrever todas as classes com dark:. */
+
+html.mmg-dark {
+  color-scheme: dark;
+  background: #020617;
+}
+
+html.mmg-dark body {
+  background: #020617 !important;
+  color: #e2e8f0;
+}
+
+html.mmg-dark .bg-white {
+  background-color: #0f172a !important;
+}
+
+html.mmg-dark .bg-slate-50 {
+  background-color: #020617 !important;
+}
+
+html.mmg-dark .bg-slate-100 {
+  background-color: #1e293b !important;
+}
+
+html.mmg-dark .bg-slate-200 {
+  background-color: #334155 !important;
+}
+
+html.mmg-dark .border-slate-50,
+html.mmg-dark .border-slate-100 {
+  border-color: #1e293b !important;
+}
+
+html.mmg-dark .border-slate-200,
+html.mmg-dark .border-slate-300 {
+  border-color: #334155 !important;
+}
+
+html.mmg-dark .text-slate-900,
+html.mmg-dark .text-slate-800,
+html.mmg-dark .text-slate-700 {
+  color: #f1f5f9 !important;
+}
+
+html.mmg-dark .text-slate-600 {
+  color: #cbd5e1 !important;
+}
+
+html.mmg-dark .text-slate-500 {
+  color: #94a3b8 !important;
+}
+
+html.mmg-dark .text-slate-400 {
+  color: #94a3b8 !important;
+}
+
+html.mmg-dark input,
+html.mmg-dark select,
+html.mmg-dark textarea {
+  background-color: #0f172a !important;
+  color: #f8fafc !important;
+  border-color: #334155 !important;
+}
+
+html.mmg-dark input::placeholder,
+html.mmg-dark textarea::placeholder {
+  color: #64748b !important;
+}
+
+html.mmg-dark table thead {
+  background-color: #111827 !important;
+}
+
+html.mmg-dark table tbody tr {
+  border-color: #1e293b !important;
+}
+
+html.mmg-dark details,
+html.mmg-dark summary {
+  color: #cbd5e1;
+}
+
+/* caixas de status continuam coloridas, mas com contraste adequado */
+html.mmg-dark .bg-emerald-50 { background-color: #052e2b !important; }
+html.mmg-dark .bg-teal-50 { background-color: #042f2e !important; }
+html.mmg-dark .bg-sky-50 { background-color: #082f49 !important; }
+html.mmg-dark .bg-violet-50 { background-color: #2e1065 !important; }
+html.mmg-dark .bg-amber-50 { background-color: #451a03 !important; }
+html.mmg-dark .bg-rose-50 { background-color: #4c0519 !important; }
+
+html.mmg-dark .hover\:bg-slate-50:hover {
+  background-color: #1e293b !important;
+}
+
