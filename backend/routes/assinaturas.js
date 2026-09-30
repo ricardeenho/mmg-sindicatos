@@ -41,12 +41,16 @@ function baseFrontend() {
   return String(process.env.FRONTEND_URL || 'http://localhost:5173').replace(/\/$/, '');
 }
 
+function baseAssinatura() {
+  return String(process.env.ASSINATURA_FRONTEND_URL || process.env.FRONTEND_URL || 'http://localhost:5174').replace(/\/$/, '');
+}
+
 function urlAssinatura(id, token) {
-  return `${baseFrontend()}/?assinar=${encodeURIComponent(id)}#st=${encodeURIComponent(token)}`;
+  return `${baseAssinatura()}/?assinar=${encodeURIComponent(id)}#st=${encodeURIComponent(token)}`;
 }
 
 function urlValidacao(codigo) {
-  return `${baseFrontend()}/?validar=${encodeURIComponent(codigo)}`;
+  return `${baseAssinatura()}/?validar=${encodeURIComponent(codigo)}`;
 }
 
 async function carregarDocumento(requisicaoId, executor = consulta) {
@@ -150,16 +154,66 @@ function resumoDocumento(documento) {
   };
 }
 
-/* Lista curta de pessoas que podem receber uma assinatura. */
+async function carregarGerente(unidadeId, executor = consulta) {
+  const executar = typeof executor === 'function'
+    ? executor
+    : (texto, valores) => executor.query(texto, valores);
+
+  const { rows: [u] } = await executar(`
+    select usr.id, usr.nome, usr.usuario,
+           coalesce(usr.somente_assinatura, false) as somente_assinatura
+      from unidade_gerentes ug
+      join usuarios usr on usr.id = ug.usuario_id
+     where ug.unidade_id = $1
+       and usr.ativo
+     limit 1
+  `, [unidadeId]);
+  return u || null;
+}
+
+/* Mantido por compatibilidade com telas antigas: agora somente usuarios
+   realmente vinculados como gerente de alguma unidade aparecem aqui. */
 router.get('/usuarios', autenticar, autorizar('admin', 'gestor'), async (_req, res, next) => {
   try {
     const { rows } = await consulta(`
-      select id, nome, usuario, perfil
-        from usuarios
-       where ativo
-       order by nome, usuario
+      select distinct u.id, u.nome, u.usuario, u.perfil
+        from usuarios u
+        join unidade_gerentes ug on ug.usuario_id = u.id
+       where u.ativo
+       order by u.nome, u.usuario
     `);
     res.json(rows);
+  } catch (e) { next(e); }
+});
+
+/* Mostra quem o sistema considera responsavel pela requisicao.
+   Nao existe escolha manual: requisicao -> unidade -> gerente. */
+router.get('/responsavel/requisicao/:requisicaoId', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
+  try {
+    const documento = await carregarDocumento(req.params.requisicaoId);
+    if (!documento) return res.status(404).json({ error: 'Requisicao nao encontrada' });
+
+    const gerente = await carregarGerente(documento.unidade_id);
+    if (!gerente) {
+      return res.status(404).json({
+        error: 'Esta unidade ainda nao possui gerente responsavel cadastrado.',
+        codigo: 'UNIDADE_SEM_GERENTE',
+        unidade: {
+          id: documento.unidade_id,
+          codigo: documento.unidade_codigo,
+          nome: documento.unidade_nome,
+        },
+      });
+    }
+    res.json({
+      requisicao_id: documento.requisicao_id,
+      unidade: {
+        id: documento.unidade_id,
+        codigo: documento.unidade_codigo,
+        nome: documento.unidade_nome,
+      },
+      gerente,
+    });
   } catch (e) { next(e); }
 });
 
@@ -180,27 +234,61 @@ router.get('/requisicao/:requisicaoId', autenticar, async (req, res, next) => {
   } catch (e) { next(e); }
 });
 
-/* Gestor cria uma solicitação para um usuário específico.
-   O token puro sai UMA vez nesta resposta. No banco fica somente SHA-256. */
+/* Gestor solicita a assinatura do gerente que ja esta vinculado a unidade.
+   A escolha manual foi removida para evitar mandar a requisicao para a pessoa errada. */
 router.post('/requisicao/:requisicaoId', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
-  const usuarioId = req.body?.usuario_id;
-  if (!usuarioId) return res.status(400).json({ error: 'Escolha quem deve assinar' });
-
   try {
     const documento = await carregarDocumento(req.params.requisicaoId);
     if (!documento) return res.status(404).json({ error: 'Requisicao nao encontrada' });
 
-    const { rows: [u] } = await consulta(
-      'select id, nome, usuario from usuarios where id = $1 and ativo', [usuarioId]);
-    if (!u) return res.status(400).json({ error: 'Usuario inexistente ou desativado' });
+    const u = await carregarGerente(documento.unidade_id);
+    if (!u) {
+      return res.status(409).json({
+        error: `A unidade ${documento.unidade_codigo || ''} ainda nao possui gerente responsavel. Vincule o gerente em Acessos antes de solicitar a assinatura.`,
+        codigo: 'UNIDADE_SEM_GERENTE',
+      });
+    }
 
-    // Se uma solicitação antiga expirou, libera o par requisição/usuário para uma nova.
+    const { rows: [jaAssinada] } = await consulta(`
+      select id, assinada_em, validation_code
+        from requisicao_assinaturas
+       where requisicao_id = $1 and status = 'assinada'
+       order by assinada_em desc
+       limit 1
+    `, [req.params.requisicaoId]);
+    if (jaAssinada) {
+      return res.status(409).json({
+        error: 'Esta requisicao ja possui uma assinatura concluida.',
+        codigo: 'REQUISICAO_JA_ASSINADA',
+        assinaturaId: jaAssinada.id,
+        validation_code: jaAssinada.validation_code,
+      });
+    }
+
     await consulta(`
       update requisicao_assinaturas
          set status = 'cancelada'
+       where requisicao_id = $1
+         and status = 'pendente'
+         and (usuario_id <> $2 or expira_em < now())
+    `, [req.params.requisicaoId, u.id]);
+
+    const { rows: [pendente] } = await consulta(`
+      select id, expira_em
+        from requisicao_assinaturas
        where requisicao_id = $1 and usuario_id = $2
-         and status = 'pendente' and expira_em < now()
-    `, [req.params.requisicaoId, usuarioId]);
+         and status = 'pendente' and expira_em >= now()
+       order by criado_em desc
+       limit 1
+    `, [req.params.requisicaoId, u.id]);
+    if (pendente) {
+      return res.status(409).json({
+        error: `Ja existe uma assinatura pendente para ${u.nome}. Use o QR ja gerado ou aguarde o vencimento para gerar outro.`,
+        codigo: 'ASSINATURA_JA_PENDENTE',
+        assinaturaId: pendente.id,
+        expiraEm: pendente.expira_em,
+      });
+    }
 
     const token = gerarToken();
     const tokenHash = hashToken(token);
@@ -215,7 +303,7 @@ router.post('/requisicao/:requisicaoId', autenticar, autorizar('admin', 'gestor'
       returning id, requisicao_id, usuario_id, status, criado_em, expira_em
     `, [
       req.params.requisicaoId,
-      usuarioId,
+      u.id,
       tokenHash,
       String(TOKEN_MINUTOS),
       documentoHash,
@@ -232,11 +320,11 @@ router.post('/requisicao/:requisicaoId', autenticar, autorizar('admin', 'gestor'
       expiraEm: a.expira_em,
       token,
       signingUrl: urlAssinatura(a.id, token),
-      aviso: 'O token aparece somente agora. Guarde ou apresente o QR antes de fechar esta tela.',
+      aviso: `QR destinado automaticamente a ${u.nome}, gerente responsavel pela unidade.`,
     });
   } catch (e) {
     if (e?.code === '23505') {
-      return res.status(409).json({ error: 'Ja existe uma assinatura pendente para este usuario nesta requisicao' });
+      return res.status(409).json({ error: 'Ja existe uma assinatura pendente para o gerente desta requisicao' });
     }
     next(e);
   }
@@ -297,8 +385,9 @@ router.post('/:id/assinar', abrirParaLeitura, autenticar, async (req, res, next)
   const token = String(req.body?.token || '');
   if (!token) return res.status(400).json({ error: 'Token da assinatura nao informado' });
 
-  const client = await pool.connect();
+  let client;
   try {
+    client = await pool.connect();
     await client.query('begin');
     const { rows: [a] } = await client.query(`
       select * from requisicao_assinaturas where id = $1 for update
@@ -330,6 +419,21 @@ router.post('/:id/assinar', abrirParaLeitura, autenticar, async (req, res, next)
       await client.query('rollback');
       return res.status(404).json({ error: 'Requisicao nao encontrada' });
     }
+
+    const gerenteAtual = await carregarGerente(documentoAtual.unidade_id, client);
+    if (!gerenteAtual || String(gerenteAtual.id) !== String(a.usuario_id)) {
+      await client.query(`
+        update requisicao_assinaturas
+           set status = 'cancelada'
+         where id = $1 and status = 'pendente'
+      `, [a.id]);
+      await client.query('commit');
+      return res.status(409).json({
+        error: 'O gerente responsavel por esta unidade mudou depois que o QR foi gerado. Solicite um novo QR.',
+        codigo: 'GERENTE_RESPONSAVEL_ALTERADO',
+      });
+    }
+
     const hashAtual = hashDocumento(documentoAtual);
     if (hashAtual !== a.document_hash) {
       await client.query('rollback');
@@ -339,30 +443,68 @@ router.post('/:id/assinar', abrirParaLeitura, autenticar, async (req, res, next)
     }
 
     const codigo = codigoValidacao();
+
+    // A assinatura principal nao depende dos campos de auditoria. Isso evita
+    // que uma instalacao antiga da tabela que ainda nao tenha ip_assinatura /
+    // navegador_assinatura derrube a assinatura inteira com erro 500.
     const { rows: [gravada] } = await client.query(`
       update requisicao_assinaturas set
-        status = 'assinada', assinada_em = now(), validation_code = $2,
-        ip_assinatura = $3, navegador_assinatura = $4
+        status = 'assinada', assinada_em = now(), validation_code = $2
        where id = $1
       returning id, requisicao_id, status, assinada_em, validation_code
-    `, [
-      a.id,
-      codigo,
-      String((req.headers['x-forwarded-for'] || '').split(',')[0].trim() || req.socket?.remoteAddress || '').slice(0, 100),
-      String(req.headers['user-agent'] || '').slice(0, 300),
-    ]);
+    `, [a.id, codigo]);
 
     await client.query('commit');
+
+    /* Auditoria acontece DEPOIS do commit principal. Assim uma coluna de
+       auditoria ausente jamais desfaz a assinatura que acabou de ser gravada. */
+    const forwarded = req.headers['x-forwarded-for'];
+    const forwardedPrimeiro = Array.isArray(forwarded)
+      ? String(forwarded[0] || '')
+      : String(forwarded || '').split(',')[0];
+    const ip = String(forwardedPrimeiro.trim() || req.socket?.remoteAddress || '').slice(0, 100);
+    const navegador = String(req.headers['user-agent'] || '').slice(0, 300);
+
+    try {
+      await consulta(`
+        update requisicao_assinaturas
+           set ip_assinatura = $2, navegador_assinatura = $3
+         where id = $1
+      `, [a.id, ip, navegador]);
+    } catch (auditError) {
+      console.warn('AUDITORIA_ASSINATURA_FALHOU', {
+        assinaturaId: a.id,
+        codigo: auditError?.code || null,
+        mensagem: auditError?.message || String(auditError),
+      });
+    }
+
     res.json({
       ...gravada,
       validacaoUrl: urlValidacao(gravada.validation_code),
       documento: resumoDocumento(documentoAtual),
     });
   } catch (e) {
-    try { await client.query('rollback'); } catch (_e) {}
-    next(e);
+    if (client) {
+      try { await client.query('rollback'); } catch (_e) {}
+    }
+    console.error('ERRO_ASSINAR_REQUISICAO', {
+      assinaturaId: req.params.id,
+      codigo: e?.code || null,
+      mensagem: e?.message || String(e),
+    });
+    if (e?.code === '42703') {
+      return res.status(500).json({
+        error: 'O banco de assinaturas esta desatualizado. Execute a migration 2026-09-29-corrige-assinaturas.sql no Supabase.',
+        codigo: 'ASSINATURA_SCHEMA_DESATUALIZADO',
+      });
+    }
+    return res.status(500).json({
+      error: 'Nao foi possivel concluir a assinatura. Consulte os logs do backend pelo codigo ERRO_ASSINAR_REQUISICAO.',
+      codigo: 'ASSINATURA_INTERNA',
+    });
   } finally {
-    client.release();
+    if (client) client.release();
   }
 });
 

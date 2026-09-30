@@ -311,6 +311,18 @@ router.get('/', autenticar, async (req, res, next) => {
              r.local_nome, r.local_cidade, r.atividades_de_risco,
              r.tipo, r.quinzena_numero, r.quinzena_inicio, r.quinzena_fim, r.corte,
              r.encerramento, r.fora_do_prazo, r.aditivo, r.funcoes,
+             (select usr.id
+                from unidade_gerentes ug
+                join usuarios usr on usr.id = ug.usuario_id
+               where ug.unidade_id = r.unidade_id and usr.ativo) as gerente_usuario_id,
+             (select usr.nome
+                from unidade_gerentes ug
+                join usuarios usr on usr.id = ug.usuario_id
+               where ug.unidade_id = r.unidade_id and usr.ativo) as gerente_nome,
+             (select usr.usuario
+                from unidade_gerentes ug
+                join usuarios usr on usr.id = ug.usuario_id
+               where ug.unidade_id = r.unidade_id and usr.ativo) as gerente_usuario,
              (select array_agg(ar.nome order by ar.ordem)
                 from atividades_ref ar where ar.codigo = any(r.atividades)) as atividades_nomes,
              coalesce((

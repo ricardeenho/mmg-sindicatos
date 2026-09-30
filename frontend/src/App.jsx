@@ -6,6 +6,7 @@ import Convocacao from "./Convocacao.jsx";
 import { AssinarRequisicao, ValidarAssinatura } from "./Assinaturas.jsx";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
+const ASSINATURA_SITE = String(import.meta.env.VITE_ASSINATURA_URL || "").replace(/\/$/, "");
 const MESES = ["jan","fev","mar","abr","mai","jun","jul","ago","set","out","nov","dez"];
 // O ciclo agraria comeca em dezembro: dependendo do ano a safra ja abre nele.
 const CICLO = [12, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
@@ -1496,21 +1497,66 @@ function Usuarios({ token }) {
   const [linhas, setLinhas] = useState(null);
   const [erro, setErro] = useState("");
   const [aviso, setAviso] = useState("");
-  const [novo, setNovo] = useState({ nome: "", usuario: "", senha: "", perfil: "leitura" });
+  const [novo, setNovo] = useState({ nome: "", usuario: "", senha: "", perfil: "leitura", tipo: "gerente" });
   const [salvando, setSalvando] = useState(false);
 
-  const recarregar = () =>
-    pedir("/auth/usuarios", token).then(setLinhas).catch((e) => setErro(e.message));
+  const [editandoUnidades, setEditandoUnidades] = useState(null);
+  const [buscaUnidade, setBuscaUnidade] = useState("");
+  const [unidadesBusca, setUnidadesBusca] = useState([]);
+  const [unidadesSelecionadas, setUnidadesSelecionadas] = useState([]);
+  const [buscandoUnidades, setBuscandoUnidades] = useState(false);
+  const [salvandoUnidades, setSalvandoUnidades] = useState(false);
+
+  const recarregar = async () => {
+    try {
+      const dados = await pedir("/auth/usuarios", token);
+      setLinhas(dados);
+      return dados;
+    } catch (e) {
+      setErro(e.message);
+      return [];
+    }
+  };
 
   useEffect(() => { recarregar(); }, [token]);
+
+  useEffect(() => {
+    if (!editandoUnidades) return;
+    const t = setTimeout(async () => {
+      setBuscandoUnidades(true);
+      try {
+        const q = buscaUnidade.trim();
+        const dados = await pedir(`/auth/unidades${q ? `?q=${encodeURIComponent(q)}` : ""}`, token);
+        setUnidadesBusca(dados);
+      } catch (e) {
+        setErro(e.message);
+      } finally {
+        setBuscandoUnidades(false);
+      }
+    }, 250);
+    return () => clearTimeout(t);
+  }, [buscaUnidade, editandoUnidades, token]);
 
   async function criar() {
     setSalvando(true); setErro(""); setAviso("");
     try {
-      await gravar("/auth/usuarios", token, novo, "POST");
-      setAviso(`${novo.nome} criado. Passe a senha por um canal seguro e peça para trocar no primeiro acesso.`);
-      setNovo({ nome: "", usuario: "", senha: "", perfil: "leitura" });
-      await recarregar();
+      const gerente = novo.tipo === "gerente";
+      const criado = await gravar("/auth/usuarios", token, {
+        nome: novo.nome,
+        usuario: novo.usuario,
+        senha: novo.senha,
+        perfil: gerente ? "leitura" : novo.perfil,
+        somente_assinatura: gerente,
+      }, "POST");
+      setNovo({ nome: "", usuario: "", senha: "", perfil: "leitura", tipo: "gerente" });
+      const dados = await recarregar();
+      setAviso(gerente
+        ? `${criado.nome} criado como gerente. Agora vincule as unidades pelas quais ele responde.`
+        : `${criado.nome} criado. Passe a senha por um canal seguro.`);
+      if (gerente) {
+        const atualizado = dados.find((u) => u.id === criado.id) || { ...criado, unidades: [] };
+        abrirUnidades(atualizado);
+      }
     } catch (e) { setErro(e.message); } finally { setSalvando(false); }
   }
 
@@ -1522,21 +1568,65 @@ function Usuarios({ token }) {
     } catch (e) { setErro(e.message); }
   }
 
+  function abrirUnidades(u) {
+    setEditandoUnidades(u);
+    setBuscaUnidade("");
+    setUnidadesBusca([]);
+    setUnidadesSelecionadas((u.unidades || []).map((x) => x.id));
+    setErro("");
+  }
+
+  function fecharUnidades() {
+    setEditandoUnidades(null);
+    setBuscaUnidade("");
+    setUnidadesBusca([]);
+    setUnidadesSelecionadas([]);
+  }
+
+  function alternarUnidade(id) {
+    setUnidadesSelecionadas((lista) =>
+      lista.includes(id) ? lista.filter((x) => x !== id) : [...lista, id]);
+  }
+
+  async function salvarUnidades() {
+    if (!editandoUnidades) return;
+    setSalvandoUnidades(true); setErro(""); setAviso("");
+    try {
+      await gravar(`/auth/usuarios/${editandoUnidades.id}/unidades`, token,
+        { unidade_ids: unidadesSelecionadas }, "PUT");
+      const nome = editandoUnidades.nome;
+      fecharUnidades();
+      await recarregar();
+      setAviso(`${nome}: unidades responsáveis atualizadas.`);
+    } catch (e) { setErro(e.message); } finally { setSalvandoUnidades(false); }
+  }
+
+  async function tornarInterno(u) {
+    if (!window.confirm(`Remover ${u.nome} como gerente das unidades e liberar como acesso interno?`)) return;
+    setErro(""); setAviso("");
+    try {
+      await gravar(`/auth/usuarios/${u.id}/unidades`, token, { unidade_ids: [] }, "PUT");
+      await gravar(`/auth/usuarios/${u.id}`, token, { somente_assinatura: false, perfil: "leitura" }, "PATCH");
+      await recarregar();
+      setAviso(`${u.nome} agora é um acesso interno de leitura.`);
+    } catch (e) { setErro(e.message); }
+  }
+
   const PERFIL_TEXTO = {
     admin: "mexe em usuários e em tudo",
     gestor: "grava calendário, critérios e ponto",
     leitura: "só consulta",
   };
 
+  const selecionadasSet = new Set(unidadesSelecionadas);
+
   return (
     <div className="space-y-4">
       <div className="bg-white rounded-xl border border-slate-200 p-4">
         <p className="text-sm font-medium">Quem tem acesso</p>
         <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-          Cada pessoa com o seu próprio acesso. Isso não é burocracia: quando a escala publicada
-          existir, ela é o registro que a lei exige, e o valor dela como prova está em ter data,
-          hora e autor. Escala assinada por "admin" vale menos numa fiscalização do que escala
-          assinada por uma pessoa.
+          Gerentes de unidade têm conta própria, mas o acesso deles é exclusivo para assinatura.
+          Cada unidade fica vinculada a um gerente responsável; a requisição escolhe esse assinante automaticamente.
         </p>
       </div>
 
@@ -1552,16 +1642,23 @@ function Usuarios({ token }) {
           <input value={novo.senha} onChange={(e) => setNovo({ ...novo, senha: e.target.value })}
             placeholder="Senha inicial (8 caracteres ou mais)"
             className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
-          <select value={novo.perfil} onChange={(e) => setNovo({ ...novo, perfil: e.target.value })}
+          <select value={novo.tipo} onChange={(e) => setNovo({ ...novo, tipo: e.target.value })}
             className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
-            <option value="leitura">Leitura — só consulta</option>
-            <option value="gestor">Gestor — grava calendário, critérios e ponto</option>
-            <option value="admin">Admin — mexe em usuários também</option>
+            <option value="gerente">Gerente de unidade — somente assinatura</option>
+            <option value="interno">Equipe interna</option>
           </select>
+          {novo.tipo === "interno" && (
+            <select value={novo.perfil} onChange={(e) => setNovo({ ...novo, perfil: e.target.value })}
+              className="border border-slate-200 rounded-lg px-3 py-2 text-[13px] sm:col-span-2">
+              <option value="leitura">Leitura — só consulta</option>
+              <option value="gestor">Gestor — grava calendário, critérios e ponto</option>
+              <option value="admin">Admin — mexe em usuários também</option>
+            </select>
+          )}
         </div>
-        <button onClick={criar} disabled={salvando}
+        <button onClick={criar} disabled={salvando || !novo.nome || !novo.usuario || !novo.senha}
           className="mt-3 bg-teal-600 text-white rounded-lg px-4 py-2 text-[13px] font-medium disabled:opacity-50">
-          {salvando ? "Criando…" : "Criar acesso"}
+          {salvando ? "Criando…" : novo.tipo === "gerente" ? "Criar gerente" : "Criar acesso"}
         </button>
         {erro && <p className="text-[12px] text-rose-600 mt-2">{erro}</p>}
         {aviso && <p className="text-[12px] text-emerald-700 mt-2">{aviso}</p>}
@@ -1574,24 +1671,57 @@ function Usuarios({ token }) {
               <tr>
                 <th className="text-left px-3 py-2">Nome</th>
                 <th className="text-left px-3 py-2">Usuário</th>
-                <th className="text-left px-3 py-2">Perfil</th>
+                <th className="text-left px-3 py-2">Tipo / perfil</th>
+                <th className="text-left px-3 py-2">Unidades</th>
                 <th className="text-left px-3 py-2">Último acesso</th>
                 <th className="text-left px-3 py-2">Situação</th>
               </tr>
             </thead>
             <tbody>
               {(linhas || []).map((u) => (
-                <tr key={u.id} className={`border-t border-slate-50 ${u.ativo ? "" : "opacity-50"}`}>
+                <tr key={u.id} className={`border-t border-slate-50 align-top ${u.ativo ? "" : "opacity-50"}`}>
                   <td className="px-3 py-2 font-medium">{u.nome}</td>
                   <td className="px-3 py-2 text-slate-600">{u.usuario}</td>
-                  <td className="px-3 py-2">
-                    <select value={u.perfil} onChange={(e) => mudar(u.id, { perfil: e.target.value })}
-                      className="border border-slate-200 rounded px-2 py-1 text-[11.5px]">
-                      <option value="leitura">leitura</option>
-                      <option value="gestor">gestor</option>
-                      <option value="admin">admin</option>
-                    </select>
-                    <span className="block text-[10px] text-slate-400 mt-0.5">{PERFIL_TEXTO[u.perfil]}</span>
+                  <td className="px-3 py-2 min-w-[190px]">
+                    {u.somente_assinatura ? (
+                      <div>
+                        <span className="inline-block bg-violet-100 text-violet-800 rounded px-2 py-1 text-[11px]">
+                          gerente · só assinatura
+                        </span>
+                        <button onClick={() => tornarInterno(u)}
+                          className="block text-[10.5px] text-slate-500 underline mt-1">
+                          transformar em acesso interno
+                        </button>
+                      </div>
+                    ) : (
+                      <>
+                        <select value={u.perfil} onChange={(e) => mudar(u.id, { perfil: e.target.value })}
+                          className="border border-slate-200 rounded px-2 py-1 text-[11.5px]">
+                          <option value="leitura">leitura</option>
+                          <option value="gestor">gestor</option>
+                          <option value="admin">admin</option>
+                        </select>
+                        <span className="block text-[10px] text-slate-400 mt-0.5">{PERFIL_TEXTO[u.perfil]}</span>
+                      </>
+                    )}
+                  </td>
+                  <td className="px-3 py-2 min-w-[220px]">
+                    {(u.unidades || []).length > 0 ? (
+                      <div className="space-y-0.5">
+                        {(u.unidades || []).slice(0, 3).map((un) => (
+                          <p key={un.id} className="text-[10.5px] text-slate-600">
+                            <b>{un.codigo}</b> · {un.nome}
+                          </p>
+                        ))}
+                        {(u.unidades || []).length > 3 && (
+                          <p className="text-[10px] text-slate-400">+ {(u.unidades || []).length - 3} unidade(s)</p>
+                        )}
+                      </div>
+                    ) : <span className="text-[10.5px] text-slate-400">nenhuma vinculada</span>}
+                    <button onClick={() => abrirUnidades(u)}
+                      className="block mt-1 text-[11px] text-violet-700 underline font-medium">
+                      {(u.unidades || []).length ? "Editar unidades" : "Vincular unidades"}
+                    </button>
                   </td>
                   <td className="px-3 py-2 text-slate-500">
                     {u.ultimo_acesso_em ? new Date(u.ultimo_acesso_em).toLocaleString("pt-BR") : "nunca entrou"}
@@ -1606,17 +1736,77 @@ function Usuarios({ token }) {
                 </tr>
               ))}
               {linhas && linhas.length === 0 && (
-                <tr><td colSpan="5" className="px-3 py-4 text-slate-400">
-                  Nenhum acesso criado ainda. Você está entrando pelo login de administração.
-                </td></tr>
+                <tr><td colSpan="6" className="px-3 py-4 text-slate-400">Nenhum acesso criado ainda.</td></tr>
               )}
             </tbody>
           </table>
         </div>
       </div>
+
+      {editandoUnidades && (
+        <div className="fixed inset-0 z-50 bg-slate-900/60 p-4 overflow-y-auto" onClick={fecharUnidades}>
+          <div className="bg-white rounded-2xl max-w-2xl mx-auto mt-8 p-5" onClick={(e) => e.stopPropagation()}>
+            <div className="flex items-start gap-3">
+              <div className="flex-1">
+                <p className="text-[11px] uppercase tracking-wide text-violet-700 font-semibold">Gerente responsável</p>
+                <h2 className="text-lg font-semibold mt-1">{editandoUnidades.nome}</h2>
+                <p className="text-[12px] text-slate-500">
+                  Marque todas as unidades pelas quais esta pessoa responde. Uma unidade só pode ter um gerente.
+                </p>
+              </div>
+              <button onClick={fecharUnidades} className="text-xl text-slate-400">×</button>
+            </div>
+
+            <input value={buscaUnidade} onChange={(e) => setBuscaUnidade(e.target.value)}
+              placeholder="Buscar por número, unidade, local ou cidade…"
+              className="mt-4 w-full border border-slate-200 rounded-xl px-3 py-2.5 text-[13px]" />
+
+            <div className="mt-3 border border-slate-200 rounded-xl max-h-[50vh] overflow-y-auto">
+              {buscandoUnidades && <p className="p-3 text-[12px] text-slate-400">Buscando…</p>}
+              {!buscandoUnidades && unidadesBusca.map((un) => {
+                const marcada = selecionadasSet.has(un.id);
+                const outroGerente = un.gerente_usuario_id
+                  && String(un.gerente_usuario_id) !== String(editandoUnidades.id);
+                return (
+                  <label key={un.id} className={`flex items-start gap-3 px-3 py-2.5 border-b border-slate-100 last:border-0 cursor-pointer ${
+                    marcada ? "bg-violet-50" : ""}`}>
+                    <input type="checkbox" checked={marcada} onChange={() => alternarUnidade(un.id)} className="mt-1" />
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[13px] text-slate-900"><b>{un.codigo}</b> · {un.nome}</p>
+                      <p className="text-[10.5px] text-slate-500">{[un.local, un.cidade].filter(Boolean).join(" · ") || "—"}</p>
+                      {outroGerente && (
+                        <p className="text-[10.5px] text-amber-700 mt-0.5">
+                          Hoje pertence a {un.gerente_nome}. Ao salvar, será transferida para {editandoUnidades.nome}.
+                        </p>
+                      )}
+                    </div>
+                  </label>
+                );
+              })}
+              {!buscandoUnidades && unidadesBusca.length === 0 && (
+                <p className="p-3 text-[12px] text-slate-400">Nenhuma unidade encontrada.</p>
+              )}
+            </div>
+
+            <div className="mt-3 bg-slate-50 rounded-xl px-3 py-2 text-[11.5px] text-slate-600">
+              {unidadesSelecionadas.length} unidade(s) selecionada(s).
+            </div>
+            <div className="flex gap-2 mt-3">
+              <button onClick={salvarUnidades} disabled={salvandoUnidades}
+                className="flex-1 bg-violet-600 text-white rounded-xl py-2.5 text-[12.5px] font-semibold disabled:opacity-50">
+                {salvandoUnidades ? "Salvando…" : "Salvar unidades do gerente"}
+              </button>
+              <button onClick={fecharUnidades}
+                className="border border-slate-200 rounded-xl px-4 py-2.5 text-[12.5px] text-slate-600">
+                Cancelar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <p className="text-[11px] text-slate-400">
-        O login de administração continua valendo e não aparece nesta lista — ele vive nas
-        variáveis do Railway e serve para não haver como ficar trancado do lado de fora.
+        O login de administração continua valendo e não aparece nesta lista. Gerentes só conseguem usar as rotas de assinatura.
       </p>
     </div>
   );
@@ -2168,6 +2358,29 @@ export default function App() {
   const linkConvocacao = params.get("c");
   if (linkConvocacao) {
     return <Convocacao token={linkConvocacao} />;
+  }
+
+  const eu = token ? lerToken(token) : null;
+  if (token && eu?.somente_assinatura) {
+    return (
+      <div className="min-h-screen bg-slate-900 grid place-items-center px-4">
+        <div className="bg-white rounded-2xl p-8 w-full max-w-sm text-center">
+          <img src="/logo-mmg.png" alt="MMG" className="h-12 w-auto mx-auto mb-4" />
+          <p className="text-[11px] uppercase tracking-wide text-violet-700 font-semibold">Acesso de gerente</p>
+          <h1 className="font-semibold text-slate-900 mt-1">Seu acesso é exclusivo para assinaturas</h1>
+          <p className="text-[12.5px] text-slate-500 mt-2 leading-relaxed">
+            Abra o QR ou o link enviado pela MMG para conferir e assinar a requisição da sua unidade.
+          </p>
+          {ASSINATURA_SITE && (
+            <a href={ASSINATURA_SITE}
+              className="block mt-4 bg-violet-600 text-white rounded-xl py-3 text-[13px] font-semibold">
+              Abrir portal de assinaturas
+            </a>
+          )}
+          <button onClick={sair} className="mt-3 text-[12px] text-slate-500 underline">Sair</button>
+        </div>
+      </div>
+    );
   }
 
   return token ? <Painel token={token} sair={sair} /> : <Login aoEntrar={setToken} />;

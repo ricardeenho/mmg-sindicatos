@@ -1,10 +1,5 @@
 const jwt = require('jsonwebtoken');
 
-/* Confere o token e, de quebra, aplica a regra mais importante do
-   perfil de leitura: quem e leitura so faz GET. Como esta trava mora
-   no autenticar, ela vale para TODAS as rotas que ja usam autenticar
-   — painel, importacao e o que vier depois — sem precisar lembrar de
-   proteger cada uma. */
 function autenticar(req, res, next) {
   const cabecalho = req.headers.authorization || '';
   const token = cabecalho.startsWith('Bearer ') ? cabecalho.slice(7) : null;
@@ -12,8 +7,24 @@ function autenticar(req, res, next) {
 
   try {
     req.usuario = jwt.verify(token, process.env.JWT_SECRET);
-  } catch (e) {
+  } catch (_e) {
     return res.status(401).json({ error: 'Token invalido ou expirado' });
+  }
+
+  /* Gerente de unidade: tem conta propria, mas nao ganha acesso ao painel
+     interno da MMG. Pode usar somente o portal de assinaturas e trocar a
+     propria senha. A verificacao fica no backend para nao depender da UI. */
+  if (req.usuario.somente_assinatura) {
+    const caminho = String(req.originalUrl || req.url || '').split('?')[0];
+    const permitido = caminho.startsWith('/assinaturas/')
+      || caminho === '/auth/eu'
+      || caminho === '/auth/senha';
+    if (!permitido) {
+      return res.status(403).json({
+        error: 'Este acesso e exclusivo para assinatura das requisicoes das suas unidades.',
+        codigo: 'ACESSO_SOMENTE_ASSINATURA',
+      });
+    }
   }
 
   if (req.usuario.perfil === 'leitura' && req.method !== 'GET' && !req.permitirEscritaLeitura) {
@@ -25,11 +36,6 @@ function autenticar(req, res, next) {
   next();
 }
 
-/* Marque req.permitirEscritaLeitura = true antes do autenticar para
-   abrir uma excecao pontual — usado so na troca da propria senha. */
-
-/* Trava fina, para o que nem todo gestor pode fazer.
-   Uso: router.post('/usuarios', autorizar('admin'), ...) */
 function autorizar(...perfis) {
   return (req, res, next) => {
     if (!req.usuario) return res.status(401).json({ error: 'Sem token' });

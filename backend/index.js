@@ -16,8 +16,9 @@ const ORIGENS = [
 
 // A mesma URL usada nos QR Codes de assinatura também pode ser liberada
 // explicitamente no CORS (útil quando o frontend usa domínio próprio).
-if (process.env.FRONTEND_URL) {
-  try { ORIGENS.push(new URL(process.env.FRONTEND_URL).origin); } catch (_e) {}
+for (const endereco of [process.env.FRONTEND_URL, process.env.ASSINATURA_FRONTEND_URL]) {
+  if (!endereco) continue;
+  try { ORIGENS.push(new URL(endereco).origin); } catch (_e) {}
 }
 
 app.use(cors({
