@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useState, useEffect, useMemo, useCallback } from "react";
 import Importar from "./Importar.jsx";
 import Requisicao, { Requisicoes } from "./Requisicao.jsx";
 import Escalas from "./Escalas.jsx";
