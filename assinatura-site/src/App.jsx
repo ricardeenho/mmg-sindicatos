@@ -135,6 +135,134 @@ function Login({ onLogin }) {
   );
 }
 
+
+function TrocarSenhaPortal({ jwt, onClose, onDone }) {
+  const [atual, setAtual] = useState('');
+  const [nova, setNova] = useState('');
+  const [confirmacao, setConfirmacao] = useState('');
+  const [erro, setErro] = useState('');
+  const [salvando, setSalvando] = useState(false);
+  const [sucesso, setSucesso] = useState(false);
+
+  async function salvar(e) {
+    e.preventDefault();
+    setErro('');
+
+    if (!atual || !nova || !confirmacao) {
+      setErro('Preencha os três campos.');
+      return;
+    }
+    if (nova.length < 8) {
+      setErro('A nova senha precisa ter pelo menos 8 caracteres.');
+      return;
+    }
+    if (nova !== confirmacao) {
+      setErro('A confirmação não é igual à nova senha.');
+      return;
+    }
+    if (nova === atual) {
+      setErro('Escolha uma senha diferente da atual.');
+      return;
+    }
+
+    setSalvando(true);
+    try {
+      await json('/auth/senha', {
+        method: 'POST',
+        headers: authHeaders(jwt, true),
+        body: JSON.stringify({ atual, nova }),
+      });
+      setSucesso(true);
+      setTimeout(onDone, 1100);
+    } catch (e) {
+      setErro(e.message);
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  return (
+    <div className="passwordOverlay" onClick={() => !salvando && !sucesso && onClose()}>
+      <div className="passwordModal" onClick={(e) => e.stopPropagation()}>
+        <div className="passwordModalHead">
+          <div className="passwordIcon">
+            <svg viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="8" cy="15" r="4" />
+              <path d="M11 12l8-8M16 4l4 4M14 6l2 2" />
+            </svg>
+          </div>
+          <div className="passwordModalTitle">
+            <span>SEGURANÇA DA CONTA</span>
+            <strong>Trocar minha senha</strong>
+            <p>Informe sua senha atual e escolha uma nova.</p>
+          </div>
+          <button
+            type="button"
+            className="passwordClose"
+            onClick={onClose}
+            disabled={salvando || sucesso}
+            aria-label="Fechar"
+          >
+            ×
+          </button>
+        </div>
+
+        {sucesso ? (
+          <div className="passwordSuccess">
+            <strong>✓ Senha alterada com sucesso</strong>
+            <span>Você será desconectado para entrar com a nova senha.</span>
+          </div>
+        ) : (
+          <form onSubmit={salvar} className="form passwordForm">
+            <label>
+              Senha atual
+              <input
+                autoFocus
+                type="password"
+                value={atual}
+                onChange={(e) => setAtual(e.target.value)}
+                autoComplete="current-password"
+              />
+            </label>
+
+            <label>
+              Nova senha
+              <input
+                type="password"
+                value={nova}
+                onChange={(e) => setNova(e.target.value)}
+                autoComplete="new-password"
+              />
+            </label>
+
+            <label>
+              Confirmar nova senha
+              <input
+                type="password"
+                value={confirmacao}
+                onChange={(e) => setConfirmacao(e.target.value)}
+                autoComplete="new-password"
+              />
+            </label>
+
+            <span className="passwordHint">Mínimo de 8 caracteres.</span>
+            {erro && <div className="error">{erro}</div>}
+
+            <div className="passwordActions">
+              <button type="button" className="passwordCancel" onClick={onClose} disabled={salvando}>
+                Cancelar
+              </button>
+              <button type="submit" disabled={salvando}>
+                {salvando ? 'Alterando…' : 'Trocar senha'}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Documento({ d }) {
   if (!d) return null;
 
@@ -501,6 +629,7 @@ export default function App() {
   const [jwt, setJwt] = useState(
     () => localStorage.getItem(STORAGE) || ''
   );
+  const [trocarSenha, setTrocarSenha] = useState(false);
 
   const logout = () => {
     localStorage.removeItem(STORAGE);
@@ -511,6 +640,34 @@ export default function App() {
     <div className="page">
       <div className="shell">
         <Logo />
+
+        {jwt && !validar && (
+          <div className="portalAccountBar">
+            <button
+              type="button"
+              className="passwordKeyButton"
+              onClick={() => setTrocarSenha(true)}
+              title="Trocar minha senha"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true">
+                <circle cx="8" cy="15" r="4" />
+                <path d="M11 12l8-8M16 4l4 4M14 6l2 2" />
+              </svg>
+              <span>Trocar senha</span>
+            </button>
+          </div>
+        )}
+
+        {trocarSenha && jwt && (
+          <TrocarSenhaPortal
+            jwt={jwt}
+            onClose={() => setTrocarSenha(false)}
+            onDone={() => {
+              setTrocarSenha(false);
+              logout();
+            }}
+          />
+        )}
 
         {validar ? (
           <Validacao codigo={validar} />
@@ -541,4 +698,5 @@ export default function App() {
     </div>
   );
 }
+
 

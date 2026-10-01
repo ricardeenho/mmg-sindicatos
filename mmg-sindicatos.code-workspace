@@ -1,0 +1,20 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"path": "../Downloads/mmg-teste-assinatura-sem-banco-overlay/backend"
+		},
+		{
+			"path": "../Downloads/mmg-teste-assinatura-sem-banco-overlay/frontend"
+		},
+		{
+			"path": "../Downloads/mmg-assinatura-qr-producao-overlay/frontend"
+		},
+		{
+			"path": "../Downloads/mmg-assinatura-qr-producao-overlay/backend"
+		}
+	],
+	"settings": {}
+}

@@ -1816,12 +1816,161 @@ function Usuarios({ token }) {
 }
 
 /* ------------------------------------------------------------------ */
+
+function TrocarSenhaModal({ token, aoFechar, aoConcluir }) {
+  const [atual, setAtual] = useState("");
+  const [nova, setNova] = useState("");
+  const [confirmacao, setConfirmacao] = useState("");
+  const [erro, setErro] = useState("");
+  const [salvando, setSalvando] = useState(false);
+  const [sucesso, setSucesso] = useState(false);
+
+  async function salvar(e) {
+    e?.preventDefault();
+    setErro("");
+
+    if (!atual || !nova || !confirmacao) {
+      setErro("Preencha os três campos.");
+      return;
+    }
+    if (nova.length < 8) {
+      setErro("A nova senha precisa ter pelo menos 8 caracteres.");
+      return;
+    }
+    if (nova !== confirmacao) {
+      setErro("A confirmação não é igual à nova senha.");
+      return;
+    }
+    if (nova === atual) {
+      setErro("Escolha uma senha diferente da atual.");
+      return;
+    }
+
+    setSalvando(true);
+    try {
+      await gravar("/auth/senha", token, { atual, nova }, "POST");
+      setSucesso(true);
+      setTimeout(() => aoConcluir(), 1100);
+    } catch (e) {
+      setErro(e.message);
+    } finally {
+      setSalvando(false);
+    }
+  }
+
+  return (
+    <div
+      className="fixed inset-0 z-[80] bg-slate-950/70 backdrop-blur-sm p-4 grid place-items-center"
+      onClick={() => !salvando && !sucesso && aoFechar()}
+    >
+      <div
+        className="bg-white rounded-2xl border border-slate-200 shadow-2xl w-full max-w-md p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-start gap-3">
+          <div className="w-10 h-10 rounded-xl bg-teal-50 text-teal-700 grid place-items-center shrink-0">
+            <svg viewBox="0 0 24 24" className="w-5 h-5 fill-none stroke-current" strokeWidth="1.8">
+              <circle cx="8" cy="15" r="4" />
+              <path d="M11 12l8-8M16 4l4 4M14 6l2 2" />
+            </svg>
+          </div>
+          <div className="flex-1">
+            <p className="text-[11px] uppercase tracking-wide text-teal-700 font-semibold">Segurança da conta</p>
+            <h2 className="text-lg font-semibold text-slate-900 mt-0.5">Trocar minha senha</h2>
+            <p className="text-[11.5px] text-slate-500 mt-1">
+              Informe sua senha atual e escolha uma nova. Depois da troca você entrará novamente.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={aoFechar}
+            disabled={salvando || sucesso}
+            className="text-xl text-slate-400 hover:text-slate-700 leading-none px-1 disabled:opacity-40"
+          >
+            ×
+          </button>
+        </div>
+
+        {sucesso ? (
+          <div className="mt-5 rounded-xl border border-emerald-200 bg-emerald-50 p-4">
+            <p className="text-sm font-semibold text-emerald-800">✓ Senha alterada com sucesso</p>
+            <p className="text-[11.5px] text-emerald-700 mt-1">Saindo da conta para você entrar com a nova senha…</p>
+          </div>
+        ) : (
+          <form onSubmit={salvar} className="mt-5 space-y-3">
+            <label className="block">
+              <span className="text-[11.5px] text-slate-600">Senha atual</span>
+              <input
+                type="password"
+                value={atual}
+                onChange={(e) => setAtual(e.target.value)}
+                autoComplete="current-password"
+                autoFocus
+                className="mt-1 w-full border border-slate-200 rounded-xl px-3 py-2.5 text-[13px]"
+              />
+            </label>
+
+            <label className="block">
+              <span className="text-[11.5px] text-slate-600">Nova senha</span>
+              <input
+                type="password"
+                value={nova}
+                onChange={(e) => setNova(e.target.value)}
+                autoComplete="new-password"
+                className="mt-1 w-full border border-slate-200 rounded-xl px-3 py-2.5 text-[13px]"
+              />
+            </label>
+
+            <label className="block">
+              <span className="text-[11.5px] text-slate-600">Confirmar nova senha</span>
+              <input
+                type="password"
+                value={confirmacao}
+                onChange={(e) => setConfirmacao(e.target.value)}
+                autoComplete="new-password"
+                className="mt-1 w-full border border-slate-200 rounded-xl px-3 py-2.5 text-[13px]"
+              />
+            </label>
+
+            <p className="text-[10.5px] text-slate-400">Mínimo de 8 caracteres.</p>
+
+            {erro && (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 p-3 text-[11.5px] text-rose-700">
+                {erro}
+              </div>
+            )}
+
+            <div className="flex gap-2 pt-1">
+              <button
+                type="button"
+                onClick={aoFechar}
+                disabled={salvando}
+                className="flex-1 border border-slate-200 rounded-xl px-4 py-2.5 text-[12px] text-slate-600 disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="submit"
+                disabled={salvando}
+                className="flex-1 bg-teal-600 text-white rounded-xl px-4 py-2.5 text-[12px] font-semibold disabled:opacity-50"
+              >
+                {salvando ? "Alterando…" : "Trocar senha"}
+              </button>
+            </div>
+          </form>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function Painel({ token, sair }) {
   const eu = lerToken(token) || {};
   const podeEditar = eu.perfil === "admin" || eu.perfil === "gestor";
   const [d, setD] = useState(null);
   const [erro, setErro] = useState("");
   const [aba, setAba] = useState("painel");
+  const [senhaAberta, setSenhaAberta] = useState(false);
   const [temaEscuro, setTemaEscuro] = useState(() => localStorage.getItem("mmg_tema") === "escuro");
 
   useEffect(() => {
@@ -1962,9 +2111,29 @@ function Painel({ token, sair }) {
               </span>
             </span>
           </button>
+          <button
+            type="button"
+            onClick={() => setSenhaAberta(true)}
+            title="Trocar minha senha"
+            aria-label="Trocar minha senha"
+            className="w-9 h-9 rounded-lg border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-800 grid place-items-center transition"
+          >
+            <svg viewBox="0 0 24 24" className="w-4 h-4 fill-none stroke-current" strokeWidth="1.9">
+              <circle cx="8" cy="15" r="4" />
+              <path d="M11 12l8-8M16 4l4 4M14 6l2 2" />
+            </svg>
+          </button>
           <button onClick={sair} className="text-[11px] text-slate-400 hover:text-white">Sair</button>
         </div>
       </header>
+
+      {senhaAberta && (
+        <TrocarSenhaModal
+          token={token}
+          aoFechar={() => setSenhaAberta(false)}
+          aoConcluir={sair}
+        />
+      )}
 
       <div className="max-w-6xl mx-auto px-4 py-4 space-y-4">
         <div className="flex gap-1.5 flex-wrap">
@@ -2416,6 +2585,7 @@ export default function App() {
 
   return token ? <Painel token={token} sair={sair} /> : <Login aoEntrar={setToken} />;
 }
+
 
 
 
