@@ -1,4 +1,4 @@
-const express = require('express');
+﻿const express = require('express');
 const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { consulta, pool } = require('../db');
@@ -74,8 +74,9 @@ router.get('/eu', autenticar, (req, res) => {
   res.json({ id, usuario, nome, perfil, somente_assinatura: !!somente_assinatura });
 });
 
-router.get('/usuarios', autenticar, autorizar('admin'), async (_req, res, next) => {
+router.get('/usuarios', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
   try {
+    const somenteGerentes = req.usuario.perfil === 'gestor';
     const { rows } = await consulta(`
       select u.id, u.nome, u.usuario, u.perfil, u.ativo,
              coalesce(u.somente_assinatura, false) as somente_assinatura,
@@ -91,21 +92,29 @@ router.get('/usuarios', autenticar, autorizar('admin'), async (_req, res, next) 
         from usuarios u
         left join unidade_gerentes ug on ug.usuario_id = u.id
         left join unidades un on un.id = ug.unidade_id
+       where ($1::boolean = false or coalesce(u.somente_assinatura, false) = true)
        group by u.id, u.nome, u.usuario, u.perfil, u.ativo,
                 u.somente_assinatura, u.criado_por, u.criado_em, u.ultimo_acesso_em
        order by u.ativo desc, u.nome
-    `);
+    `, [somenteGerentes]);
     res.json(rows);
   } catch (e) { next(e); }
 });
 
-router.post('/usuarios', autenticar, autorizar('admin'), async (req, res, next) => {
+router.post('/usuarios', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
   const { nome, usuario, senha, perfil, somente_assinatura } = req.body || {};
   if (!nome || !usuario || !senha) return res.status(400).json({ error: 'Informe nome, usuario e senha' });
   if (String(senha).length < 8) return res.status(400).json({ error: 'A senha precisa de pelo menos 8 caracteres' });
   if (perfil && !PERFIS.includes(perfil)) return res.status(400).json({ error: 'Perfil deve ser admin, gestor ou leitura' });
 
-  const assinaturaSomente = !!somente_assinatura;
+  const ehGestor = req.usuario.perfil === 'gestor';
+  if (ehGestor && !somente_assinatura) {
+    return res.status(403).json({
+      error: 'Gestores podem criar somente acessos de gerente para leitura/assinatura.',
+    });
+  }
+
+  const assinaturaSomente = ehGestor ? true : !!somente_assinatura;
   const perfilFinal = assinaturaSomente ? 'leitura' : (perfil || 'leitura');
 
   try {
@@ -123,13 +132,33 @@ router.post('/usuarios', autenticar, autorizar('admin'), async (req, res, next) 
   }
 });
 
-router.patch('/usuarios/:id', autenticar, autorizar('admin'), async (req, res, next) => {
+router.patch('/usuarios/:id', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
   const { perfil, ativo, senha, somente_assinatura } = req.body || {};
   if (perfil && !PERFIS.includes(perfil)) return res.status(400).json({ error: 'Perfil deve ser admin, gestor ou leitura' });
   if (senha !== undefined && String(senha).length < 8) return res.status(400).json({ error: 'A senha precisa de pelo menos 8 caracteres' });
 
   const assinaturaInformada = typeof somente_assinatura === 'boolean';
   try {
+    if (req.usuario.perfil === 'gestor') {
+      const { rows: [alvo] } = await consulta(`
+        select id, coalesce(somente_assinatura, false) as somente_assinatura
+          from usuarios
+         where id = $1
+      `, [req.params.id]);
+
+      if (!alvo) return res.status(404).json({ error: 'Usuario nao encontrado' });
+      if (!alvo.somente_assinatura) {
+        return res.status(403).json({
+          error: 'Gestores só podem administrar contas de gerentes.',
+        });
+      }
+      if (perfil !== undefined || somente_assinatura !== undefined) {
+        return res.status(403).json({
+          error: 'Somente o administrador pode mudar o tipo ou o perfil de um acesso.',
+        });
+      }
+    }
+
     const { rows: [u] } = await consulta(`
       update usuarios set
         perfil = case
@@ -155,7 +184,7 @@ router.patch('/usuarios/:id', autenticar, autorizar('admin'), async (req, res, n
 });
 
 /* Busca unidades para o administrador vincular a um gerente. */
-router.get('/unidades', autenticar, autorizar('admin'), async (req, res, next) => {
+router.get('/unidades', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
   try {
     const q = String(req.query.q || '').trim();
     const { rows } = await consulta(`
@@ -178,8 +207,19 @@ router.get('/unidades', autenticar, autorizar('admin'), async (req, res, next) =
   } catch (e) { next(e); }
 });
 
-router.get('/usuarios/:id/unidades', autenticar, autorizar('admin'), async (req, res, next) => {
+router.get('/usuarios/:id/unidades', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
   try {
+    if (req.usuario.perfil === 'gestor') {
+      const { rows: [alvo] } = await consulta(
+        'select coalesce(somente_assinatura, false) as somente_assinatura from usuarios where id = $1',
+        [req.params.id]
+      );
+      if (!alvo) return res.status(404).json({ error: 'Usuario nao encontrado' });
+      if (!alvo.somente_assinatura) {
+        return res.status(403).json({ error: 'Gestores só podem consultar unidades de gerentes.' });
+      }
+    }
+
     const { rows } = await consulta(`
       select u.id, u.codigo, u.nome_completo as nome
         from unidade_gerentes ug
@@ -193,7 +233,7 @@ router.get('/usuarios/:id/unidades', autenticar, autorizar('admin'), async (req,
 
 /* Substitui todas as unidades pelas quais o usuario responde. Uma unidade
    possui um unico gerente responsavel; o mesmo gerente pode responder por varias. */
-router.put('/usuarios/:id/unidades', autenticar, autorizar('admin'), async (req, res, next) => {
+router.put('/usuarios/:id/unidades', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
   const ids = [...new Set((Array.isArray(req.body?.unidade_ids) ? req.body.unidade_ids : [])
     .map(String).filter(Boolean))];
   let client;
@@ -202,10 +242,20 @@ router.put('/usuarios/:id/unidades', autenticar, autorizar('admin'), async (req,
     await client.query('begin');
 
     const { rows: [usuario] } = await client.query(
-      'select id, nome from usuarios where id = $1 for update', [req.params.id]);
+      `select id, nome, coalesce(somente_assinatura, false) as somente_assinatura
+         from usuarios where id = $1 for update`,
+      [req.params.id]
+    );
     if (!usuario) {
       await client.query('rollback');
       return res.status(404).json({ error: 'Usuario nao encontrado' });
+    }
+
+    if (req.usuario.perfil === 'gestor' && !usuario.somente_assinatura) {
+      await client.query('rollback');
+      return res.status(403).json({
+        error: 'Gestores só podem vincular unidades a contas de gerentes.',
+      });
     }
 
     if (ids.length) {
@@ -263,3 +313,4 @@ router.post('/senha', abrirParaLeitura, autenticar, async (req, res, next) => {
 });
 
 module.exports = router;
+

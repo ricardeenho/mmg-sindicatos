@@ -1497,6 +1497,8 @@ function PontoDoLocal({ token, local, aoGravar, podeEditar }) {
 
 /* ------------------------------------------------------------------ */
 function Usuarios({ token }) {
+  const eu = lerToken(token) || {};
+  const souAdmin = eu.perfil === "admin";
   const [linhas, setLinhas] = useState(null);
   const [erro, setErro] = useState("");
   const [aviso, setAviso] = useState("");
@@ -1543,7 +1545,7 @@ function Usuarios({ token }) {
   async function criar() {
     setSalvando(true); setErro(""); setAviso("");
     try {
-      const gerente = novo.tipo === "gerente";
+      const gerente = souAdmin ? novo.tipo === "gerente" : true;
       const criado = await gravar("/auth/usuarios", token, {
         nome: novo.nome,
         usuario: novo.usuario,
@@ -1628,8 +1630,9 @@ function Usuarios({ token }) {
       <div className="bg-white rounded-xl border border-slate-200 p-4">
         <p className="text-sm font-medium">Quem tem acesso</p>
         <p className="text-[11px] text-slate-500 mt-1 leading-relaxed">
-          Gerentes de unidade têm conta própria, mas o acesso deles é exclusivo para assinatura.
-          Cada unidade fica vinculada a um gerente responsável; a requisição escolhe esse assinante automaticamente.
+          Gerentes de unidade têm conta própria com perfil de leitura/assinatura.
+          Administradores e gestores podem criar esses acessos e vincular as unidades responsáveis.
+          Somente administradores podem criar outros gestores ou administradores.
         </p>
       </div>
 
@@ -1645,12 +1648,18 @@ function Usuarios({ token }) {
           <input value={novo.senha} onChange={(e) => setNovo({ ...novo, senha: e.target.value })}
             placeholder="Senha inicial (8 caracteres ou mais)"
             className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
-          <select value={novo.tipo} onChange={(e) => setNovo({ ...novo, tipo: e.target.value })}
-            className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
-            <option value="gerente">Gerente de unidade — somente assinatura</option>
-            <option value="interno">Equipe interna</option>
-          </select>
-          {novo.tipo === "interno" && (
+          {souAdmin ? (
+            <select value={novo.tipo} onChange={(e) => setNovo({ ...novo, tipo: e.target.value })}
+              className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
+              <option value="gerente">Gerente de unidade — leitura/assinatura</option>
+              <option value="interno">Equipe interna</option>
+            </select>
+          ) : (
+            <div className="border border-violet-200 bg-violet-50 text-violet-800 rounded-lg px-3 py-2 text-[12px]">
+              Gerente de unidade — acesso restrito de leitura/assinatura
+            </div>
+          )}
+          {souAdmin && novo.tipo === "interno" && (
             <select value={novo.perfil} onChange={(e) => setNovo({ ...novo, perfil: e.target.value })}
               className="border border-slate-200 rounded-lg px-3 py-2 text-[13px] sm:col-span-2">
               <option value="leitura">Leitura — só consulta</option>
@@ -1691,10 +1700,12 @@ function Usuarios({ token }) {
                         <span className="inline-block bg-violet-100 text-violet-800 rounded px-2 py-1 text-[11px]">
                           gerente · só assinatura
                         </span>
-                        <button onClick={() => tornarInterno(u)}
-                          className="block text-[10.5px] text-slate-500 underline mt-1">
-                          transformar em acesso interno
-                        </button>
+                        {souAdmin && (
+                          <button onClick={() => tornarInterno(u)}
+                            className="block text-[10.5px] text-slate-500 underline mt-1">
+                            transformar em acesso interno
+                          </button>
+                        )}
                       </div>
                     ) : (
                       <>
@@ -2141,7 +2152,7 @@ function Painel({ token, sair }) {
             ["requisicoes","Requisições"],["escalas","Escalas"],
             ["safristas","Safristas fixos"],["cadastro","Sem cadastro"],...(podeEditar ? [["validacoes","Validações"]] : []),
             ...(podeEditar ? [["importar","Importar"]] : []),
-            ...(eu.perfil === "admin" ? [["usuarios","Acessos"]] : [])].map(([k, rot]) => (
+            ...(podeEditar ? [["usuarios","Acessos"]] : [])].map(([k, rot]) => (
             <button key={k} onClick={() => setAba(k)}
               className={`px-4 py-2 rounded-lg text-[13px] font-medium ${
                 aba === k ? "bg-slate-900 text-white" : "bg-white border border-slate-200 text-slate-600"}`}>
@@ -2260,7 +2271,7 @@ function Painel({ token, sair }) {
         )}
 
         {aba === "importar" && podeEditar && <Importar token={token} />}
-        {aba === "usuarios" && eu.perfil === "admin" && <Usuarios token={token} />}
+        {aba === "usuarios" && podeEditar && <Usuarios token={token} />}
         {aba === "validacoes" && <Validacoes token={token} pedir={pedir} />}
         {aba === "requisicoes" && (
           <Requisicoes token={token} podeEditar={podeEditar} pedir={pedir} gravar={gravar} />
@@ -2585,6 +2596,7 @@ export default function App() {
 
   return token ? <Painel token={token} sair={sair} /> : <Login aoEntrar={setToken} />;
 }
+
 
 
 
