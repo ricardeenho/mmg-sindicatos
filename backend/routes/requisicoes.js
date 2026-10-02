@@ -1,4 +1,4 @@
-const express = require('express');
+﻿const express = require('express');
 const { consulta } = require('../db');
 const { autenticar, autorizar } = require('../middlewares/auth');
 
@@ -66,16 +66,16 @@ const MOTIVOS_CANCELAMENTO = {
 
 /* Freio simples para o endereco publico — nao e seguranca, e so para
    um engano de dedo ou um robo bobo nao encher a tabela. */
-const LIMITE_POR_HORA = 20;
+const LIMITE_POR_HORA = Math.max(20, Math.min(5000, Number(process.env.REQUISICOES_LIMITE_POR_HORA || 200)));
 const envios = new Map();
 
-function passouDoLimite(ip) {
+function passouDoLimite(chave) {
   const agora = Date.now();
   const umaHora = 60 * 60 * 1000;
-  const lista = (envios.get(ip) || []).filter((t) => agora - t < umaHora);
+  const lista = (envios.get(chave) || []).filter((t) => agora - t < umaHora);
   if (lista.length >= LIMITE_POR_HORA) return true;
   lista.push(agora);
-  envios.set(ip, lista);
+  envios.set(chave, lista);
   if (envios.size > 5000) envios.clear();
   return false;
 }
@@ -172,9 +172,10 @@ router.post('/publico/:token', async (req, res, next) => {
     if (!l || !l.ativo) return res.status(404).json({ error: 'Link invalido ou desativado' });
 
     const ip = ipDe(req);
-    if (passouDoLimite(ip)) {
+    const chaveLimite = `${l.id}:${ip}`;
+    if (passouDoLimite(chaveLimite)) {
       return res.status(429).json({
-        error: 'Muitos pedidos deste aparelho na ultima hora. Fale com o sindicato por telefone.',
+        error: 'Limite temporario atingido para este link. Tente novamente em alguns minutos ou fale com o sindicato.',
       });
     }
 
