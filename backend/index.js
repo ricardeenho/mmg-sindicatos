@@ -1,4 +1,4 @@
-require('dotenv').config();
+﻿require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 
@@ -46,6 +46,7 @@ app.use('/requisicoes', require('./routes/requisicoes'));
 app.use('/assinaturas', require('./routes/assinaturas'));
 app.use('/escalas', require('./routes/escalas'));
 app.use('/convocacoes', require('./routes/convocacoes'));
+app.use('/profissional', require('./routes/profissional'));
 
 app.use((err, req, res, next) => {
   console.error(err);

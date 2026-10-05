@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useMemo } from "react";
+﻿import { useState, useEffect, useRef, useMemo } from "react";
+import { LinhaDoTempoRequisicao } from "./Profissional.jsx";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
 
@@ -40,6 +41,24 @@ const dataBR = (d) => {
 const diaMes = (d) => dataBR(d).slice(0, 5);
 const rotuloQuinzena = (q) =>
   q ? `${q.quinzena_numero === 1 || q.numero === 1 ? "1ª" : "2ª"} quinzena · ${diaMes(q.quinzena_inicio)} a ${dataBR(q.quinzena_fim)}` : "";
+
+const protocoloPainel = (r) => {
+  const ano = r?.criado_em ? new Date(r.criado_em).getFullYear() : new Date().getFullYear();
+  return `REQ-${ano}-${String(r?.id || "").replace(/-/g, "").slice(0, 8).toUpperCase()}`;
+};
+
+function statusVisual(r) {
+  const assinaturas = r?.assinaturas || [];
+  const assinatura = assinaturas[0];
+
+  if (r.status === "cancelada") return "Cancelada";
+  if (r.status === "atendida") return "Concluída";
+  if (assinatura?.status === "assinada") return "Assinada";
+  if (assinatura?.status === "pendente") return "Aguardando assinatura";
+  if (assinatura?.status === "expirada") return "Link de assinatura expirado";
+  if (r.status === "em_atendimento") return "Em atendimento";
+  return "Aguardando atendimento";
+}
 
 /* Fica FORA do componente de propósito: declarada dentro, seria uma
    função nova a cada tecla e o campo perderia o foco. */
@@ -537,6 +556,16 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
   const [assinaturaGerada, setAssinaturaGerada] = useState(null);
   const [qrAssinatura, setQrAssinatura] = useState("");
 
+  const [buscaTexto, setBuscaTexto] = useState(() => {
+    const valor = sessionStorage.getItem("mmg_busca_requisicoes") || "";
+    sessionStorage.removeItem("mmg_busca_requisicoes");
+    return valor;
+  });
+  const [dataDe, setDataDe] = useState("");
+  const [dataAte, setDataAte] = useState("");
+  const [assinaturaFiltro, setAssinaturaFiltro] = useState("");
+  const [timelineId, setTimelineId] = useState(null);
+
   const [cancelando, setCancelando] = useState(null);
   const [motivo, setMotivo] = useState("");
   const [observacao, setObservacao] = useState("");
@@ -544,8 +573,15 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
 
   async function carregar() {
     try {
-      const qs = [filtro ? `status=${filtro}` : "", quinzenaFiltro ? `quinzena=${quinzenaFiltro}` : ""]
-        .filter(Boolean).join("&");
+      const params = new URLSearchParams();
+      if (filtro) params.set("status", filtro);
+      if (quinzenaFiltro) params.set("quinzena", quinzenaFiltro);
+      if (buscaTexto.trim()) params.set("q", buscaTexto.trim());
+      if (dataDe) params.set("de", dataDe);
+      if (dataAte) params.set("ate", dataAte);
+      if (assinaturaFiltro) params.set("assinatura", assinaturaFiltro);
+      const qs = params.toString();
+
       const [r, l, q] = await Promise.all([
         pedir(`/requisicoes${qs ? `?${qs}` : ""}`, token),
         pedir("/requisicoes/links/lista", token).catch(() => []),
@@ -555,7 +591,10 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
     } catch (e) { setErro(e.message); }
   }
 
-  useEffect(() => { setLinhas(null); carregar(); }, [filtro, quinzenaFiltro, token]);
+  useEffect(() => {
+    const t = setTimeout(() => { setLinhas(null); carregar(); }, 220);
+    return () => clearTimeout(t);
+  }, [filtro, quinzenaFiltro, buscaTexto, dataDe, dataAte, assinaturaFiltro, token]);
 
   async function mudar(id, status) {
     setErro("");
@@ -674,6 +713,51 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
         </div>
       )}
 
+      <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <div className="grid md:grid-cols-5 gap-2">
+          <input
+            value={buscaTexto}
+            onChange={(e) => setBuscaTexto(e.target.value)}
+            placeholder="Protocolo, unidade, cidade ou solicitante…"
+            className="md:col-span-2 border border-slate-200 rounded-lg px-3 py-2 text-[12.5px]"
+          />
+          <input
+            type="date"
+            value={dataDe}
+            onChange={(e) => setDataDe(e.target.value)}
+            title="Criadas a partir de"
+            className="border border-slate-200 rounded-lg px-3 py-2 text-[12px]"
+          />
+          <input
+            type="date"
+            value={dataAte}
+            onChange={(e) => setDataAte(e.target.value)}
+            title="Criadas até"
+            className="border border-slate-200 rounded-lg px-3 py-2 text-[12px]"
+          />
+          <select
+            value={assinaturaFiltro}
+            onChange={(e) => setAssinaturaFiltro(e.target.value)}
+            className="border border-slate-200 rounded-lg px-3 py-2 text-[12px]"
+          >
+            <option value="">Qualquer assinatura</option>
+            <option value="pendente">Aguardando assinatura</option>
+            <option value="assinada">Assinadas</option>
+            <option value="expirada">Link expirado</option>
+            <option value="sem_assinatura">Sem assinatura solicitada</option>
+          </select>
+        </div>
+
+        {(buscaTexto || dataDe || dataAte || assinaturaFiltro) && (
+          <button
+            onClick={() => { setBuscaTexto(""); setDataDe(""); setDataAte(""); setAssinaturaFiltro(""); }}
+            className="mt-2 text-[10.5px] text-slate-500 underline"
+          >
+            Limpar filtros adicionais
+          </button>
+        )}
+      </div>
+
       <div className="flex gap-1.5 flex-wrap">
         {[["aberta", "Abertas"], ["em_atendimento", "Em atendimento"],
           ["atendida", "Atendidas"], ["cancelada", "Canceladas"], ["", "Todas"]].map(([k, r]) => (
@@ -698,6 +782,12 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
           <div key={r.id} className="bg-white rounded-xl border border-slate-200 p-4">
             <div className="flex items-start gap-3 flex-wrap">
               <div className="flex-1 min-w-[200px]">
+                <div className="flex items-center gap-2 flex-wrap mb-1">
+                  <code className="text-[10px] font-semibold text-teal-700 bg-teal-50 rounded px-1.5 py-0.5">
+                    {protocoloPainel(r)}
+                  </code>
+                  <span className="text-[10px] text-slate-400">{dataBR(r.criado_em)}</span>
+                </div>
                 <p className="text-[14px] font-semibold">
                   {r.quantidade} {r.quantidade === 1 ? "pessoa" : "pessoas"} · {r.unidade_codigo}
                   {r.fora_do_prazo && (
@@ -819,12 +909,21 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
                   : r.status === "em_atendimento" ? "bg-sky-50 text-sky-700"
                   : r.status === "atendida" ? "bg-emerald-50 text-emerald-700"
                   : "bg-slate-100 text-slate-500"}`}>
-                  {r.status.replace("_", " ")}
+                  {statusVisual(r)}
                 </span>
                 {r.atendida_por && (
                   <p className="text-[10.5px] text-slate-400 mt-1">por {r.atendida_por}</p>
                 )}
               </div>
+            </div>
+
+            <div className="flex gap-2 mt-3 flex-wrap">
+              <button
+                onClick={() => setTimelineId(r.id)}
+                className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600 hover:border-slate-400"
+              >
+                Histórico
+              </button>
             </div>
 
             {podeEditar && r.status !== "atendida" && r.status !== "cancelada" && cancelando !== r.id && (
@@ -943,6 +1042,15 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
         </div>
       )}
 
+      {timelineId && (
+        <LinhaDoTempoRequisicao
+          id={timelineId}
+          token={token}
+          pedir={pedir}
+          aoFechar={() => setTimelineId(null)}
+        />
+      )}
+
       <p className="text-[11px] text-slate-400">
         Fora do prazo é o pedido que chegou depois do corte da quinzena — a data está nos Critérios.
         O encerramento é a data em que a requisição se encerra para faturamento; o período apurado é o
@@ -951,3 +1059,4 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
     </div>
   );
 }
+

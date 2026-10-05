@@ -5,6 +5,7 @@ import Escalas from "./Escalas.jsx";
 import Convocacao from "./Convocacao.jsx";
 import { AssinarRequisicao, ValidarAssinatura } from "./Assinaturas.jsx";
 import Validacoes from "./Validacoes.jsx";
+import { DashboardExecutivo, Atividades, BuscaGlobal, ContaMenu, ToastHost, toast } from "./Profissional.jsx";
 
 const API = import.meta.env.VITE_API_URL || "http://localhost:3001";
 const ASSINATURA_SITE = String(import.meta.env.VITE_ASSINATURA_URL || "").replace(/\/$/, "");
@@ -62,7 +63,9 @@ async function gravar(caminho, token, corpo, metodo = "PUT") {
     if (r.status === 401 || tokenVencido(d.error)) { forcarLogout(); return new Promise(() => {}); }
     throw new Error(d.error || "Falha ao gravar");
   }
-  return r.json();
+  const dados = await r.json();
+  toast("Alteração salva.");
+  return dados;
 }
 
 /* 16/09/2026 — data formatada pelo texto, não pelo relógio do navegador.
@@ -1982,6 +1985,7 @@ function Painel({ token, sair }) {
   const [erro, setErro] = useState("");
   const [aba, setAba] = useState("painel");
   const [senhaAberta, setSenhaAberta] = useState(false);
+  const [buscaGlobalAberta, setBuscaGlobalAberta] = useState(false);
   const [temaEscuro, setTemaEscuro] = useState(() => localStorage.getItem("mmg_tema") === "escuro");
 
   useEffect(() => {
@@ -2095,12 +2099,25 @@ function Painel({ token, sair }) {
               {j.congelado ? " · congelada" : ""} · {r.tipo_meta === "dias" ? `meta de ${r.meta_dias} dias` : `${j.percentual}% da entressafra`}
             </p>
           </div>
-          <div className="text-right">
-            <p className="text-[11px] text-slate-300 leading-tight">{eu.nome || eu.usuario}</p>
-            <p className="text-[10px] text-slate-500 leading-tight">
-              {eu.perfil === "leitura" ? "somente leitura" : eu.perfil}
-            </p>
-          </div>
+          <button
+            type="button"
+            onClick={() => setBuscaGlobalAberta(true)}
+            title="Busca global"
+            aria-label="Busca global"
+            className="w-9 h-9 rounded-lg border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-800 grid place-items-center transition"
+          >
+            <svg viewBox="0 0 24 24" className="w-4 h-4 fill-none stroke-current" strokeWidth="1.9">
+              <circle cx="11" cy="11" r="7" />
+              <path d="m20 20-3.2-3.2" />
+            </svg>
+          </button>
+          <ContaMenu
+            token={token}
+            pedir={pedir}
+            eu={eu}
+            aoTrocarSenha={() => setSenhaAberta(true)}
+            aoSair={sair}
+          />
           <button
             onClick={() => setTemaEscuro((v) => !v)}
             title={temaEscuro ? "Usar tema claro" : "Usar tema escuro"}
@@ -2138,6 +2155,18 @@ function Painel({ token, sair }) {
         </div>
       </header>
 
+      <ToastHost />
+
+      {buscaGlobalAberta && (
+        <BuscaGlobal
+          token={token}
+          pedir={pedir}
+          aoFechar={() => setBuscaGlobalAberta(false)}
+          aoAbrirRequisicoes={() => setAba("requisicoes")}
+          aoAbrirAcessos={() => setAba("usuarios")}
+        />
+      )}
+
       {senhaAberta && (
         <TrocarSenhaModal
           token={token}
@@ -2149,7 +2178,7 @@ function Painel({ token, sair }) {
       <div className="max-w-6xl mx-auto px-4 py-4 space-y-4">
         <div className="flex gap-1.5 flex-wrap">
           {[["painel","Painel"],["safra","Safra"],["criterios","Critérios"],["locais","Locais"],["tomadora","Tomadora"],["fila","Fila"],
-            ["requisicoes","Requisições"],["escalas","Escalas"],
+            ["requisicoes","Requisições"],["escalas","Escalas"],["atividades","Atividades"],
             ["safristas","Safristas fixos"],["cadastro","Sem cadastro"],...(podeEditar ? [["validacoes","Validações"]] : []),
             ...(podeEditar ? [["importar","Importar"]] : []),
             ...(podeEditar ? [["usuarios","Acessos"]] : [])].map(([k, rot]) => (
@@ -2185,6 +2214,13 @@ function Painel({ token, sair }) {
 
         {aba === "painel" && (
           <>
+            <DashboardExecutivo
+              token={token}
+              pedir={pedir}
+              aoAbrirRequisicoes={() => setAba("requisicoes")}
+              aoAbrirAtividades={() => setAba("atividades")}
+            />
+
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <Cartao rotulo="Ativos" valor={a.ativos} aoClicar={() => abrirGrupo("ativos")}
                       sub={`com movimento nos últimos ${r.dias_ativo} dias da janela`} />
@@ -2272,6 +2308,7 @@ function Painel({ token, sair }) {
 
         {aba === "importar" && podeEditar && <Importar token={token} />}
         {aba === "usuarios" && podeEditar && <Usuarios token={token} />}
+        {aba === "atividades" && <Atividades token={token} pedir={pedir} />}
         {aba === "validacoes" && <Validacoes token={token} pedir={pedir} />}
         {aba === "requisicoes" && (
           <Requisicoes token={token} podeEditar={podeEditar} pedir={pedir} gravar={gravar} />
@@ -2596,6 +2633,7 @@ export default function App() {
 
   return token ? <Painel token={token} sair={sair} /> : <Login aoEntrar={setToken} />;
 }
+
 
 
 

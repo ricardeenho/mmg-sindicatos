@@ -1,6 +1,7 @@
 ﻿const express = require('express');
 const { consulta } = require('../db');
 const { autenticar, autorizar } = require('../middlewares/auth');
+const { registrarEvento, ipReq, navegadorReq, atorReq } = require('../lib/auditoria');
 
 const router = express.Router();
 
@@ -281,6 +282,26 @@ router.post('/publico/:token', async (req, res, next) => {
              quinzena_fim, corte, encerramento, fora_do_prazo, aditivo, funcoes
         from v_requisicoes where id = $1`, [r.id]);
 
+    await registrarEvento({
+      tipo: 'requisicao_criada',
+      titulo: 'Requisição criada',
+      descricao: `Pedido de ${quantidade} pessoa(s)`,
+      ator: nome,
+      requisicaoId: r.id,
+      entidadeTipo: 'requisicao',
+      entidadeId: r.id,
+      unidadeId,
+      ip,
+      navegador: navegadorReq(req),
+      dados: {
+        quantidade,
+        tipo,
+        fora_do_prazo: !!v?.fora_do_prazo,
+        quinzena_inicio: v?.quinzena_inicio || null,
+      },
+      chaveUnica: `requisicao_criada:${r.id}`,
+    });
+
     res.status(201).json({ protocolo: protocolo(r.id), ...v });
   } catch (e) { next(e); }
 });
@@ -294,6 +315,11 @@ router.get('/', autenticar, async (req, res, next) => {
   try {
     const status = req.query.status;
     const quinzena = String(req.query.quinzena || '').slice(0, 10);
+    const q = String(req.query.q || '').trim();
+    const de = String(req.query.de || '').slice(0, 10);
+    const ate = String(req.query.ate || '').slice(0, 10);
+    const assinatura = String(req.query.assinatura || '').trim();
+
     const onde = [];
     const params = [];
     if (['aberta', 'em_atendimento', 'atendida', 'cancelada'].includes(status)) {
@@ -301,6 +327,48 @@ router.get('/', autenticar, async (req, res, next) => {
     }
     if (/^\d{4}-\d{2}-\d{2}$/.test(quinzena)) {
       params.push(quinzena); onde.push(`r.quinzena_inicio = $${params.length}::date`);
+    }
+    if (q) {
+      params.push(`%${q}%`);
+      const p = `$${params.length}`;
+      onde.push(`(
+        r.id::text ilike ${p}
+        or coalesce(r.unidade_codigo,'') ilike ${p}
+        or coalesce(r.unidade_nome,'') ilike ${p}
+        or coalesce(r.local_cidade,'') ilike ${p}
+        or coalesce(r.solicitante_nome,'') ilike ${p}
+      )`);
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(de)) {
+      params.push(de); onde.push(`r.criado_em::date >= $${params.length}::date`);
+    }
+    if (/^\d{4}-\d{2}-\d{2}$/.test(ate)) {
+      params.push(ate); onde.push(`r.criado_em::date <= $${params.length}::date`);
+    }
+    if (assinatura === 'pendente') {
+      onde.push(`exists (
+        select 1 from requisicao_assinaturas a
+         where a.requisicao_id = r.id
+           and a.status = 'pendente'
+           and a.expira_em >= now()
+      )`);
+    } else if (assinatura === 'assinada') {
+      onde.push(`exists (
+        select 1 from requisicao_assinaturas a
+         where a.requisicao_id = r.id and a.status = 'assinada'
+      )`);
+    } else if (assinatura === 'expirada') {
+      onde.push(`exists (
+        select 1 from requisicao_assinaturas a
+         where a.requisicao_id = r.id
+           and a.status = 'pendente'
+           and a.expira_em < now()
+      )`);
+    } else if (assinatura === 'sem_assinatura') {
+      onde.push(`not exists (
+        select 1 from requisicao_assinaturas a
+         where a.requisicao_id = r.id
+      )`);
     }
     const { rows } = await consulta(`
       select r.id, r.quantidade, r.previsao_inicio, r.previsao_fim, r.turno,
@@ -430,6 +498,31 @@ router.patch('/:id', autenticar, autorizar('admin', 'gestor'), async (req, res, 
     `, [req.params.id, status, fechando,
         req.usuario.nome || req.usuario.usuario, nota]);
     if (!r) return res.status(404).json({ error: 'Requisicao nao encontrada' });
+
+    await registrarEvento({
+      tipo: status === 'cancelada'
+        ? 'requisicao_cancelada'
+        : status === 'atendida'
+        ? 'requisicao_concluida'
+        : 'requisicao_status_alterado',
+      titulo: status === 'cancelada'
+        ? 'Requisição cancelada'
+        : status === 'atendida'
+        ? 'Requisição concluída'
+        : status === 'em_atendimento'
+        ? 'Requisição assumida'
+        : 'Status da requisição alterado',
+      descricao: nota,
+      ator: atorReq(req),
+      atorUsuarioId: req.usuario.id || null,
+      requisicaoId: r.id,
+      entidadeTipo: 'requisicao',
+      entidadeId: r.id,
+      ip: ipReq(req),
+      navegador: navegadorReq(req),
+      dados: { status },
+    });
+
     res.json(r);
   } catch (e) { next(e); }
 });
@@ -495,3 +588,4 @@ router.get('/integracao/vigentes', async (req, res, next) => {
 });
 
 module.exports = router;
+

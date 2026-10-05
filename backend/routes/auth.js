@@ -3,6 +3,7 @@ const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const { consulta, pool } = require('../db');
 const { autenticar, autorizar } = require('../middlewares/auth');
+const { registrarEvento, ipReq, navegadorReq, atorReq } = require('../lib/auditoria');
 
 const router = express.Router();
 
@@ -48,6 +49,20 @@ router.post('/login', async (req, res, next) => {
       if (!conferirSenha(senha, u.senha_hash)) return res.status(401).json({ error: 'Usuario ou senha invalidos' });
 
       await consulta('update usuarios set ultimo_acesso_em = now() where id = $1', [u.id]);
+
+      await registrarEvento({
+        tipo: 'login',
+        titulo: 'Acesso ao sistema',
+        descricao: `Login de ${u.nome}`,
+        ator: u.nome,
+        atorUsuarioId: u.id,
+        entidadeTipo: 'usuario',
+        entidadeId: u.id,
+        ip: ipReq(req),
+        navegador: navegadorReq(req),
+        dados: { perfil: u.perfil, somente_assinatura: !!u.somente_assinatura },
+      });
+
       const dados = {
         id: u.id,
         usuario: u.usuario,
@@ -125,6 +140,24 @@ router.post('/usuarios', autenticar, autorizar('admin', 'gestor'), async (req, r
               $1, $2, $3, $4, $5, $6)
       returning id, nome, usuario, perfil, ativo, somente_assinatura, criado_em, ultimo_acesso_em
     `, [nome, String(usuario).trim(), gerarHash(senha), perfilFinal, assinaturaSomente, req.usuario.usuario]);
+    await registrarEvento({
+      tipo: 'usuario_criado',
+      titulo: assinaturaSomente ? 'Gerente criado' : 'Acesso criado',
+      descricao: `${u.nome} (@${u.usuario})`,
+      ator: atorReq(req),
+      atorUsuarioId: req.usuario.id || null,
+      entidadeTipo: 'usuario',
+      entidadeId: u.id,
+      ip: ipReq(req),
+      navegador: navegadorReq(req),
+      dados: {
+        usuario_criado_id: u.id,
+        perfil: u.perfil,
+        somente_assinatura: !!u.somente_assinatura,
+      },
+      chaveUnica: `usuario_criado:${u.id}`,
+    });
+
     res.status(201).json({ ...u, unidades: [] });
   } catch (e) {
     if (e?.code === '23505') return res.status(409).json({ error: 'Ja existe um usuario com esse nome de acesso' });
@@ -288,6 +321,24 @@ router.put('/usuarios/:id/unidades', autenticar, autorizar('admin', 'gestor'), a
     }
 
     await client.query('commit');
+
+    await registrarEvento({
+      tipo: 'gerente_unidades_atualizadas',
+      titulo: 'Unidades do gerente atualizadas',
+      descricao: `${usuario.nome}: ${ids.length} unidade(s) vinculada(s)`,
+      ator: atorReq(req),
+      atorUsuarioId: req.usuario.id || null,
+      entidadeTipo: 'usuario',
+      entidadeId: req.params.id,
+      ip: ipReq(req),
+      navegador: navegadorReq(req),
+      dados: {
+        gerente_id: req.params.id,
+        gerente_nome: usuario.nome,
+        unidades: ids,
+      },
+    });
+
     res.json({ usuario_id: req.params.id, unidades: ids.length });
   } catch (e) {
     if (client) { try { await client.query('rollback'); } catch (_e) {} }
@@ -308,9 +359,24 @@ router.post('/senha', abrirParaLeitura, autenticar, async (req, res, next) => {
     const { rows: [u] } = await consulta('select senha_hash from usuarios where id = $1', [req.usuario.id]);
     if (!u || !conferirSenha(atual, u.senha_hash)) return res.status(401).json({ error: 'Senha atual incorreta' });
     await consulta('update usuarios set senha_hash = $2 where id = $1', [req.usuario.id, gerarHash(nova)]);
+
+    await registrarEvento({
+      tipo: 'senha_alterada',
+      titulo: 'Senha alterada',
+      descricao: 'O próprio usuário alterou a senha da conta.',
+      ator: atorReq(req),
+      atorUsuarioId: req.usuario.id,
+      entidadeTipo: 'usuario',
+      entidadeId: req.usuario.id,
+      ip: ipReq(req),
+      navegador: navegadorReq(req),
+      dados: {},
+    });
+
     res.json({ trocada: true });
   } catch (e) { next(e); }
 });
 
 module.exports = router;
+
 

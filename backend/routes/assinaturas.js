@@ -4,6 +4,7 @@ const QRCode = require('qrcode');
 const PDFDocument = require('pdfkit');
 const { consulta, pool } = require('../db');
 const { autenticar, autorizar } = require('../middlewares/auth');
+const { registrarEvento, ipReq, navegadorReq, atorReq } = require('../lib/auditoria');
 
 const router = express.Router();
 const TOKEN_MINUTOS = Math.max(5, Math.min(10080, Number(process.env.ASSINATURA_TOKEN_MINUTOS || 1440)));
@@ -668,6 +669,28 @@ router.post('/requisicao/:requisicaoId', autenticar, autorizar('admin', 'gestor'
       req.usuario.nome || req.usuario.usuario,
     ]);
 
+    await registrarEvento({
+      tipo: 'assinatura_solicitada',
+      titulo: 'Assinatura solicitada',
+      descricao: `Assinatura destinada a ${u.nome}`,
+      ator: atorReq(req),
+      atorUsuarioId: req.usuario.id || null,
+      requisicaoId: a.requisicao_id,
+      assinaturaId: a.id,
+      entidadeTipo: 'assinatura',
+      entidadeId: a.id,
+      unidadeId: documento.unidade_id,
+      ip: ipReq(req),
+      navegador: navegadorReq(req),
+      dados: {
+        gerente_nome: u.nome,
+        gerente_usuario: u.usuario,
+        expira_em: a.expira_em,
+        substituiu_pendente: pendentesSubstituidas > 0,
+      },
+      chaveUnica: `assinatura_solicitada:${a.id}`,
+    });
+
     res.status(201).json({
       assinaturaId: a.id,
       requisicaoId: a.requisicao_id,
@@ -732,6 +755,24 @@ router.get('/:id', autenticar, async (req, res, next) => {
     if (!ehDono && !ehGestor) return res.status(403).json({ error: 'Esta assinatura pertence a outro usuario' });
 
     const documento = await carregarDocumento(a.requisicao_id);
+
+    await registrarEvento({
+      tipo: 'assinatura_visualizada',
+      titulo: 'Documento de assinatura visualizado',
+      descricao: `Documento aberto por ${req.usuario.nome || req.usuario.usuario}`,
+      ator: atorReq(req),
+      atorUsuarioId: req.usuario.id || null,
+      requisicaoId: a.requisicao_id,
+      assinaturaId: a.id,
+      entidadeTipo: 'assinatura',
+      entidadeId: a.id,
+      unidadeId: documento?.unidade_id || null,
+      ip: ipReq(req),
+      navegador: navegadorReq(req),
+      dados: { status: a.status },
+      chaveUnica: `assinatura_visualizada:${a.id}:${req.usuario.id || req.usuario.usuario}`,
+    });
+
     res.json({ ...a, documento: resumoDocumento(documento) });
   } catch (e) { next(e); }
 });
@@ -837,6 +878,27 @@ router.post('/:id/assinar', abrirParaLeitura, autenticar, async (req, res, next)
     `, [a.id, codigo, ip, navegador, nomeAssinante, usuarioAssinante, aceiteTexto]);
 
     await client.query('commit');
+
+    await registrarEvento({
+      tipo: 'assinatura_concluida',
+      titulo: 'Requisição assinada',
+      descricao: `Assinada por ${nomeAssinante}`,
+      ator: nomeAssinante,
+      atorUsuarioId: req.usuario.id || null,
+      requisicaoId: gravada.requisicao_id,
+      assinaturaId: gravada.id,
+      entidadeTipo: 'assinatura',
+      entidadeId: gravada.id,
+      unidadeId: documentoAtual.unidade_id,
+      ip,
+      navegador,
+      dados: {
+        validation_code: gravada.validation_code,
+        aceite_versao: '1',
+      },
+      chaveUnica: `assinatura_concluida:${gravada.id}`,
+    });
+
     res.json({
       ...gravada,
       validacaoUrl: urlValidacao(gravada.validation_code),
@@ -934,6 +996,7 @@ router.get('/validar/:codigo/qr', async (req, res, next) => {
 });
 
 module.exports = router;
+
 
 
 
