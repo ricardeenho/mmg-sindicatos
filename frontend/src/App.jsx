@@ -1980,6 +1980,7 @@ function TrocarSenhaModal({ token, aoFechar, aoConcluir }) {
 
 /* MMG_MENU_LATERAL_V3 */
 /* MMG_UI2_APLICADO */
+/* MMG_UI2_SIDEBAR_FIX */
 function IconeMenu({ nome, className = "w-[18px] h-[18px]" }) {
   const p = {
     className,
@@ -2252,10 +2253,10 @@ function Painel({ token, sair }) {
           {sidebarRecolhida ? "›" : "‹"}
         </button>
         <div className="h-full flex flex-col">
-          <div className="px-4 pt-4 pb-3 border-b border-slate-800">
-            <div className="flex items-center gap-3">
-              <span className="logo-shell bg-white rounded-xl px-2.5 py-2 shrink-0 shadow-sm">
-                <img src="/logo-mmg-letras.png" alt="MMG" className="h-5 w-auto block" />
+          <div className={`pt-4 pb-3 border-b border-slate-800 ${sidebarRecolhida ? "lg:px-2" : "px-4"}`}>
+            <div className={`flex items-center ${sidebarRecolhida ? "lg:justify-center lg:gap-0" : "gap-3"}`}>
+              <span className={`logo-shell bg-white rounded-xl shrink-0 shadow-sm overflow-hidden flex items-center justify-center ${sidebarRecolhida ? "lg:w-12 lg:h-10 lg:p-1.5" : "px-2.5 py-2"}`}>
+                <img src="/logo-mmg-letras.png" alt="MMG" className={`block object-contain ${sidebarRecolhida ? "lg:h-6 lg:max-w-full" : "h-5 w-auto"}`} />
               </span>
               <div className={`${sidebarRecolhida ? "lg:hidden" : ""} min-w-0 flex-1`}>
                 <p className="text-[13px] font-semibold text-white leading-tight">MMG Sindicatos</p>
@@ -2282,7 +2283,7 @@ function Painel({ token, sair }) {
             </div>
           </div>
 
-          <nav className="flex-1 overflow-y-auto px-3 py-3">
+          <nav className={`flex-1 overflow-y-auto overflow-x-hidden py-3 ${sidebarRecolhida ? "lg:px-2" : "px-3"}`}>
             {secoesMenu.map((secao) => (
               <div key={secao.titulo} className="mb-4">
                 <p className={`${sidebarRecolhida ? "lg:hidden" : ""} px-2 mb-1.5 text-[9px] uppercase tracking-[0.14em] text-slate-600 font-bold`}>
@@ -2300,7 +2301,7 @@ function Painel({ token, sair }) {
                           setAba(k);
                           setMenuMobileAberto(false);
                         }}
-                        className={`group w-full flex items-center gap-3 rounded-lg px-2.5 py-2 text-left transition ${
+                        className={`group w-full flex items-center rounded-lg py-2 text-left transition ${sidebarRecolhida ? "lg:justify-center lg:px-0 lg:gap-0" : "gap-3 px-2.5"} ${
                           ativo
                             ? "bg-teal-500/15 text-teal-300 ring-1 ring-inset ring-teal-500/20"
                             : "text-slate-400 hover:text-white hover:bg-slate-900"
@@ -2314,22 +2315,22 @@ function Painel({ token, sair }) {
                         <span className={`${sidebarRecolhida ? "lg:hidden" : ""} flex-1 min-w-0 text-[12px] font-medium truncate`}>{rot}</span>
 
                         {k === "criterios" && j.congelado && (
-                          <span className="w-2 h-2 rounded-full bg-sky-400 shrink-0" title="Critérios congelados" />
+                          <span className={`${sidebarRecolhida ? "lg:hidden" : ""} w-2 h-2 rounded-full bg-sky-400 shrink-0`} title="Critérios congelados" />
                         )}
                         {k === "cadastro" && semCadastro.length > 0 && (
-                          <span className="min-w-5 h-5 px-1 rounded-full bg-amber-400 text-amber-950 text-[9px] font-bold grid place-items-center">
+                          <span className={`${sidebarRecolhida ? "lg:hidden" : ""} min-w-5 h-5 px-1 rounded-full bg-amber-400 text-amber-950 text-[9px] font-bold grid place-items-center`}>
                             {semCadastro.length > 99 ? "99+" : semCadastro.length}
                           </span>
                         )}
                         {k === "requisicoes" && reqs?.abertas > 0 && (
-                          <span className={`min-w-5 h-5 px-1 rounded-full text-[9px] font-bold grid place-items-center ${
+                          <span className={`${sidebarRecolhida ? "lg:hidden" : ""} min-w-5 h-5 px-1 rounded-full text-[9px] font-bold grid place-items-center ${
                             reqs.urgentes > 0 ? "bg-rose-400 text-rose-950" : "bg-teal-400 text-teal-950"
                           }`}>
                             {reqs.abertas > 99 ? "99+" : reqs.abertas}
                           </span>
                         )}
                         {k === "safristas" && safristas.length > 0 && (
-                          <span className="min-w-5 h-5 px-1 rounded-full bg-sky-400 text-sky-950 text-[9px] font-bold grid place-items-center">
+                          <span className={`${sidebarRecolhida ? "lg:hidden" : ""} min-w-5 h-5 px-1 rounded-full bg-sky-400 text-sky-950 text-[9px] font-bold grid place-items-center`}>
                             {safristas.length > 99 ? "99+" : safristas.length}
                           </span>
                         )}
@@ -2345,7 +2346,7 @@ function Painel({ token, sair }) {
             <button
               type="button"
               onClick={() => setBuscaGlobalAberta(true)}
-              className="w-full flex items-center gap-3 rounded-lg px-2.5 py-2 text-slate-400 hover:text-white hover:bg-slate-900 transition"
+              className={`w-full flex items-center rounded-lg py-2 text-slate-400 hover:text-white hover:bg-slate-900 transition ${sidebarRecolhida ? "lg:justify-center lg:px-0 lg:gap-0" : "gap-3 px-2.5"}`}
             >
               <span className="w-8 h-8 rounded-lg bg-slate-900 grid place-items-center">
                 <IconeMenu nome="search" />
@@ -2363,7 +2364,7 @@ function Painel({ token, sair }) {
         </div>
       </aside>
 
-      <div className={`${sidebarRecolhida ? "lg:pl-20" : "lg:pl-64"} min-h-screen transition-[padding] duration-200`}>
+      <div className={`${sidebarRecolhida ? "lg:pl-20" : "lg:pl-64"} min-h-screen min-w-0 overflow-x-hidden transition-[padding] duration-200`}>
         <header className="sticky top-0 z-30 bg-slate-950/95 backdrop-blur border-b border-slate-800 text-white">
           <div className="h-14 px-4 sm:px-6 flex items-center gap-3">
             <button
@@ -2422,7 +2423,7 @@ function Painel({ token, sair }) {
           </div>
         </header>
 
-        <main className="max-w-[1600px] mx-auto px-4 sm:px-6 py-5 pb-16 space-y-4">
+        <main className="w-full max-w-none px-4 sm:px-6 py-5 pb-16 space-y-4">
         {ficha && <Ficha token={token} codigo={ficha} aoFechar={() => setFicha(null)} />}
 
         {aba === "lista" && (
