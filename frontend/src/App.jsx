@@ -1979,6 +1979,7 @@ function TrocarSenhaModal({ token, aoFechar, aoConcluir }) {
 }
 
 /* MMG_MENU_LATERAL_V3 */
+/* MMG_UI2_APLICADO */
 function IconeMenu({ nome, className = "w-[18px] h-[18px]" }) {
   const p = {
     className,
@@ -2036,16 +2037,31 @@ function Painel({ token, sair }) {
   const podeEditar = eu.perfil === "admin" || eu.perfil === "gestor";
   const [d, setD] = useState(null);
   const [erro, setErro] = useState("");
-  const [aba, setAba] = useState("painel");
+  const [aba, setAba] = useState(() => {
+    const salva = localStorage.getItem("mmg_ultima_aba");
+    const validas = ["painel","requisicoes","escalas","fila","tomadora","atividades","safra","criterios","locais","safristas","cadastro","validacoes","importar","usuarios"];
+    return validas.includes(salva) ? salva : "painel";
+  });
   const [senhaAberta, setSenhaAberta] = useState(false);
   const [buscaGlobalAberta, setBuscaGlobalAberta] = useState(false);
   const [menuMobileAberto, setMenuMobileAberto] = useState(false);
+  const [sidebarRecolhida, setSidebarRecolhida] = useState(
+    () => localStorage.getItem("mmg_sidebar_recolhida") === "1"
+  );
   const [temaEscuro, setTemaEscuro] = useState(() => localStorage.getItem("mmg_tema") === "escuro");
 
   useEffect(() => {
     document.documentElement.classList.toggle("mmg-dark", temaEscuro);
     localStorage.setItem("mmg_tema", temaEscuro ? "escuro" : "claro");
   }, [temaEscuro]);
+
+  useEffect(() => {
+    localStorage.setItem("mmg_sidebar_recolhida", sidebarRecolhida ? "1" : "0");
+  }, [sidebarRecolhida]);
+
+  useEffect(() => {
+    if (aba !== "lista") localStorage.setItem("mmg_ultima_aba", aba);
+  }, [aba]);
 
   useEffect(() => {
     const atalho = (e) => {
@@ -2199,6 +2215,9 @@ function Painel({ token, sair }) {
           aoFechar={() => setBuscaGlobalAberta(false)}
           aoAbrirRequisicoes={() => setAba("requisicoes")}
           aoAbrirAcessos={() => setAba("usuarios")}
+          aoAbrirEscalas={() => setAba("escalas")}
+          aoAbrirAtividades={() => setAba("atividades")}
+          aoAbrirImportar={podeEditar ? () => setAba("importar") : undefined}
         />
       )}
 
@@ -2220,17 +2239,25 @@ function Painel({ token, sair }) {
       )}
 
       <aside
-        className={`fixed inset-y-0 left-0 z-50 w-64 bg-slate-950 text-white border-r border-slate-800 transform transition-transform duration-200 ease-out lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-50 w-64 ${sidebarRecolhida ? "lg:w-20" : "lg:w-64"} overflow-hidden bg-slate-950 text-white border-r border-slate-800 transform transition-[width,transform] duration-200 ease-out lg:translate-x-0 ${
           menuMobileAberto ? "translate-x-0" : "-translate-x-full"
         }`}
       >
+        <button
+          type="button"
+          onClick={() => setSidebarRecolhida((v) => !v)}
+          title={sidebarRecolhida ? "Expandir menu" : "Recolher menu"}
+          className="hidden lg:grid absolute -right-0 top-20 z-[60] w-7 h-7 rounded-l-lg bg-slate-800 border border-r-0 border-slate-700 text-slate-300 place-items-center hover:text-white"
+        >
+          {sidebarRecolhida ? "›" : "‹"}
+        </button>
         <div className="h-full flex flex-col">
           <div className="px-4 pt-4 pb-3 border-b border-slate-800">
             <div className="flex items-center gap-3">
               <span className="logo-shell bg-white rounded-xl px-2.5 py-2 shrink-0 shadow-sm">
                 <img src="/logo-mmg-letras.png" alt="MMG" className="h-5 w-auto block" />
               </span>
-              <div className="min-w-0 flex-1">
+              <div className={`${sidebarRecolhida ? "lg:hidden" : ""} min-w-0 flex-1`}>
                 <p className="text-[13px] font-semibold text-white leading-tight">MMG Sindicatos</p>
                 <p className="text-[10px] text-slate-400 mt-0.5">Módulo Rodízio</p>
               </div>
@@ -2244,7 +2271,7 @@ function Painel({ token, sair }) {
               </button>
             </div>
 
-            <div className="mt-3 rounded-xl bg-slate-900 border border-slate-800 px-3 py-2.5">
+            <div className={`${sidebarRecolhida ? "lg:hidden" : ""} mt-3 rounded-xl bg-slate-900 border border-slate-800 px-3 py-2.5`}>
               <p className="text-[9.5px] uppercase tracking-[0.12em] text-slate-500 font-semibold">Janela atual</p>
               <p className="text-[11px] text-slate-200 mt-1">
                 {dataBR(j.janela_inicio)} → {dataBR(j.janela_fim)}
@@ -2258,7 +2285,7 @@ function Painel({ token, sair }) {
           <nav className="flex-1 overflow-y-auto px-3 py-3">
             {secoesMenu.map((secao) => (
               <div key={secao.titulo} className="mb-4">
-                <p className="px-2 mb-1.5 text-[9px] uppercase tracking-[0.14em] text-slate-600 font-bold">
+                <p className={`${sidebarRecolhida ? "lg:hidden" : ""} px-2 mb-1.5 text-[9px] uppercase tracking-[0.14em] text-slate-600 font-bold`}>
                   {secao.titulo}
                 </p>
 
@@ -2284,7 +2311,7 @@ function Painel({ token, sair }) {
                         }`}>
                           <IconeMenu nome={icone} />
                         </span>
-                        <span className="flex-1 min-w-0 text-[12px] font-medium truncate">{rot}</span>
+                        <span className={`${sidebarRecolhida ? "lg:hidden" : ""} flex-1 min-w-0 text-[12px] font-medium truncate`}>{rot}</span>
 
                         {k === "criterios" && j.congelado && (
                           <span className="w-2 h-2 rounded-full bg-sky-400 shrink-0" title="Critérios congelados" />
@@ -2323,10 +2350,10 @@ function Painel({ token, sair }) {
               <span className="w-8 h-8 rounded-lg bg-slate-900 grid place-items-center">
                 <IconeMenu nome="search" />
               </span>
-              <span className="text-[11.5px] font-medium">Busca global</span>
-              <span className="ml-auto text-[9px] text-slate-600">Ctrl K</span>
+              <span className={`${sidebarRecolhida ? "lg:hidden" : ""} text-[11.5px] font-medium`}>Busca global</span>
+              <span className={`${sidebarRecolhida ? "lg:hidden" : ""} ml-auto text-[9px] text-slate-600`}>Ctrl K</span>
             </button>
-            <div className="px-2 pt-2 mt-1 border-t border-slate-900">
+            <div className={`${sidebarRecolhida ? "lg:hidden" : ""} px-2 pt-2 mt-1 border-t border-slate-900`}>
               <p className="text-[10.5px] text-slate-300 truncate">{eu.nome || eu.usuario}</p>
               <p className="text-[9.5px] text-slate-600 mt-0.5">
                 {eu.perfil === "leitura" ? "Somente leitura" : eu.perfil}
@@ -2336,7 +2363,7 @@ function Painel({ token, sair }) {
         </div>
       </aside>
 
-      <div className="lg:pl-64 min-h-screen">
+      <div className={`${sidebarRecolhida ? "lg:pl-20" : "lg:pl-64"} min-h-screen transition-[padding] duration-200`}>
         <header className="sticky top-0 z-30 bg-slate-950/95 backdrop-blur border-b border-slate-800 text-white">
           <div className="h-14 px-4 sm:px-6 flex items-center gap-3">
             <button
@@ -2408,8 +2435,12 @@ function Painel({ token, sair }) {
             <DashboardExecutivo
               token={token}
               pedir={pedir}
+              podeEditar={podeEditar}
               aoAbrirRequisicoes={() => setAba("requisicoes")}
               aoAbrirAtividades={() => setAba("atividades")}
+              aoAbrirEscalas={() => setAba("escalas")}
+              aoAbrirAcessos={() => setAba("usuarios")}
+              aoAbrirImportar={() => setAba("importar")}
             />
 
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">

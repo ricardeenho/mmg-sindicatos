@@ -565,6 +565,13 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
   const [dataAte, setDataAte] = useState("");
   const [assinaturaFiltro, setAssinaturaFiltro] = useState("");
   const [timelineId, setTimelineId] = useState(null);
+  const [visualizacao, setVisualizacao] = useState(
+    () => localStorage.getItem("mmg_req_visualizacao") === "tabela" ? "tabela" : "cards"
+  );
+
+  useEffect(() => {
+    localStorage.setItem("mmg_req_visualizacao", visualizacao);
+  }, [visualizacao]);
 
   const [cancelando, setCancelando] = useState(null);
   const [motivo, setMotivo] = useState("");
@@ -768,213 +775,318 @@ export function Requisicoes({ token, podeEditar, pedir, gravar }) {
         ))}
       </div>
 
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <p className="text-[11px] text-slate-500">
+          {linhas ? `${linhas.length} ${linhas.length === 1 ? "requisição" : "requisições"}` : "Carregando…"}
+        </p>
+        <div className="inline-flex rounded-lg border border-slate-200 bg-white p-1">
+          <button
+            type="button"
+            onClick={() => setVisualizacao("cards")}
+            className={`px-3 py-1.5 rounded-md text-[11px] font-medium ${
+              visualizacao === "cards" ? "bg-slate-900 text-white" : "text-slate-500"
+            }`}
+          >
+            Cards
+          </button>
+          <button
+            type="button"
+            onClick={() => setVisualizacao("tabela")}
+            className={`px-3 py-1.5 rounded-md text-[11px] font-medium ${
+              visualizacao === "tabela" ? "bg-slate-900 text-white" : "text-slate-500"
+            }`}
+          >
+            Tabela
+          </button>
+        </div>
+      </div>
+
       {erro && <p className="text-[13px] text-rose-600">{erro}</p>}
       {!linhas && <p className="text-sm text-slate-400">Carregando…</p>}
 
       {linhas && linhas.length === 0 && (
         <div className="bg-white rounded-xl border border-slate-200 p-6 text-center">
-          <p className="text-[13px] text-slate-500">Nenhum pedido por aqui ainda.</p>
+          <p className="text-[13px] font-medium text-slate-700">Nenhuma requisição encontrada</p><p className="text-[11px] text-slate-400 mt-1">Tente mudar os filtros acima.</p>
         </div>
       )}
 
-      <div className="space-y-2">
-        {(linhas || []).map((r) => (
-          <div key={r.id} className="bg-white rounded-xl border border-slate-200 p-4">
-            <div className="flex items-start gap-3 flex-wrap">
-              <div className="flex-1 min-w-[200px]">
-                <div className="flex items-center gap-2 flex-wrap mb-1">
-                  <code className="text-[10px] font-semibold text-teal-700 bg-teal-50 rounded px-1.5 py-0.5">
-                    {protocoloPainel(r)}
-                  </code>
-                  <span className="text-[10px] text-slate-400">{dataBR(r.criado_em)}</span>
-                </div>
-                <p className="text-[14px] font-semibold">
-                  {r.quantidade} {r.quantidade === 1 ? "pessoa" : "pessoas"} · {r.unidade_codigo}
-                  {r.fora_do_prazo && (
-                    <span className="ml-2 text-[10.5px] bg-amber-100 text-amber-800 rounded px-1.5 py-0.5 align-middle">fora do prazo</span>
-                  )}
-                  {r.aditivo && (
-                    <span className="ml-2 text-[10.5px] bg-sky-100 text-sky-800 rounded px-1.5 py-0.5 align-middle">aditivo</span>
-                  )}
-                  {r.tipo === "avulsa" && (
-                    <span className="ml-2 text-[10.5px] bg-slate-100 text-slate-700 rounded px-1.5 py-0.5 align-middle">avulsa</span>
-                  )}
-                  {r.urgente && !r.fora_do_prazo && (
-                    <span className="ml-2 text-[10.5px] bg-rose-100 text-rose-700 rounded px-1.5 py-0.5 align-middle">urgente</span>
-                  )}
-                </p>
-                <p className="text-[12.5px] text-slate-600">{r.unidade_nome}</p>
-                <p className="text-[11.5px] text-slate-500 mt-0.5">
-                  {r.local_cidade || "—"}
-                  {r.quinzena_inicio && ` · ${rotuloQuinzena(r)}`}
-                  {r.tipo === "avulsa" && ` · ${dataBR(r.previsao_inicio)} a ${dataBR(r.previsao_fim)}`}
-                  {r.encerramento && ` · encerra ${dataBR(r.encerramento)}`}
-                  {r.turno ? ` · ${r.turno}` : ""}
-                </p>
-                {(r.funcoes || []).length > 0 && (
-                  <p className="text-[11.5px] text-slate-700 mt-1">
-                    {r.funcoes.map((f) => `${f.quantidade} × ${f.nome}`).join(" · ")}
-                  </p>
-                )}
-                <p className="text-[11.5px] text-slate-500 mt-1">
-                  {r.solicitante_nome}
-                  {r.solicitante_fone ? ` · ${r.solicitante_fone}` : ""}
-                  {r.solicitante_tipo === "mmg" && <span className="text-sky-700"> · da MMG</span>}
-                  {r.dias_antecedencia != null && ` · pedido com ${r.dias_antecedencia} ${
-                    r.dias_antecedencia === 1 ? "dia" : "dias"} de antecedência`}
-                </p>
-                {(r.atividades_nomes || r.atividades)?.length > 0 && (
-                  <p className="text-[11.5px] text-slate-600 mt-1">
-                    {(r.atividades_nomes || r.atividades).join(", ")}
-                    {r.atividades_de_risco > 0 && <span className="text-amber-700"> · exige NR em dia</span>}
-                  </p>
-                )}
-                {r.observacoes && (
-                  <p className="text-[12px] text-slate-600 mt-1.5 italic">"{r.observacoes}"</p>
-                )}
-                {(r.status === "cancelada" || r.status === "atendida") && r.atendida_obs && (
-                  <p className="text-[11.5px] text-slate-500 mt-1.5">
-                    <span className="text-slate-400">Motivo:</span> {r.atendida_obs}
-                  </p>
-                )}
-
-                <div className={`mt-3 rounded-xl border px-3 py-2.5 ${
-                  r.gerente_usuario_id ? "bg-violet-50 border-violet-200" : "bg-amber-50 border-amber-200"}`}>
-                  <p className={`text-[10.5px] uppercase tracking-wide font-semibold ${
-                    r.gerente_usuario_id ? "text-violet-700" : "text-amber-700"}`}>
-                    Responsável pela assinatura
-                  </p>
-                  {r.gerente_usuario_id ? (
-                    <>
-                      <p className="text-[13px] font-semibold text-slate-900 mt-0.5">{r.gerente_nome}</p>
-                      <p className="text-[11px] text-slate-500">@{r.gerente_usuario} · gerente da unidade</p>
-                    </>
-                  ) : (
-                    <p className="text-[12px] text-amber-800 mt-0.5">Nenhum gerente vinculado a esta unidade. Configure em Acessos.</p>
-                  )}
-                </div>
-
-                {(r.assinaturas || []).length > 0 && (
-                  <div className="mt-3 space-y-2">
-                    {(r.assinaturas || []).map((a) => (
-                      <div key={a.id} className={`rounded-xl border px-3 py-2.5 ${
-                        a.status === "assinada" ? "bg-emerald-50 border-emerald-200"
-                        : a.status === "expirada" ? "bg-rose-50 border-rose-200"
-                        : "bg-violet-50 border-violet-200"}`}>
-                        <p className={`text-[10.5px] uppercase tracking-wide font-semibold ${
-                          a.status === "assinada" ? "text-emerald-700"
-                          : a.status === "expirada" ? "text-rose-700"
-                          : "text-violet-700"}`}>
-                          {a.status === "assinada" ? "Assinado por" : a.status === "expirada" ? "Assinatura expirada" : "Quem vai assinar"}
-                        </p>
-                        <div className="flex items-center justify-between gap-3 mt-0.5 flex-wrap">
-                          <div>
-                            <p className="text-[13px] font-semibold text-slate-900">{a.assinante_nome}</p>
-                            {a.assinante_usuario && <p className="text-[11px] text-slate-500">@{a.assinante_usuario}</p>}
-                          </div>
-                          <span className={`text-[10.5px] rounded-full px-2 py-1 ${
-                            a.status === "assinada" ? "bg-emerald-100 text-emerald-800"
-                            : a.status === "expirada" ? "bg-rose-100 text-rose-700"
-                            : "bg-violet-100 text-violet-800"}`}>
-                            {a.status}
+      {visualizacao === "tabela" && linhas && linhas.length > 0 && (
+        <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full min-w-[1050px] text-[11.5px]">
+              <thead className="bg-slate-50 text-slate-500">
+                <tr>
+                  <th className="text-left px-3 py-2.5">Protocolo</th>
+                  <th className="text-left px-3 py-2.5">Unidade</th>
+                  <th className="text-left px-3 py-2.5">Solicitante</th>
+                  <th className="text-right px-3 py-2.5">Pessoas</th>
+                  <th className="text-left px-3 py-2.5">Status</th>
+                  <th className="text-left px-3 py-2.5">Assinatura</th>
+                  <th className="text-left px-3 py-2.5">Gerente</th>
+                  <th className="text-left px-3 py-2.5">Criada em</th>
+                  <th className="text-right px-3 py-2.5">Ação</th>
+                </tr>
+              </thead>
+              <tbody>
+                {linhas.map((r) => {
+                  const ass = (r.assinaturas || [])[0];
+                  return (
+                    <tr key={r.id} className="border-t border-slate-100 hover:bg-slate-50/70 align-top">
+                      <td className="px-3 py-3">
+                        <code className="text-[10px] font-semibold text-teal-700">{protocoloPainel(r)}</code>
+                        {r.fora_do_prazo && <span className="block mt-1 text-[9.5px] text-rose-600">fora do prazo</span>}
+                      </td>
+                      <td className="px-3 py-3 max-w-[260px]">
+                        <p className="font-semibold text-slate-800">{r.unidade_codigo}</p>
+                        <p className="text-[10.5px] text-slate-500 truncate">{r.unidade_nome}</p>
+                      </td>
+                      <td className="px-3 py-3">
+                        <p className="text-slate-700">{r.solicitante_nome || "—"}</p>
+                        <p className="text-[10px] text-slate-400">{r.solicitante_fone || ""}</p>
+                      </td>
+                      <td className="px-3 py-3 text-right font-semibold tabular-nums">{r.quantidade}</td>
+                      <td className="px-3 py-3">
+                        <span className="inline-flex rounded-full bg-slate-100 text-slate-700 px-2 py-1 text-[10px]">
+                          {statusVisual(r)}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3">
+                        {ass ? (
+                          <span className={`inline-flex rounded-full px-2 py-1 text-[10px] ${
+                            ass.status === "assinada"
+                              ? "bg-emerald-50 text-emerald-700"
+                              : ass.status === "expirada"
+                              ? "bg-rose-50 text-rose-700"
+                              : "bg-violet-50 text-violet-700"
+                          }`}>
+                            {ass.status}
                           </span>
-                        </div>
-                        {a.status === "assinada" && a.assinada_em && (
-                          <p className="text-[10.5px] text-slate-500 mt-1">Assinada em {new Date(a.assinada_em).toLocaleString("pt-BR")}</p>
-                        )}
-                        {a.status === "pendente" && a.expira_em && (
-                          <p className="text-[10.5px] text-slate-500 mt-1">Aguardando assinatura · expira em {new Date(a.expira_em).toLocaleString("pt-BR")}</p>
-                        )}
-                        {a.status === "assinada" && a.validation_code && (
-                          <div className="mt-2 flex items-center gap-3 flex-wrap">
-                            <a href={`/?validar=${encodeURIComponent(a.validation_code)}`}
-                              className="text-[11px] text-teal-700 underline font-medium">Validar assinatura</a>
-                            <a href={`/?validar=${encodeURIComponent(a.validation_code)}`}
-                              title={`Validar assinatura de ${a.assinante_nome}`}>
-                              <img src={`${API}/assinaturas/validar/${encodeURIComponent(a.validation_code)}/qr`}
-                                alt={`QR de validação de ${a.assinante_nome}`}
-                                className="w-16 h-16 bg-white border border-slate-200 rounded-lg p-1" />
-                            </a>
+                        ) : <span className="text-slate-400">não solicitada</span>}
+                      </td>
+                      <td className="px-3 py-3">
+                        <p className="text-slate-700">{r.gerente_nome || "—"}</p>
+                        {r.gerente_usuario && <p className="text-[10px] text-slate-400">@{r.gerente_usuario}</p>}
+                      </td>
+                      <td className="px-3 py-3 text-slate-500">{dataBR(r.criado_em)}</td>
+                      <td className="px-3 py-3 text-right">
+                        <button
+                          type="button"
+                          onClick={() => setTimelineId(r.id)}
+                          className="border border-slate-200 rounded-lg px-2.5 py-1.5 text-[10.5px] text-slate-600 hover:border-slate-400"
+                        >
+                          Histórico
+                        </button>
+                      </td>
+                    </tr>
+                  );
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {visualizacao === "cards" && (
+        <div className="space-y-2">
+          {(linhas || []).map((r) => (
+            <div key={r.id} className="bg-white rounded-xl border border-slate-200 p-4">
+              <div className="flex items-start gap-3 flex-wrap">
+                <div className="flex-1 min-w-[200px]">
+                  <div className="flex items-center gap-2 flex-wrap mb-1">
+                    <code className="text-[10px] font-semibold text-teal-700 bg-teal-50 rounded px-1.5 py-0.5">
+                      {protocoloPainel(r)}
+                    </code>
+                    <span className="text-[10px] text-slate-400">{dataBR(r.criado_em)}</span>
+                  </div>
+                  <p className="text-[14px] font-semibold">
+                    {r.quantidade} {r.quantidade === 1 ? "pessoa" : "pessoas"} · {r.unidade_codigo}
+                    {r.fora_do_prazo && (
+                      <span className="ml-2 text-[10.5px] bg-amber-100 text-amber-800 rounded px-1.5 py-0.5 align-middle">fora do prazo</span>
+                    )}
+                    {r.aditivo && (
+                      <span className="ml-2 text-[10.5px] bg-sky-100 text-sky-800 rounded px-1.5 py-0.5 align-middle">aditivo</span>
+                    )}
+                    {r.tipo === "avulsa" && (
+                      <span className="ml-2 text-[10.5px] bg-slate-100 text-slate-700 rounded px-1.5 py-0.5 align-middle">avulsa</span>
+                    )}
+                    {r.urgente && !r.fora_do_prazo && (
+                      <span className="ml-2 text-[10.5px] bg-rose-100 text-rose-700 rounded px-1.5 py-0.5 align-middle">urgente</span>
+                    )}
+                  </p>
+                  <p className="text-[12.5px] text-slate-600">{r.unidade_nome}</p>
+                  <p className="text-[11.5px] text-slate-500 mt-0.5">
+                    {r.local_cidade || "—"}
+                    {r.quinzena_inicio && ` · ${rotuloQuinzena(r)}`}
+                    {r.tipo === "avulsa" && ` · ${dataBR(r.previsao_inicio)} a ${dataBR(r.previsao_fim)}`}
+                    {r.encerramento && ` · encerra ${dataBR(r.encerramento)}`}
+                    {r.turno ? ` · ${r.turno}` : ""}
+                  </p>
+                  {(r.funcoes || []).length > 0 && (
+                    <p className="text-[11.5px] text-slate-700 mt-1">
+                      {r.funcoes.map((f) => `${f.quantidade} × ${f.nome}`).join(" · ")}
+                    </p>
+                  )}
+                  <p className="text-[11.5px] text-slate-500 mt-1">
+                    {r.solicitante_nome}
+                    {r.solicitante_fone ? ` · ${r.solicitante_fone}` : ""}
+                    {r.solicitante_tipo === "mmg" && <span className="text-sky-700"> · da MMG</span>}
+                    {r.dias_antecedencia != null && ` · pedido com ${r.dias_antecedencia} ${
+                      r.dias_antecedencia === 1 ? "dia" : "dias"} de antecedência`}
+                  </p>
+                  {(r.atividades_nomes || r.atividades)?.length > 0 && (
+                    <p className="text-[11.5px] text-slate-600 mt-1">
+                      {(r.atividades_nomes || r.atividades).join(", ")}
+                      {r.atividades_de_risco > 0 && <span className="text-amber-700"> · exige NR em dia</span>}
+                    </p>
+                  )}
+                  {r.observacoes && (
+                    <p className="text-[12px] text-slate-600 mt-1.5 italic">"{r.observacoes}"</p>
+                  )}
+                  {(r.status === "cancelada" || r.status === "atendida") && r.atendida_obs && (
+                    <p className="text-[11.5px] text-slate-500 mt-1.5">
+                      <span className="text-slate-400">Motivo:</span> {r.atendida_obs}
+                    </p>
+                  )}
+  
+                  <div className={`mt-3 rounded-xl border px-3 py-2.5 ${
+                    r.gerente_usuario_id ? "bg-violet-50 border-violet-200" : "bg-amber-50 border-amber-200"}`}>
+                    <p className={`text-[10.5px] uppercase tracking-wide font-semibold ${
+                      r.gerente_usuario_id ? "text-violet-700" : "text-amber-700"}`}>
+                      Responsável pela assinatura
+                    </p>
+                    {r.gerente_usuario_id ? (
+                      <>
+                        <p className="text-[13px] font-semibold text-slate-900 mt-0.5">{r.gerente_nome}</p>
+                        <p className="text-[11px] text-slate-500">@{r.gerente_usuario} · gerente da unidade</p>
+                      </>
+                    ) : (
+                      <p className="text-[12px] text-amber-800 mt-0.5">Nenhum gerente vinculado a esta unidade. Configure em Acessos.</p>
+                    )}
+                  </div>
+  
+                  {(r.assinaturas || []).length > 0 && (
+                    <div className="mt-3 space-y-2">
+                      {(r.assinaturas || []).map((a) => (
+                        <div key={a.id} className={`rounded-xl border px-3 py-2.5 ${
+                          a.status === "assinada" ? "bg-emerald-50 border-emerald-200"
+                          : a.status === "expirada" ? "bg-rose-50 border-rose-200"
+                          : "bg-violet-50 border-violet-200"}`}>
+                          <p className={`text-[10.5px] uppercase tracking-wide font-semibold ${
+                            a.status === "assinada" ? "text-emerald-700"
+                            : a.status === "expirada" ? "text-rose-700"
+                            : "text-violet-700"}`}>
+                            {a.status === "assinada" ? "Assinado por" : a.status === "expirada" ? "Assinatura expirada" : "Quem vai assinar"}
+                          </p>
+                          <div className="flex items-center justify-between gap-3 mt-0.5 flex-wrap">
+                            <div>
+                              <p className="text-[13px] font-semibold text-slate-900">{a.assinante_nome}</p>
+                              {a.assinante_usuario && <p className="text-[11px] text-slate-500">@{a.assinante_usuario}</p>}
+                            </div>
+                            <span className={`text-[10.5px] rounded-full px-2 py-1 ${
+                              a.status === "assinada" ? "bg-emerald-100 text-emerald-800"
+                              : a.status === "expirada" ? "bg-rose-100 text-rose-700"
+                              : "bg-violet-100 text-violet-800"}`}>
+                              {a.status}
+                            </span>
                           </div>
-                        )}
-                      </div>
+                          {a.status === "assinada" && a.assinada_em && (
+                            <p className="text-[10.5px] text-slate-500 mt-1">Assinada em {new Date(a.assinada_em).toLocaleString("pt-BR")}</p>
+                          )}
+                          {a.status === "pendente" && a.expira_em && (
+                            <p className="text-[10.5px] text-slate-500 mt-1">Aguardando assinatura · expira em {new Date(a.expira_em).toLocaleString("pt-BR")}</p>
+                          )}
+                          {a.status === "assinada" && a.validation_code && (
+                            <div className="mt-2 flex items-center gap-3 flex-wrap">
+                              <a href={`/?validar=${encodeURIComponent(a.validation_code)}`}
+                                className="text-[11px] text-teal-700 underline font-medium">Validar assinatura</a>
+                              <a href={`/?validar=${encodeURIComponent(a.validation_code)}`}
+                                title={`Validar assinatura de ${a.assinante_nome}`}>
+                                <img src={`${API}/assinaturas/validar/${encodeURIComponent(a.validation_code)}/qr`}
+                                  alt={`QR de validação de ${a.assinante_nome}`}
+                                  className="w-16 h-16 bg-white border border-slate-200 rounded-lg p-1" />
+                              </a>
+                            </div>
+                          )}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+  
+                <div className="text-right shrink-0">
+                  <span className={`text-[11px] px-2 py-1 rounded ${
+                    r.status === "aberta" ? "bg-amber-50 text-amber-700"
+                    : r.status === "em_atendimento" ? "bg-sky-50 text-sky-700"
+                    : r.status === "atendida" ? "bg-emerald-50 text-emerald-700"
+                    : "bg-slate-100 text-slate-500"}`}>
+                    {statusVisual(r)}
+                  </span>
+                  {r.atendida_por && (
+                    <p className="text-[10.5px] text-slate-400 mt-1">por {r.atendida_por}</p>
+                  )}
+                </div>
+              </div>
+  
+              <div className="flex gap-2 mt-3 flex-wrap">
+                <button
+                  onClick={() => setTimelineId(r.id)}
+                  className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600 hover:border-slate-400"
+                >
+                  Histórico
+                </button>
+              </div>
+  
+              {podeEditar && r.status !== "atendida" && r.status !== "cancelada" && cancelando !== r.id && (
+                <div className="flex gap-2 mt-3 flex-wrap">
+                  {r.status === "aberta" && (
+                    <button onClick={() => mudar(r.id, "em_atendimento")}
+                      className="px-3 py-1.5 rounded-lg text-[12px] bg-sky-600 text-white">Assumir</button>
+                  )}
+                  <button onClick={() => mudar(r.id, "atendida")}
+                    className="px-3 py-1.5 rounded-lg text-[12px] bg-emerald-600 text-white">Marcar atendida</button>
+                  <button onClick={() => abrirAssinatura(r)}
+                    className="px-3 py-1.5 rounded-lg text-[12px] bg-violet-600 text-white">Solicitar assinatura do gerente</button>
+                  <button onClick={() => abrirCancelamento(r.id)}
+                    className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600">Cancelar</button>
+                </div>
+              )}
+  
+              {podeEditar && cancelando === r.id && (
+                <div className="mt-3 bg-slate-50 border border-slate-200 rounded-xl p-3">
+                  <p className="text-[12.5px] font-medium text-slate-800">Por que está cancelando?</p>
+                  <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
+                    O pedido não é apagado: ele fica no arquivo com o motivo. Engano e duplicado ficam
+                    de fora da estatística; "não precisa mais" continua contando.
+                  </p>
+                  <div className="mt-2.5 space-y-1.5">
+                    {MOTIVOS_CANCELAMENTO.map(([codigo, rotulo]) => (
+                      <button key={codigo} onClick={() => setMotivo(codigo)}
+                        className={`w-full text-left px-3 py-2 rounded-lg text-[12.5px] border ${
+                          motivo === codigo ? "bg-slate-900 text-white border-slate-900"
+                                            : "bg-white text-slate-600 border-slate-200"}`}>{rotulo}</button>
                     ))}
                   </div>
-                )}
-              </div>
-
-              <div className="text-right shrink-0">
-                <span className={`text-[11px] px-2 py-1 rounded ${
-                  r.status === "aberta" ? "bg-amber-50 text-amber-700"
-                  : r.status === "em_atendimento" ? "bg-sky-50 text-sky-700"
-                  : r.status === "atendida" ? "bg-emerald-50 text-emerald-700"
-                  : "bg-slate-100 text-slate-500"}`}>
-                  {statusVisual(r)}
-                </span>
-                {r.atendida_por && (
-                  <p className="text-[10.5px] text-slate-400 mt-1">por {r.atendida_por}</p>
-                )}
-              </div>
-            </div>
-
-            <div className="flex gap-2 mt-3 flex-wrap">
-              <button
-                onClick={() => setTimelineId(r.id)}
-                className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600 hover:border-slate-400"
-              >
-                Histórico
-              </button>
-            </div>
-
-            {podeEditar && r.status !== "atendida" && r.status !== "cancelada" && cancelando !== r.id && (
-              <div className="flex gap-2 mt-3 flex-wrap">
-                {r.status === "aberta" && (
-                  <button onClick={() => mudar(r.id, "em_atendimento")}
-                    className="px-3 py-1.5 rounded-lg text-[12px] bg-sky-600 text-white">Assumir</button>
-                )}
-                <button onClick={() => mudar(r.id, "atendida")}
-                  className="px-3 py-1.5 rounded-lg text-[12px] bg-emerald-600 text-white">Marcar atendida</button>
-                <button onClick={() => abrirAssinatura(r)}
-                  className="px-3 py-1.5 rounded-lg text-[12px] bg-violet-600 text-white">Solicitar assinatura do gerente</button>
-                <button onClick={() => abrirCancelamento(r.id)}
-                  className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600">Cancelar</button>
-              </div>
-            )}
-
-            {podeEditar && cancelando === r.id && (
-              <div className="mt-3 bg-slate-50 border border-slate-200 rounded-xl p-3">
-                <p className="text-[12.5px] font-medium text-slate-800">Por que está cancelando?</p>
-                <p className="text-[11px] text-slate-500 mt-0.5 leading-relaxed">
-                  O pedido não é apagado: ele fica no arquivo com o motivo. Engano e duplicado ficam
-                  de fora da estatística; "não precisa mais" continua contando.
-                </p>
-                <div className="mt-2.5 space-y-1.5">
-                  {MOTIVOS_CANCELAMENTO.map(([codigo, rotulo]) => (
-                    <button key={codigo} onClick={() => setMotivo(codigo)}
-                      className={`w-full text-left px-3 py-2 rounded-lg text-[12.5px] border ${
-                        motivo === codigo ? "bg-slate-900 text-white border-slate-900"
-                                          : "bg-white text-slate-600 border-slate-200"}`}>{rotulo}</button>
-                  ))}
+                  {motivo && (
+                    <textarea value={observacao} onChange={(e) => setObservacao(e.target.value)} rows={2}
+                      placeholder={motivo === "outro" ? "Escreva o motivo (obrigatório)" : "Quer acrescentar alguma coisa? (opcional)"}
+                      className="mt-2.5 w-full border border-slate-200 rounded-lg px-3 py-2 text-[12.5px]" />
+                  )}
+                  <div className="flex gap-2 mt-2.5 flex-wrap">
+                    <button onClick={() => confirmarCancelamento(r.id)}
+                      disabled={!motivo || salvandoCancel || (motivo === "outro" && observacao.trim().length < 5)}
+                      className="px-3 py-1.5 rounded-lg text-[12px] bg-slate-900 text-white disabled:opacity-40">
+                      {salvandoCancel ? "Cancelando…" : "Confirmar cancelamento"}
+                    </button>
+                    <button onClick={fecharCancelamento}
+                      className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600">Voltar</button>
+                  </div>
                 </div>
-                {motivo && (
-                  <textarea value={observacao} onChange={(e) => setObservacao(e.target.value)} rows={2}
-                    placeholder={motivo === "outro" ? "Escreva o motivo (obrigatório)" : "Quer acrescentar alguma coisa? (opcional)"}
-                    className="mt-2.5 w-full border border-slate-200 rounded-lg px-3 py-2 text-[12.5px]" />
-                )}
-                <div className="flex gap-2 mt-2.5 flex-wrap">
-                  <button onClick={() => confirmarCancelamento(r.id)}
-                    disabled={!motivo || salvandoCancel || (motivo === "outro" && observacao.trim().length < 5)}
-                    className="px-3 py-1.5 rounded-lg text-[12px] bg-slate-900 text-white disabled:opacity-40">
-                    {salvandoCancel ? "Cancelando…" : "Confirmar cancelamento"}
-                  </button>
-                  <button onClick={fecharCancelamento}
-                    className="px-3 py-1.5 rounded-lg text-[12px] border border-slate-200 text-slate-600">Voltar</button>
-                </div>
-              </div>
-            )}
-          </div>
-        ))}
-      </div>
+              )}
+            </div>
+          ))}
+        </div>
+  
+        )}
 
       {assinaturaPara && (
         <div className="fixed inset-0 z-40 bg-slate-900/55 p-4 overflow-y-auto" onClick={fecharAssinatura}>

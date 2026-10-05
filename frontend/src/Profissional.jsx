@@ -119,7 +119,17 @@ function RotuloEvento({ tipo }) {
   return <span className={`inline-flex rounded-full px-2 py-0.5 text-[9.5px] font-semibold ${classe}`}>{texto}</span>;
 }
 
-export function DashboardExecutivo({ token, pedir, aoAbrirRequisicoes, aoAbrirAtividades }) {
+/* MMG_UI2_DASHBOARD */
+export function DashboardExecutivo({
+  token,
+  pedir,
+  aoAbrirRequisicoes,
+  aoAbrirAtividades,
+  aoAbrirEscalas,
+  aoAbrirAcessos,
+  aoAbrirImportar,
+  podeEditar = false,
+}) {
   const [d, setD] = useState(null);
   const [erro, setErro] = useState("");
 
@@ -134,90 +144,152 @@ export function DashboardExecutivo({ token, pedir, aoAbrirRequisicoes, aoAbrirAt
 
   useEffect(() => { carregar(); }, [token]);
 
-  const maxTendencia = Math.max(1, ...(d?.tendencia || []).map((x) => Number(x.requisicoes || 0)));
+  const maxTendencia = Math.max(
+    1,
+    ...(d?.tendencia || []).map((x) => Number(x.requisicoes || 0))
+  );
 
   if (erro) {
     return (
-      <div className="bg-rose-50 border border-rose-200 rounded-xl p-4 text-[12px] text-rose-700">
+      <div className="bg-rose-50 border border-rose-200 rounded-2xl p-4 text-[12px] text-rose-700">
         Dashboard profissional indisponível: {erro}
       </div>
     );
   }
 
   if (!d) {
-    return <div className="bg-white rounded-xl border border-slate-200 p-4 text-sm text-slate-400">Carregando visão executiva…</div>;
+    return (
+      <div className="bg-white rounded-2xl border border-slate-200 p-5 text-sm text-slate-400">
+        Carregando visão operacional…
+      </div>
+    );
   }
 
   const c = d.cards || {};
 
+  const acao = (rotulo, descricao, fn, destaque = false) => (
+    <button
+      type="button"
+      onClick={fn}
+      className={`text-left rounded-xl border px-3.5 py-3 transition ${
+        destaque
+          ? "bg-teal-600 border-teal-600 text-white hover:bg-teal-500"
+          : "bg-white border-slate-200 hover:border-slate-400 hover:shadow-sm"
+      }`}
+    >
+      <p className={`text-[12px] font-semibold ${destaque ? "text-white" : "text-slate-800"}`}>
+        {rotulo}
+      </p>
+      <p className={`text-[10.5px] mt-0.5 leading-tight ${destaque ? "text-teal-50" : "text-slate-500"}`}>
+        {descricao}
+      </p>
+    </button>
+  );
+
   return (
-    <div className="space-y-4">
-      <div className="bg-white rounded-xl border border-slate-200 p-4">
+    <div className="space-y-5">
+      <section className="bg-white rounded-2xl border border-slate-200 p-5">
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
-            <p className="text-sm font-semibold">Visão operacional</p>
-            <p className="text-[11px] text-slate-500 mt-1">
-              Requisições, assinaturas e pendências sem alterar as regras do rodízio.
+            <p className="text-[16px] font-semibold text-slate-900">Visão operacional</p>
+            <p className="text-[12px] text-slate-500 mt-1">
+              O que precisa de atenção agora, sem alterar as regras do rodízio.
             </p>
           </div>
           <button
             onClick={carregar}
-            className="border border-slate-200 rounded-lg px-3 py-1.5 text-[11px] text-slate-600 hover:border-slate-400"
+            className="border border-slate-200 rounded-lg px-3 py-2 text-[11px] text-slate-600 hover:border-slate-400"
           >
-            Atualizar
+            Atualizar dados
           </button>
         </div>
 
-        <div className="grid grid-cols-2 md:grid-cols-4 xl:grid-cols-8 gap-2 mt-4">
-          <CartaoKpi rotulo="Abertas" valor={c.abertas} tom="amber" onClick={aoAbrirRequisicoes} />
-          <CartaoKpi rotulo="Em atendimento" valor={c.em_atendimento} tom="sky" onClick={aoAbrirRequisicoes} />
-          <CartaoKpi rotulo="Aguardando assinatura" valor={c.assinaturas_aguardando} tom="violet" onClick={aoAbrirRequisicoes} />
-          <CartaoKpi rotulo="Assinadas hoje" valor={c.assinadas_hoje} tom="emerald" />
-          <CartaoKpi rotulo="Concluídas hoje" valor={c.concluidas_hoje} tom="emerald" />
-          <CartaoKpi rotulo="Fora do prazo" valor={c.fora_do_prazo} tom="rose" onClick={aoAbrirRequisicoes} />
-          <CartaoKpi rotulo="Pessoas em aberto" valor={c.pessoas_em_aberto} tom="teal" />
-          <CartaoKpi rotulo="Unidades sem gerente" valor={c.unidades_sem_gerente} tom="rose" />
+        <div className="grid sm:grid-cols-2 xl:grid-cols-4 gap-2.5 mt-4">
+          {acao("Requisições", "Abrir fila e filtros", aoAbrirRequisicoes, true)}
+          {acao("Escalas", "Conferir as escalas", aoAbrirEscalas)}
+          {acao("Atividades", "Ver histórico do sistema", aoAbrirAtividades)}
+          {podeEditar
+            ? acao("Acessos", "Gerentes e permissões", aoAbrirAcessos)
+            : acao("Minha operação", "Acompanhar requisições", aoAbrirRequisicoes)}
         </div>
+      </section>
+
+      <div className="grid xl:grid-cols-3 gap-4">
+        <section className="bg-white rounded-2xl border border-slate-200 p-5">
+          <p className="text-[11px] uppercase tracking-[0.12em] text-slate-400 font-semibold">Operação</p>
+          <div className="grid grid-cols-2 gap-2 mt-3">
+            <CartaoKpi rotulo="Abertas" valor={c.abertas} tom="amber" onClick={aoAbrirRequisicoes} />
+            <CartaoKpi rotulo="Em atendimento" valor={c.em_atendimento} tom="sky" onClick={aoAbrirRequisicoes} />
+            <CartaoKpi rotulo="Pessoas em aberto" valor={c.pessoas_em_aberto} tom="teal" />
+            <CartaoKpi rotulo="Concluídas hoje" valor={c.concluidas_hoje} tom="emerald" />
+          </div>
+        </section>
+
+        <section className="bg-white rounded-2xl border border-slate-200 p-5">
+          <p className="text-[11px] uppercase tracking-[0.12em] text-slate-400 font-semibold">Assinaturas</p>
+          <div className="grid grid-cols-2 gap-2 mt-3">
+            <CartaoKpi rotulo="Aguardando" valor={c.assinaturas_aguardando} tom="violet" onClick={aoAbrirRequisicoes} />
+            <CartaoKpi rotulo="Assinadas hoje" valor={c.assinadas_hoje} tom="emerald" />
+            <CartaoKpi rotulo="Links expirados" valor={c.assinaturas_expiradas} tom="rose" onClick={aoAbrirRequisicoes} />
+            <CartaoKpi rotulo="Criadas em 30 dias" valor={c.criadas_30_dias} tom="slate" />
+          </div>
+        </section>
+
+        <section className="bg-white rounded-2xl border border-slate-200 p-5">
+          <p className="text-[11px] uppercase tracking-[0.12em] text-slate-400 font-semibold">Pendências</p>
+          <div className="grid grid-cols-2 gap-2 mt-3">
+            <CartaoKpi rotulo="Fora do prazo" valor={c.fora_do_prazo} tom="rose" onClick={aoAbrirRequisicoes} />
+            <CartaoKpi rotulo="Sem gerente" valor={c.unidades_sem_gerente} tom="amber" onClick={aoAbrirAcessos} />
+            <div className="col-span-2 rounded-xl border border-slate-200 p-3">
+              <p className="text-[11px] text-slate-500">Leitura rápida</p>
+              <p className="text-[12px] text-slate-700 mt-1 leading-relaxed">
+                Priorize unidades sem gerente, links vencidos e pedidos fora do prazo.
+              </p>
+            </div>
+          </div>
+        </section>
       </div>
 
       <div className="grid lg:grid-cols-3 gap-4">
-        <div className="lg:col-span-2 bg-white rounded-xl border border-slate-200 p-4">
+        <section className="lg:col-span-2 bg-white rounded-2xl border border-slate-200 p-5">
           <div className="flex items-baseline justify-between gap-3">
             <div>
-              <p className="text-[13px] font-medium">Requisições nos últimos 30 dias</p>
-              <p className="text-[10.5px] text-slate-400 mt-0.5">Pedidos cancelados não entram no gráfico.</p>
+              <p className="text-[14px] font-semibold">Requisições nos últimos 30 dias</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">Canceladas não entram no gráfico.</p>
             </div>
-            <span className="text-[10.5px] text-slate-500">{c.criadas_30_dias || 0} criadas</span>
+            <span className="text-[11px] text-slate-500">{c.criadas_30_dias || 0} criadas</span>
           </div>
 
-          <div className="h-36 mt-4 flex items-end gap-1">
+          <div className="h-40 mt-5 flex items-end gap-1">
             {(d.tendencia || []).map((x, i) => (
               <div key={x.dia} className="flex-1 min-w-0 group relative">
                 <div
-                  className="bg-teal-500 rounded-t-sm min-h-[3px]"
-                  style={{ height: `${Math.max(3, (Number(x.requisicoes || 0) / maxTendencia) * 120)}px` }}
+                  className="bg-teal-500 rounded-t min-h-[3px] transition-opacity group-hover:opacity-80"
+                  style={{ height: `${Math.max(3, (Number(x.requisicoes || 0) / maxTendencia) * 132)}px` }}
                 />
                 {(i === 0 || i === 9 || i === 19 || i === (d.tendencia || []).length - 1) && (
-                  <span className="block text-[8px] text-slate-400 text-center mt-1">{dataCurtaBR(x.dia)}</span>
+                  <span className="block text-[9px] text-slate-400 text-center mt-1">{dataCurtaBR(x.dia)}</span>
                 )}
-                <span className="hidden group-hover:block absolute bottom-[105%] left-1/2 -translate-x-1/2 bg-slate-900 text-white text-[9px] rounded px-2 py-1 whitespace-nowrap z-10">
+                <span className="hidden group-hover:block absolute bottom-[105%] left-1/2 -translate-x-1/2 bg-slate-900 text-white text-[10px] rounded-lg px-2 py-1 whitespace-nowrap z-10 shadow-lg">
                   {dataCurtaBR(x.dia)} · {x.requisicoes} pedido(s) · {x.pessoas} pessoa(s)
                 </span>
               </div>
             ))}
           </div>
-        </div>
+        </section>
 
-        <div className="bg-white rounded-xl border border-slate-200 p-4">
-          <p className="text-[13px] font-medium">Unidades com mais pedidos</p>
-          <p className="text-[10.5px] text-slate-400 mt-0.5 mb-3">Últimos 30 dias.</p>
-          <div className="space-y-2">
+        <section className="bg-white rounded-2xl border border-slate-200 p-5">
+          <p className="text-[14px] font-semibold">Unidades com mais pedidos</p>
+          <p className="text-[11px] text-slate-400 mt-0.5 mb-4">Últimos 30 dias.</p>
+          <div className="space-y-3">
             {(d.top_unidades || []).map((u, i) => (
               <div key={`${u.unidade_codigo}-${i}`} className="flex items-center gap-3">
-                <span className="text-[10px] text-slate-400 w-4">{i + 1}</span>
+                <span className="w-6 h-6 rounded-lg bg-slate-100 text-slate-500 text-[10px] font-semibold grid place-items-center shrink-0">
+                  {i + 1}
+                </span>
                 <div className="min-w-0 flex-1">
-                  <p className="text-[11.5px] font-medium truncate">{u.unidade_codigo} · {u.unidade_nome}</p>
-                  <p className="text-[10px] text-slate-400">{u.requisicoes} pedido(s) · {u.pessoas} pessoa(s)</p>
+                  <p className="text-[12px] font-medium truncate">{u.unidade_codigo} · {u.unidade_nome}</p>
+                  <p className="text-[10.5px] text-slate-400">{u.requisicoes} pedido(s) · {u.pessoas} pessoa(s)</p>
                 </div>
               </div>
             ))}
@@ -225,58 +297,62 @@ export function DashboardExecutivo({ token, pedir, aoAbrirRequisicoes, aoAbrirAt
               <p className="text-[11px] text-slate-400">Sem movimento recente.</p>
             )}
           </div>
-        </div>
+        </section>
       </div>
 
       {(d.alertas || []).length > 0 && (
-        <div className="bg-white rounded-xl border border-slate-200 p-4">
+        <section className="bg-white rounded-2xl border border-slate-200 p-5">
           <div className="flex items-center justify-between gap-3">
             <div>
-              <p className="text-[13px] font-medium flex items-center gap-2">
+              <p className="text-[14px] font-semibold flex items-center gap-2">
                 <Icone nome="bell" className="w-4 h-4 text-amber-600" />
-                Alertas que precisam de atenção
+                Pendências que precisam de atenção
               </p>
-              <p className="text-[10.5px] text-slate-400 mt-0.5">Calculados automaticamente a partir do fluxo atual.</p>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Vermelho fica reservado para o que realmente bloqueia o fluxo.
+              </p>
             </div>
-            <span className="bg-amber-100 text-amber-800 rounded-full px-2 py-0.5 text-[10px] font-semibold">{d.alertas.length}</span>
+            <span className="bg-slate-100 text-slate-700 rounded-full px-2.5 py-1 text-[10px] font-semibold">
+              {d.alertas.length}
+            </span>
           </div>
 
-          <div className="grid md:grid-cols-2 gap-2 mt-3">
+          <div className="grid md:grid-cols-2 gap-2.5 mt-4">
             {d.alertas.map((a, i) => (
               <button
                 key={`${a.tipo}-${a.requisicao_id}-${i}`}
                 onClick={aoAbrirRequisicoes}
-                className={`text-left rounded-xl border p-3 ${
-                  a.gravidade === "alta"
-                    ? "bg-rose-50 border-rose-200"
-                    : "bg-amber-50 border-amber-200"
+                className={`text-left rounded-xl border border-slate-200 border-l-4 bg-white p-3.5 hover:border-slate-400 transition ${
+                  a.gravidade === "alta" ? "border-l-rose-500" : "border-l-amber-400"
                 }`}
               >
                 <div className="flex items-center justify-between gap-2">
-                  <p className="text-[11.5px] font-semibold">{a.titulo}</p>
-                  <code className="text-[9px] text-slate-500">{a.protocolo}</code>
+                  <p className="text-[12px] font-semibold text-slate-800">{a.titulo}</p>
+                  <code className="text-[9px] text-slate-400">{a.protocolo}</code>
                 </div>
-                <p className="text-[10.5px] text-slate-600 mt-1">{a.unidade_codigo} · {a.unidade_nome}</p>
+                <p className="text-[11px] text-slate-600 mt-1">{a.unidade_codigo} · {a.unidade_nome}</p>
                 <p className="text-[10.5px] text-slate-500 mt-1">{a.detalhe}</p>
               </button>
             ))}
           </div>
-        </div>
+        </section>
       )}
 
-      <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-        <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3">
+      <section className="bg-white rounded-2xl border border-slate-200 overflow-hidden">
+        <div className="px-5 py-4 border-b border-slate-100 flex items-center justify-between gap-3">
           <div>
-            <p className="text-[13px] font-medium">Atividade recente</p>
-            <p className="text-[10.5px] text-slate-400">Quem fez o quê no sistema.</p>
+            <p className="text-[14px] font-semibold">Atividade recente</p>
+            <p className="text-[11px] text-slate-400">Quem fez o quê no sistema.</p>
           </div>
           {aoAbrirAtividades && (
-            <button onClick={aoAbrirAtividades} className="text-[11px] text-teal-700 underline">ver histórico completo</button>
+            <button onClick={aoAbrirAtividades} className="text-[11px] text-teal-700 hover:underline">
+              Ver histórico completo
+            </button>
           )}
         </div>
         <div>
           {(d.atividades || []).map((e) => (
-            <div key={`${e.id}-${e.quando}`} className="px-4 py-3 border-b border-slate-100 last:border-0 flex items-start gap-3">
+            <div key={`${e.id}-${e.quando}`} className="px-5 py-3 border-b border-slate-100 last:border-0 flex items-start gap-3">
               <div className="mt-0.5"><RotuloEvento tipo={e.tipo} /></div>
               <div className="min-w-0 flex-1">
                 <p className="text-[12px] font-medium text-slate-800">{e.titulo}</p>
@@ -289,7 +365,15 @@ export function DashboardExecutivo({ token, pedir, aoAbrirRequisicoes, aoAbrirAt
             </div>
           ))}
         </div>
-      </div>
+      </section>
+
+      {podeEditar && aoAbrirImportar && (
+        <div className="text-right">
+          <button onClick={aoAbrirImportar} className="text-[10.5px] text-slate-400 hover:text-slate-600">
+            Importar dados
+          </button>
+        </div>
+      )}
     </div>
   );
 }
@@ -358,11 +442,29 @@ export function Atividades({ token, pedir }) {
   );
 }
 
-export function BuscaGlobal({ token, pedir, aoFechar, aoAbrirRequisicoes, aoAbrirAcessos }) {
+/* MMG_UI2_BUSCA */
+export function BuscaGlobal({
+  token,
+  pedir,
+  aoFechar,
+  aoAbrirRequisicoes,
+  aoAbrirAcessos,
+  aoAbrirEscalas,
+  aoAbrirAtividades,
+  aoAbrirImportar,
+}) {
   const [q, setQ] = useState("");
   const [d, setD] = useState({ requisicoes: [], unidades: [], usuarios: [] });
   const [carregando, setCarregando] = useState(false);
   const inputRef = useRef(null);
+
+  const comandos = [
+    { titulo: "Ir para Requisições", descricao: "Pedidos, filtros e assinaturas", acao: aoAbrirRequisicoes },
+    { titulo: "Ir para Escalas", descricao: "Escalas e quinzenas", acao: aoAbrirEscalas },
+    { titulo: "Abrir Atividades", descricao: "Histórico operacional", acao: aoAbrirAtividades },
+    { titulo: "Gerenciar Acessos", descricao: "Gerentes e permissões", acao: aoAbrirAcessos },
+    { titulo: "Importar dados", descricao: "Carga e atualização", acao: aoAbrirImportar },
+  ].filter((x) => typeof x.acao === "function");
 
   useEffect(() => { setTimeout(() => inputRef.current?.focus(), 20); }, []);
 
@@ -384,10 +486,25 @@ export function BuscaGlobal({ token, pedir, aoFechar, aoAbrirRequisicoes, aoAbri
     return () => clearTimeout(t);
   }, [q, token]);
 
-  const total = (d.requisicoes?.length || 0) + (d.unidades?.length || 0) + (d.usuarios?.length || 0);
+  const comandosFiltrados = q.trim()
+    ? comandos.filter((c) =>
+        `${c.titulo} ${c.descricao}`.toLowerCase().includes(q.trim().toLowerCase())
+      )
+    : comandos;
+
+  const total =
+    (d.requisicoes?.length || 0) +
+    (d.unidades?.length || 0) +
+    (d.usuarios?.length || 0) +
+    comandosFiltrados.length;
+
+  const executar = (fn) => {
+    aoFechar();
+    setTimeout(() => fn?.(), 0);
+  };
 
   return (
-    <div className="fixed inset-0 z-[110] bg-slate-950/70 backdrop-blur-sm p-4 overflow-y-auto" onClick={aoFechar}>
+    <div className="fixed inset-0 z-[110] bg-slate-950/75 backdrop-blur-sm p-4 overflow-y-auto" onClick={aoFechar}>
       <div className="max-w-2xl mx-auto mt-[8vh] bg-white rounded-2xl border border-slate-200 shadow-2xl overflow-hidden" onClick={(e) => e.stopPropagation()}>
         <div className="p-4 border-b border-slate-100">
           <div className="relative">
@@ -396,20 +513,44 @@ export function BuscaGlobal({ token, pedir, aoFechar, aoAbrirRequisicoes, aoAbri
               ref={inputRef}
               value={q}
               onChange={(e) => setQ(e.target.value)}
-              placeholder="Buscar requisição, unidade, gerente, solicitante…"
+              placeholder="Buscar ou digitar uma ação…"
               className="w-full border border-slate-200 rounded-xl pl-10 pr-10 py-2.5 text-[14px]"
               onKeyDown={(e) => e.key === "Escape" && aoFechar()}
             />
             <button onClick={aoFechar} className="absolute right-3 top-2.5 text-slate-400 text-lg">×</button>
           </div>
-          <p className="text-[10px] text-slate-400 mt-2">Digite pelo menos 2 caracteres.</p>
+          <div className="flex items-center justify-between gap-3 mt-2">
+            <p className="text-[10px] text-slate-400">Busque protocolo, unidade, gerente ou execute uma ação.</p>
+            <span className="text-[9px] text-slate-400 border border-slate-200 rounded px-1.5 py-0.5">Esc fecha</span>
+          </div>
         </div>
 
-        <div className="max-h-[65vh] overflow-y-auto">
+        <div className="max-h-[68vh] overflow-y-auto">
+          {comandosFiltrados.length > 0 && (
+            <div>
+              <p className="px-4 py-2 text-[10px] uppercase tracking-wide text-slate-400 bg-slate-50">Ações rápidas</p>
+              <div className="p-2 grid sm:grid-cols-2 gap-1.5">
+                {comandosFiltrados.map((c) => (
+                  <button
+                    key={c.titulo}
+                    onClick={() => executar(c.acao)}
+                    className="text-left rounded-xl border border-slate-200 px-3 py-2.5 hover:border-teal-300 hover:bg-teal-50/40 transition"
+                  >
+                    <p className="text-[12px] font-semibold text-slate-800">{c.titulo}</p>
+                    <p className="text-[10px] text-slate-500 mt-0.5">{c.descricao}</p>
+                  </button>
+                ))}
+              </div>
+            </div>
+          )}
+
           {carregando && <p className="p-4 text-[12px] text-slate-400">Buscando…</p>}
 
           {!carregando && q.trim().length >= 2 && total === 0 && (
-            <p className="p-6 text-center text-[12px] text-slate-400">Nada encontrado.</p>
+            <div className="p-8 text-center">
+              <p className="text-[13px] font-medium text-slate-700">Nada encontrado</p>
+              <p className="text-[11px] text-slate-400 mt-1">Tente o número da unidade, nome ou protocolo.</p>
+            </div>
           )}
 
           {(d.requisicoes || []).length > 0 && (
@@ -418,7 +559,10 @@ export function BuscaGlobal({ token, pedir, aoFechar, aoAbrirRequisicoes, aoAbri
               {d.requisicoes.map((r) => (
                 <button
                   key={r.id}
-                  onClick={() => { sessionStorage.setItem("mmg_busca_requisicoes", r.id); aoFechar(); aoAbrirRequisicoes?.(); }}
+                  onClick={() => {
+                    sessionStorage.setItem("mmg_busca_requisicoes", r.id);
+                    executar(aoAbrirRequisicoes);
+                  }}
                   className="w-full text-left px-4 py-3 border-b border-slate-100 hover:bg-slate-50"
                 >
                   <div className="flex items-center justify-between gap-3">
@@ -436,10 +580,16 @@ export function BuscaGlobal({ token, pedir, aoFechar, aoAbrirRequisicoes, aoAbri
             <div>
               <p className="px-4 py-2 text-[10px] uppercase tracking-wide text-slate-400 bg-slate-50">Unidades</p>
               {d.unidades.map((u) => (
-                <div key={u.id} className="px-4 py-3 border-b border-slate-100">
+                <button
+                  key={u.id}
+                  onClick={() => {
+                    setQ(u.codigo || u.nome || "");
+                  }}
+                  className="w-full text-left px-4 py-3 border-b border-slate-100 hover:bg-slate-50"
+                >
                   <p className="text-[12.5px] font-semibold">{u.codigo} · {u.nome}</p>
                   <p className="text-[10.5px] text-slate-400">{[u.local, u.cidade].filter(Boolean).join(" · ") || "—"}</p>
-                </div>
+                </button>
               ))}
             </div>
           )}
@@ -450,7 +600,7 @@ export function BuscaGlobal({ token, pedir, aoFechar, aoAbrirRequisicoes, aoAbri
               {d.usuarios.map((u) => (
                 <button
                   key={u.id}
-                  onClick={() => { aoFechar(); aoAbrirAcessos?.(); }}
+                  onClick={() => executar(aoAbrirAcessos)}
                   className="w-full text-left px-4 py-3 border-b border-slate-100 hover:bg-slate-50"
                 >
                   <p className="text-[12.5px] font-semibold">{u.nome}</p>
