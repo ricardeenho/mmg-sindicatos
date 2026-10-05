@@ -2337,29 +2337,20 @@ function Painel({ token, sair }) {
       </aside>
 
       <div className="lg:pl-64 min-h-screen">
-        <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-slate-200">
-          <div className="h-16 px-4 sm:px-6 flex items-center gap-3">
+        <header className="sticky top-0 z-30 bg-slate-950/95 backdrop-blur border-b border-slate-800 text-white">
+          <div className="h-14 px-4 sm:px-6 flex items-center gap-3">
             <button
               type="button"
               onClick={() => setMenuMobileAberto(true)}
-              className="lg:hidden w-9 h-9 rounded-lg border border-slate-200 text-slate-600 grid place-items-center"
+              className="lg:hidden w-9 h-9 rounded-lg border border-slate-800 text-slate-300 hover:text-white hover:bg-slate-900 grid place-items-center"
               aria-label="Abrir menu"
             >
               <IconeMenu nome="menu" />
             </button>
 
             <div className="min-w-0 flex-1">
-              <p className="text-[10px] uppercase tracking-[0.12em] text-slate-400 font-semibold">Rodízio</p>
-              <h1 className="text-[15px] font-semibold text-slate-900 leading-tight truncate">{tituloAtual}</h1>
-            </div>
-
-            <div className="hidden md:block text-right mr-1">
-              <p className="text-[10px] text-slate-500 leading-tight">
-                {dataBR(j.janela_inicio)} a {dataBR(j.janela_fim)}
-              </p>
-              <p className="text-[9px] text-slate-400 leading-tight">
-                {j.congelado ? "janela congelada" : "janela em andamento"}
-              </p>
+              <p className="text-[9px] uppercase tracking-[0.14em] text-slate-500 font-semibold">MMG · Rodízio</p>
+              <h1 className="text-[14px] font-semibold text-white leading-tight truncate">{tituloAtual}</h1>
             </div>
 
             <button
@@ -2367,7 +2358,7 @@ function Painel({ token, sair }) {
               onClick={() => setBuscaGlobalAberta(true)}
               title="Busca global"
               aria-label="Busca global"
-              className="w-9 h-9 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-900 hover:border-slate-300 grid place-items-center transition"
+              className="w-9 h-9 rounded-lg border border-slate-800 text-slate-400 hover:text-white hover:bg-slate-900 grid place-items-center transition"
             >
               <IconeMenu nome="search" className="w-4 h-4" />
             </button>
