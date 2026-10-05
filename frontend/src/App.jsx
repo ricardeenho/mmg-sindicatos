@@ -1978,6 +1978,59 @@ function TrocarSenhaModal({ token, aoFechar, aoConcluir }) {
   );
 }
 
+/* MMG_MENU_LATERAL_V3 */
+function IconeMenu({ nome, className = "w-[18px] h-[18px]" }) {
+  const p = {
+    className,
+    viewBox: "0 0 24 24",
+    fill: "none",
+    stroke: "currentColor",
+    strokeWidth: "1.8",
+    strokeLinecap: "round",
+    strokeLinejoin: "round",
+    "aria-hidden": true,
+  };
+
+  switch (nome) {
+    case "painel":
+      return <svg {...p}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>;
+    case "requisicoes":
+      return <svg {...p}><path d="M6 3h9l3 3v15H6z"/><path d="M14 3v4h4M9 11h6M9 15h6"/></svg>;
+    case "escalas":
+      return <svg {...p}><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>;
+    case "fila":
+      return <svg {...p}><path d="M5 7h14M5 12h14M5 17h9"/><circle cx="3" cy="7" r=".5" fill="currentColor"/><circle cx="3" cy="12" r=".5" fill="currentColor"/><circle cx="3" cy="17" r=".5" fill="currentColor"/></svg>;
+    case "tomadora":
+      return <svg {...p}><path d="M4 21V7l8-4 8 4v14M8 10h2M14 10h2M8 14h2M14 14h2M10 21v-3h4v3"/></svg>;
+    case "atividades":
+      return <svg {...p}><path d="M4 18V6M4 18h16"/><path d="m7 15 3-4 3 2 4-6"/></svg>;
+    case "safra":
+      return <svg {...p}><path d="M12 21V8"/><path d="M12 10C8 10 5 8 5 4c4 0 7 2 7 6ZM12 14c4 0 7-2 7-6-4 0-7 2-7 6Z"/></svg>;
+    case "criterios":
+      return <svg {...p}><path d="M4 7h10M18 7h2M4 17h2M10 17h10M8 4v6M8 14v6M16 14v6M16 4v6"/></svg>;
+    case "locais":
+      return <svg {...p}><path d="M20 10c0 5-8 11-8 11S4 15 4 10a8 8 0 1 1 16 0Z"/><circle cx="12" cy="10" r="2.5"/></svg>;
+    case "safristas":
+      return <svg {...p}><circle cx="9" cy="8" r="3"/><path d="M3 20c.6-4 2.6-6 6-6s5.4 2 6 6M16 8h5M18.5 5.5v5"/></svg>;
+    case "cadastro":
+      return <svg {...p}><path d="M12 3a9 9 0 1 0 9 9"/><path d="M12 7v6M12 17h.01M16 4h5M18.5 1.5v5"/></svg>;
+    case "validacoes":
+      return <svg {...p}><path d="M12 3 5 6v5c0 5 3 8 7 10 4-2 7-5 7-10V6l-7-3Z"/><path d="m9 12 2 2 4-5"/></svg>;
+    case "importar":
+      return <svg {...p}><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>;
+    case "usuarios":
+      return <svg {...p}><circle cx="9" cy="8" r="3"/><path d="M3 20c.7-4 2.7-6 6-6 2.2 0 3.9.9 5 2.7"/><circle cx="17" cy="15" r="2.5"/><path d="M14 21c.4-2.3 1.4-3.5 3-3.5s2.6 1.2 3 3.5"/></svg>;
+    case "search":
+      return <svg {...p}><circle cx="11" cy="11" r="7"/><path d="m20 20-3.2-3.2"/></svg>;
+    case "menu":
+      return <svg {...p}><path d="M4 7h16M4 12h16M4 17h16"/></svg>;
+    case "close":
+      return <svg {...p}><path d="m6 6 12 12M18 6 6 18"/></svg>;
+    default:
+      return <svg {...p}><circle cx="12" cy="12" r="8"/></svg>;
+  }
+}
+
 function Painel({ token, sair }) {
   const eu = lerToken(token) || {};
   const podeEditar = eu.perfil === "admin" || eu.perfil === "gestor";
@@ -1986,12 +2039,25 @@ function Painel({ token, sair }) {
   const [aba, setAba] = useState("painel");
   const [senhaAberta, setSenhaAberta] = useState(false);
   const [buscaGlobalAberta, setBuscaGlobalAberta] = useState(false);
+  const [menuMobileAberto, setMenuMobileAberto] = useState(false);
   const [temaEscuro, setTemaEscuro] = useState(() => localStorage.getItem("mmg_tema") === "escuro");
 
   useEffect(() => {
     document.documentElement.classList.toggle("mmg-dark", temaEscuro);
     localStorage.setItem("mmg_tema", temaEscuro ? "escuro" : "claro");
   }, [temaEscuro]);
+
+  useEffect(() => {
+    const atalho = (e) => {
+      if ((e.ctrlKey || e.metaKey) && String(e.key).toLowerCase() === "k") {
+        e.preventDefault();
+        setBuscaGlobalAberta(true);
+      }
+      if (e.key === "Escape") setMenuMobileAberto(false);
+    };
+    window.addEventListener("keydown", atalho);
+    return () => window.removeEventListener("keydown", atalho);
+  }, []);
   const [grupo, setGrupo] = useState(null);
   const [ficha, setFicha] = useState(null);
   const [buscaFila, setBuscaFila] = useState("");
@@ -2085,76 +2151,45 @@ function Painel({ token, sair }) {
     ? `A meta é fixa: ${r.meta_dias} dias fora da unidade-base para todo obrigado.`
     : `A meta é ${j.percentual}% dos dias de entressafra de cada um, com teto de ${j.teto_dias}.`;
 
-  return (
-    <div className="min-h-screen bg-slate-50 pb-16">
-      <header className="bg-slate-900 text-white px-4 py-3 sticky top-0 z-20">
-        <div className="max-w-6xl mx-auto flex items-center gap-3">
-          <span className="logo-shell bg-white rounded-lg px-2 py-1.5 shrink-0">
-            <img src="/logo-mmg-letras.png" alt="MMG" className="h-4 w-auto block" />
-          </span>
-          <div className="flex-1">
-            <h1 className="text-sm font-semibold leading-tight">Rodízio</h1>
-            <p className="text-[11px] text-slate-400 leading-tight">
-              Janela de {dataBR(j.janela_inicio)} a {dataBR(j.janela_fim)}
-              {j.congelado ? " · congelada" : ""} · {r.tipo_meta === "dias" ? `meta de ${r.meta_dias} dias` : `${j.percentual}% da entressafra`}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={() => setBuscaGlobalAberta(true)}
-            title="Busca global"
-            aria-label="Busca global"
-            className="w-9 h-9 rounded-lg border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-800 grid place-items-center transition"
-          >
-            <svg viewBox="0 0 24 24" className="w-4 h-4 fill-none stroke-current" strokeWidth="1.9">
-              <circle cx="11" cy="11" r="7" />
-              <path d="m20 20-3.2-3.2" />
-            </svg>
-          </button>
-          <ContaMenu
-            token={token}
-            pedir={pedir}
-            eu={eu}
-            aoTrocarSenha={() => setSenhaAberta(true)}
-            aoSair={sair}
-          />
-          <button
-            onClick={() => setTemaEscuro((v) => !v)}
-            title={temaEscuro ? "Usar tema claro" : "Usar tema escuro"}
-            aria-label={temaEscuro ? "Usar tema claro" : "Usar tema escuro"}
-            className={`theme-toggle ${temaEscuro ? "is-dark" : ""}`}
-          >
-            <span className="theme-toggle-track">
-              <span className="theme-toggle-thumb">
-                {temaEscuro ? (
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <circle cx="12" cy="12" r="4" />
-                    <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
-                  </svg>
-                ) : (
-                  <svg viewBox="0 0 24 24" aria-hidden="true">
-                    <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z" />
-                  </svg>
-                )}
-              </span>
-            </span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setSenhaAberta(true)}
-            title="Trocar minha senha"
-            aria-label="Trocar minha senha"
-            className="w-9 h-9 rounded-lg border border-slate-700 text-slate-300 hover:text-white hover:bg-slate-800 grid place-items-center transition"
-          >
-            <svg viewBox="0 0 24 24" className="w-4 h-4 fill-none stroke-current" strokeWidth="1.9">
-              <circle cx="8" cy="15" r="4" />
-              <path d="M11 12l8-8M16 4l4 4M14 6l2 2" />
-            </svg>
-          </button>
-          <button onClick={sair} className="text-[11px] text-slate-400 hover:text-white">Sair</button>
-        </div>
-      </header>
+  const secoesMenu = [
+    { titulo: "Visão", itens: [["painel", "Painel", "painel"]] },
+    {
+      titulo: "Operação",
+      itens: [
+        ["requisicoes", "Requisições", "requisicoes"],
+        ["escalas", "Escalas", "escalas"],
+        ["fila", "Fila de rodízio", "fila"],
+        ["tomadora", "Tomadoras", "tomadora"],
+        ["atividades", "Atividades", "atividades"],
+      ],
+    },
+    {
+      titulo: "Rodízio",
+      itens: [
+        ["safra", "Safra", "safra"],
+        ["criterios", "Critérios", "criterios"],
+        ["locais", "Locais", "locais"],
+        ["safristas", "Safristas fixos", "safristas"],
+        ["cadastro", "Sem cadastro", "cadastro"],
+      ],
+    },
+    ...(podeEditar ? [{
+      titulo: "Administração",
+      itens: [
+        ["validacoes", "Validações", "validacoes"],
+        ["importar", "Importar", "importar"],
+        ["usuarios", "Acessos", "usuarios"],
+      ],
+    }] : []),
+  ];
 
+  const itensMenu = secoesMenu.flatMap((s) => s.itens);
+  const tituloAtual = aba === "lista"
+    ? (GRUPOS[grupo] || "Detalhes")
+    : (itensMenu.find(([k]) => k === aba)?.[1] || "Rodízio");
+
+  return (
+    <div className="min-h-screen bg-slate-50">
       <ToastHost />
 
       {buscaGlobalAberta && (
@@ -2175,36 +2210,201 @@ function Painel({ token, sair }) {
         />
       )}
 
-      <div className="max-w-6xl mx-auto px-4 py-4 space-y-4">
-        <div className="flex gap-1.5 flex-wrap">
-          {[["painel","Painel"],["safra","Safra"],["criterios","Critérios"],["locais","Locais"],["tomadora","Tomadora"],["fila","Fila"],
-            ["requisicoes","Requisições"],["escalas","Escalas"],["atividades","Atividades"],
-            ["safristas","Safristas fixos"],["cadastro","Sem cadastro"],...(podeEditar ? [["validacoes","Validações"]] : []),
-            ...(podeEditar ? [["importar","Importar"]] : []),
-            ...(podeEditar ? [["usuarios","Acessos"]] : [])].map(([k, rot]) => (
-            <button key={k} onClick={() => setAba(k)}
-              className={`px-4 py-2 rounded-lg text-[13px] font-medium ${
-                aba === k ? "bg-slate-900 text-white" : "bg-white border border-slate-200 text-slate-600"}`}>
-              {rot}
-              {k === "criterios" && j.congelado && (
-                <span className="ml-1.5 text-[10px] bg-sky-400 text-sky-950 rounded px-1">congelados</span>
-              )}
-              {k === "cadastro" && semCadastro.length > 0 && (
-                <span className="ml-1.5 text-[10px] bg-amber-400 text-amber-950 rounded px-1">{semCadastro.length}</span>
-              )}
-              {k === "requisicoes" && reqs?.abertas > 0 && (
-                <span className={`ml-1.5 text-[10px] rounded px-1 ${
-                  reqs.urgentes > 0 ? "bg-rose-400 text-rose-950" : "bg-teal-400 text-teal-950"}`}>
-                  {reqs.abertas}
-                </span>
-              )}
-              {k === "safristas" && safristas.length > 0 && (
-                <span className="ml-1.5 text-[10px] bg-sky-400 text-sky-950 rounded px-1">{safristas.length}</span>
-              )}
-            </button>
-          ))}
-        </div>
+      {menuMobileAberto && (
+        <button
+          type="button"
+          aria-label="Fechar menu"
+          className="fixed inset-0 z-40 bg-slate-950/60 backdrop-blur-[1px] lg:hidden"
+          onClick={() => setMenuMobileAberto(false)}
+        />
+      )}
 
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 w-64 bg-slate-950 text-white border-r border-slate-800 transform transition-transform duration-200 ease-out lg:translate-x-0 ${
+          menuMobileAberto ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
+        <div className="h-full flex flex-col">
+          <div className="px-4 pt-4 pb-3 border-b border-slate-800">
+            <div className="flex items-center gap-3">
+              <span className="logo-shell bg-white rounded-xl px-2.5 py-2 shrink-0 shadow-sm">
+                <img src="/logo-mmg-letras.png" alt="MMG" className="h-5 w-auto block" />
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="text-[13px] font-semibold text-white leading-tight">MMG Sindicatos</p>
+                <p className="text-[10px] text-slate-400 mt-0.5">Módulo Rodízio</p>
+              </div>
+              <button
+                type="button"
+                className="lg:hidden w-8 h-8 rounded-lg grid place-items-center text-slate-400 hover:text-white hover:bg-slate-800"
+                onClick={() => setMenuMobileAberto(false)}
+                aria-label="Fechar menu"
+              >
+                <IconeMenu nome="close" />
+              </button>
+            </div>
+
+            <div className="mt-3 rounded-xl bg-slate-900 border border-slate-800 px-3 py-2.5">
+              <p className="text-[9.5px] uppercase tracking-[0.12em] text-slate-500 font-semibold">Janela atual</p>
+              <p className="text-[11px] text-slate-200 mt-1">
+                {dataBR(j.janela_inicio)} → {dataBR(j.janela_fim)}
+              </p>
+              <p className="text-[10px] text-slate-500 mt-0.5">
+                {j.congelado ? "Congelada" : "Em andamento"} · {r.tipo_meta === "dias" ? `meta ${r.meta_dias} dias` : `${j.percentual}% da entressafra`}
+              </p>
+            </div>
+          </div>
+
+          <nav className="flex-1 overflow-y-auto px-3 py-3">
+            {secoesMenu.map((secao) => (
+              <div key={secao.titulo} className="mb-4">
+                <p className="px-2 mb-1.5 text-[9px] uppercase tracking-[0.14em] text-slate-600 font-bold">
+                  {secao.titulo}
+                </p>
+
+                <div className="space-y-0.5">
+                  {secao.itens.map(([k, rot, icone]) => {
+                    const ativo = aba === k || (aba === "lista" && k === "painel");
+                    return (
+                      <button
+                        key={k}
+                        type="button"
+                        onClick={() => {
+                          setAba(k);
+                          setMenuMobileAberto(false);
+                        }}
+                        className={`group w-full flex items-center gap-3 rounded-lg px-2.5 py-2 text-left transition ${
+                          ativo
+                            ? "bg-teal-500/15 text-teal-300 ring-1 ring-inset ring-teal-500/20"
+                            : "text-slate-400 hover:text-white hover:bg-slate-900"
+                        }`}
+                      >
+                        <span className={`w-8 h-8 rounded-lg grid place-items-center shrink-0 transition ${
+                          ativo ? "bg-teal-500/15 text-teal-300" : "bg-slate-900 text-slate-500 group-hover:text-slate-300"
+                        }`}>
+                          <IconeMenu nome={icone} />
+                        </span>
+                        <span className="flex-1 min-w-0 text-[12px] font-medium truncate">{rot}</span>
+
+                        {k === "criterios" && j.congelado && (
+                          <span className="w-2 h-2 rounded-full bg-sky-400 shrink-0" title="Critérios congelados" />
+                        )}
+                        {k === "cadastro" && semCadastro.length > 0 && (
+                          <span className="min-w-5 h-5 px-1 rounded-full bg-amber-400 text-amber-950 text-[9px] font-bold grid place-items-center">
+                            {semCadastro.length > 99 ? "99+" : semCadastro.length}
+                          </span>
+                        )}
+                        {k === "requisicoes" && reqs?.abertas > 0 && (
+                          <span className={`min-w-5 h-5 px-1 rounded-full text-[9px] font-bold grid place-items-center ${
+                            reqs.urgentes > 0 ? "bg-rose-400 text-rose-950" : "bg-teal-400 text-teal-950"
+                          }`}>
+                            {reqs.abertas > 99 ? "99+" : reqs.abertas}
+                          </span>
+                        )}
+                        {k === "safristas" && safristas.length > 0 && (
+                          <span className="min-w-5 h-5 px-1 rounded-full bg-sky-400 text-sky-950 text-[9px] font-bold grid place-items-center">
+                            {safristas.length > 99 ? "99+" : safristas.length}
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+            ))}
+          </nav>
+
+          <div className="border-t border-slate-800 p-3">
+            <button
+              type="button"
+              onClick={() => setBuscaGlobalAberta(true)}
+              className="w-full flex items-center gap-3 rounded-lg px-2.5 py-2 text-slate-400 hover:text-white hover:bg-slate-900 transition"
+            >
+              <span className="w-8 h-8 rounded-lg bg-slate-900 grid place-items-center">
+                <IconeMenu nome="search" />
+              </span>
+              <span className="text-[11.5px] font-medium">Busca global</span>
+              <span className="ml-auto text-[9px] text-slate-600">Ctrl K</span>
+            </button>
+            <div className="px-2 pt-2 mt-1 border-t border-slate-900">
+              <p className="text-[10.5px] text-slate-300 truncate">{eu.nome || eu.usuario}</p>
+              <p className="text-[9.5px] text-slate-600 mt-0.5">
+                {eu.perfil === "leitura" ? "Somente leitura" : eu.perfil}
+              </p>
+            </div>
+          </div>
+        </div>
+      </aside>
+
+      <div className="lg:pl-64 min-h-screen">
+        <header className="sticky top-0 z-30 bg-white/95 backdrop-blur border-b border-slate-200">
+          <div className="h-16 px-4 sm:px-6 flex items-center gap-3">
+            <button
+              type="button"
+              onClick={() => setMenuMobileAberto(true)}
+              className="lg:hidden w-9 h-9 rounded-lg border border-slate-200 text-slate-600 grid place-items-center"
+              aria-label="Abrir menu"
+            >
+              <IconeMenu nome="menu" />
+            </button>
+
+            <div className="min-w-0 flex-1">
+              <p className="text-[10px] uppercase tracking-[0.12em] text-slate-400 font-semibold">Rodízio</p>
+              <h1 className="text-[15px] font-semibold text-slate-900 leading-tight truncate">{tituloAtual}</h1>
+            </div>
+
+            <div className="hidden md:block text-right mr-1">
+              <p className="text-[10px] text-slate-500 leading-tight">
+                {dataBR(j.janela_inicio)} a {dataBR(j.janela_fim)}
+              </p>
+              <p className="text-[9px] text-slate-400 leading-tight">
+                {j.congelado ? "janela congelada" : "janela em andamento"}
+              </p>
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setBuscaGlobalAberta(true)}
+              title="Busca global"
+              aria-label="Busca global"
+              className="w-9 h-9 rounded-lg border border-slate-200 text-slate-500 hover:text-slate-900 hover:border-slate-300 grid place-items-center transition"
+            >
+              <IconeMenu nome="search" className="w-4 h-4" />
+            </button>
+
+            <button
+              onClick={() => setTemaEscuro((v) => !v)}
+              title={temaEscuro ? "Usar tema claro" : "Usar tema escuro"}
+              aria-label={temaEscuro ? "Usar tema claro" : "Usar tema escuro"}
+              className={`theme-toggle ${temaEscuro ? "is-dark" : ""}`}
+            >
+              <span className="theme-toggle-track">
+                <span className="theme-toggle-thumb">
+                  {temaEscuro ? (
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <circle cx="12" cy="12" r="4" />
+                      <path d="M12 2v2M12 20v2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M2 12h2M20 12h2M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41" />
+                    </svg>
+                  ) : (
+                    <svg viewBox="0 0 24 24" aria-hidden="true">
+                      <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79Z" />
+                    </svg>
+                  )}
+                </span>
+              </span>
+            </button>
+
+            <ContaMenu
+              token={token}
+              pedir={pedir}
+              eu={eu}
+              aoTrocarSenha={() => setSenhaAberta(true)}
+              aoSair={sair}
+            />
+          </div>
+        </header>
+
+        <main className="max-w-[1600px] mx-auto px-4 sm:px-6 py-5 pb-16 space-y-4">
         {ficha && <Ficha token={token} codigo={ficha} aoFechar={() => setFicha(null)} />}
 
         {aba === "lista" && (
@@ -2567,6 +2767,7 @@ function Painel({ token, sair }) {
           Cada bloco de rodízio vai de segunda a sexta, com no máximo {r.dias_por_mes} dias por mês —
           só 27 dos 181 locais funcionam no sábado, então o bloco curto é o que cabe em todo lugar.
         </p>
+        </main>
       </div>
     </div>
   );
