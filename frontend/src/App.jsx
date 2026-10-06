@@ -2433,17 +2433,6 @@ function Painel({ token, sair }) {
 
         {aba === "painel" && (
           <>
-            <DashboardExecutivo
-              token={token}
-              pedir={pedir}
-              podeEditar={podeEditar}
-              aoAbrirRequisicoes={() => setAba("requisicoes")}
-              aoAbrirAtividades={() => setAba("atividades")}
-              aoAbrirEscalas={() => setAba("escalas")}
-              aoAbrirAcessos={() => setAba("usuarios")}
-              aoAbrirImportar={() => setAba("importar")}
-            />
-
             <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
               <Cartao rotulo="Ativos" valor={a.ativos} aoClicar={() => abrirGrupo("ativos")}
                       sub={`com movimento nos últimos ${r.dias_ativo} dias da janela`} />
@@ -2526,6 +2515,19 @@ function Painel({ token, sair }) {
                 Quanto mais pontos definidos na aba Locais, mais confiável fica esta conta.
               </p>
             </div>
+
+
+            {/* MMG_DASHBOARD_RODIZIO_PRIMEIRO */}
+            <DashboardExecutivo
+              token={token}
+              pedir={pedir}
+              podeEditar={podeEditar}
+              aoAbrirRequisicoes={() => setAba("requisicoes")}
+              aoAbrirAtividades={() => setAba("atividades")}
+              aoAbrirEscalas={() => setAba("escalas")}
+              aoAbrirAcessos={() => setAba("usuarios")}
+              aoAbrirImportar={() => setAba("importar")}
+            />
           </>
         )}
 
