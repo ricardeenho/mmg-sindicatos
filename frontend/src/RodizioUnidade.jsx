@@ -78,6 +78,8 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   const [filtro, setFiltro] = useState("minhas");
   const [cidade, setCidade] = useState("Todas");
   const [busca, setBusca] = useState("");
+  /* 11/10: em "Minhas" o bloco de cidades começa recolhido; nas outras abas, aberto */
+  const [cidadesAbertas, setCidadesAbertas] = useState(false);
   const [uSel, setUSel] = useState(null);
   const [pSel, setPSel] = useState(null);
   const [dSel, setDSel] = useState(null);
@@ -305,18 +307,33 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
         <p className="text-[13.5px] font-semibold">Unidades</p>
         <div className="flex gap-1">
           {[["minhas", `Minhas ${nMinhas}`], ["semgestor", `Sem gestor ${semGestor}`], ["todas", "Todas"]].map(([k, r]) => (
-            <button key={k} onClick={() => setFiltro(k)}
+            <button key={k} onClick={() => { setFiltro(k); setCidadesAbertas(k !== "minhas"); }}
               className={`flex-1 rounded-lg px-2 py-1.5 text-[11.5px] font-semibold border ${filtro === k ? "bg-slate-900 text-white border-slate-900" : "bg-slate-50 text-slate-500 border-slate-200"}`}>{r}</button>
           ))}
         </div>
         <input value={busca} onChange={(e) => setBusca(e.target.value)} placeholder="Número ou nome da unidade"
           className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
-        <div className="flex flex-wrap gap-1">
-          {cidades.map((c) => (
-            <button key={c} onClick={() => setCidade(c)}
-              className={`rounded-full px-2.5 py-0.5 text-[11.5px] border ${cidade === c ? "border-teal-500 bg-teal-50 text-teal-700 font-semibold" : "border-slate-200 text-slate-500"}`}>{c}</button>
-          ))}
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={() => setCidadesAbertas((v) => !v)}
+            className="flex items-center gap-1.5 text-[12px] font-semibold text-slate-600 border border-slate-200 rounded-lg px-2.5 py-1 hover:border-slate-400">
+            <span className={`inline-block transition-transform ${cidadesAbertas ? "rotate-90" : ""}`}>›</span>
+            {cidadesAbertas ? "Ocultar cidades" : "Filtrar por cidade"}
+          </button>
+          {!cidadesAbertas && cidade !== "Todas" && (
+            <span className="flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11.5px] border border-teal-500 bg-teal-50 text-teal-700 font-semibold">
+              {cidade}
+              <button onClick={() => setCidade("Todas")} aria-label="Tirar filtro de cidade" className="leading-none ml-0.5">×</button>
+            </span>
+          )}
         </div>
+        {cidadesAbertas && (
+          <div className="flex flex-wrap gap-1">
+            {cidades.map((c) => (
+              <button key={c} onClick={() => setCidade(c)}
+                className={`rounded-full px-2.5 py-0.5 text-[11.5px] border ${cidade === c ? "border-teal-500 bg-teal-50 text-teal-700 font-semibold" : "border-slate-200 text-slate-500"}`}>{c}</button>
+            ))}
+          </div>
+        )}
       </div>
       <div className="p-2 space-y-1.5 overflow-y-auto max-h-[calc(100vh-260px)]">
         {lista.length === 0 && (
