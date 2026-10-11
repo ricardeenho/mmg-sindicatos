@@ -32,16 +32,49 @@ function assinar(dados) {
 
 const PERFIS = ['admin', 'gestor', 'leitura'];
 
+/* 11/10/2026 — ACESSO POR E-MAIL E SENHA PROVISÓRIA.
+   O login aceita e-mail ou nome de usuário (o nome continua valendo até
+   todos terem e-mail). Quem está com deve_trocar_senha recebe um token
+   marcado com trocar_senha: o middleware só deixa esse token criar a
+   senha própria (/auth/senha) e consultar /auth/eu. Toda senha criada
+   por outra pessoa — na criação do acesso ou ao gerar senha provisória —
+   liga a troca obrigatória de novo. */
+const normalizarEmail = (e) => String(e || '').trim().toLowerCase();
+const emailValido = (e) => /^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(e);
+
+/* Senha provisória legível: sem 0/O, 1/l/I, para ditar por telefone. */
+function gerarProvisoria() {
+  const letras = 'abcdefghjkmnpqrstuvwxyz', numeros = '23456789';
+  const pega = (s) => s[crypto.randomInt(s.length)];
+  let p = '';
+  for (let i = 0; i < 4; i++) p += pega(letras);
+  p += '-';
+  for (let i = 0; i < 4; i++) p += pega(numeros);
+  return p;
+}
+
+/* Regra da senha própria: 8 caracteres ou mais, com letra e número. */
+function problemaSenha(nova) {
+  const s = String(nova || '');
+  if (s.length < 8) return 'A senha precisa de pelo menos 8 caracteres.';
+  if (!/[A-Za-zÀ-ÿ]/.test(s) || !/\d/.test(s)) return 'Use letras e números na senha.';
+  return null;
+}
+
 router.post('/login', async (req, res, next) => {
   const { usuario, senha } = req.body || {};
   if (!usuario || !senha) return res.status(400).json({ error: 'Informe usuario e senha' });
 
   try {
     const { rows: [u] } = await consulta(`
-      select id, nome, usuario, senha_hash, perfil, ativo,
-             coalesce(somente_assinatura, false) as somente_assinatura
+      select id, nome, usuario, email, senha_hash, perfil, ativo,
+             coalesce(somente_assinatura, false) as somente_assinatura,
+             coalesce(deve_trocar_senha, false) as deve_trocar_senha
         from usuarios
-       where lower(usuario) = lower($1)
+       where lower(usuario) = lower(btrim($1))
+          or lower(btrim(email)) = lower(btrim($1))
+       order by (lower(btrim(email)) = lower(btrim($1))) desc nulls last
+       limit 1
     `, [usuario]);
 
     if (u) {
@@ -69,9 +102,10 @@ router.post('/login', async (req, res, next) => {
         nome: u.nome,
         perfil: u.perfil,
         somente_assinatura: !!u.somente_assinatura,
+        ...(u.deve_trocar_senha ? { trocar_senha: true } : {}),
       };
       const token = assinar(dados);
-      return res.json({ token, ...dados });
+      return res.json({ token, ...dados, trocar_senha: !!u.deve_trocar_senha });
     }
 
     if (usuario === process.env.ADMIN_USUARIO && senha === process.env.ADMIN_SENHA) {
@@ -85,16 +119,17 @@ router.post('/login', async (req, res, next) => {
 });
 
 router.get('/eu', autenticar, (req, res) => {
-  const { id, usuario, nome, perfil, somente_assinatura } = req.usuario;
-  res.json({ id, usuario, nome, perfil, somente_assinatura: !!somente_assinatura });
+  const { id, usuario, nome, perfil, somente_assinatura, trocar_senha } = req.usuario;
+  res.json({ id, usuario, nome, perfil, somente_assinatura: !!somente_assinatura, trocar_senha: !!trocar_senha });
 });
 
 router.get('/usuarios', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
   try {
     const somenteGerentes = req.usuario.perfil === 'gestor';
     const { rows } = await consulta(`
-      select u.id, u.nome, u.usuario, u.perfil, u.ativo,
+      select u.id, u.nome, u.usuario, u.email, u.perfil, u.ativo,
              coalesce(u.somente_assinatura, false) as somente_assinatura,
+             coalesce(u.deve_trocar_senha, false) as deve_trocar_senha, u.senha_definida_em,
              u.criado_por, u.criado_em, u.ultimo_acesso_em,
              coalesce(
                json_agg(json_build_object(
@@ -108,8 +143,9 @@ router.get('/usuarios', autenticar, autorizar('admin', 'gestor'), async (req, re
         left join unidade_gerentes ug on ug.usuario_id = u.id
         left join unidades un on un.id = ug.unidade_id
        where ($1::boolean = false or coalesce(u.somente_assinatura, false) = true)
-       group by u.id, u.nome, u.usuario, u.perfil, u.ativo,
-                u.somente_assinatura, u.criado_por, u.criado_em, u.ultimo_acesso_em
+       group by u.id, u.nome, u.usuario, u.email, u.perfil, u.ativo,
+                u.somente_assinatura, u.deve_trocar_senha, u.senha_definida_em,
+                u.criado_por, u.criado_em, u.ultimo_acesso_em
        order by u.ativo desc, u.nome
     `, [somenteGerentes]);
     res.json(rows);
@@ -117,9 +153,13 @@ router.get('/usuarios', autenticar, autorizar('admin', 'gestor'), async (req, re
 });
 
 router.post('/usuarios', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
-  const { nome, usuario, senha, perfil, somente_assinatura } = req.body || {};
-  if (!nome || !usuario || !senha) return res.status(400).json({ error: 'Informe nome, usuario e senha' });
-  if (String(senha).length < 8) return res.status(400).json({ error: 'A senha precisa de pelo menos 8 caracteres' });
+  const { nome, perfil, somente_assinatura } = req.body || {};
+  const email = normalizarEmail((req.body || {}).email);
+  const usuario = String((req.body || {}).usuario || '').trim() || email;
+  if (!nome || !email) return res.status(400).json({ error: 'Informe o nome e o e-mail' });
+  if (!emailValido(email)) return res.status(400).json({ error: 'E-mail em formato inválido' });
+  /* A senha é sempre provisória: gerada aqui, mostrada uma vez, trocada no primeiro acesso. */
+  const senha = gerarProvisoria();
   if (perfil && !PERFIS.includes(perfil)) return res.status(400).json({ error: 'Perfil deve ser admin, gestor ou leitura' });
 
   const ehGestor = req.usuario.perfil === 'gestor';
@@ -135,11 +175,12 @@ router.post('/usuarios', autenticar, autorizar('admin', 'gestor'), async (req, r
   try {
     const { rows: [u] } = await consulta(`
       insert into usuarios
-        (sindicato_id, nome, usuario, senha_hash, perfil, somente_assinatura, criado_por)
+        (sindicato_id, nome, usuario, email, senha_hash, perfil, somente_assinatura, criado_por, deve_trocar_senha)
       values ((select id from sindicatos order by criado_em limit 1),
-              $1, $2, $3, $4, $5, $6)
-      returning id, nome, usuario, perfil, ativo, somente_assinatura, criado_em, ultimo_acesso_em
-    `, [nome, String(usuario).trim(), gerarHash(senha), perfilFinal, assinaturaSomente, req.usuario.usuario]);
+              $1, $2, $7, $3, $4, $5, $6, true)
+      returning id, nome, usuario, email, perfil, ativo, somente_assinatura, criado_em, ultimo_acesso_em,
+                deve_trocar_senha
+    `, [nome, usuario, gerarHash(senha), perfilFinal, assinaturaSomente, req.usuario.usuario, email]);
     await registrarEvento({
       tipo: 'usuario_criado',
       titulo: assinaturaSomente ? 'Gerente criado' : 'Acesso criado',
@@ -158,17 +199,22 @@ router.post('/usuarios', autenticar, autorizar('admin', 'gestor'), async (req, r
       chaveUnica: `usuario_criado:${u.id}`,
     });
 
-    res.status(201).json({ ...u, unidades: [] });
+    res.status(201).json({ ...u, unidades: [], senha_provisoria: senha });
   } catch (e) {
-    if (e?.code === '23505') return res.status(409).json({ error: 'Ja existe um usuario com esse nome de acesso' });
+    if (e?.code === '23505') return res.status(409).json({ error: 'Já existe um acesso com esse e-mail ou nome de usuário' });
+    if (e?.code === '23514') return res.status(400).json({ error: 'E-mail em formato inválido' });
     next(e);
   }
 });
 
 router.patch('/usuarios/:id', autenticar, autorizar('admin', 'gestor'), async (req, res, next) => {
-  const { perfil, ativo, senha, somente_assinatura } = req.body || {};
+  const { perfil, ativo, somente_assinatura, gerar_senha } = req.body || {};
   if (perfil && !PERFIS.includes(perfil)) return res.status(400).json({ error: 'Perfil deve ser admin, gestor ou leitura' });
-  if (senha !== undefined && String(senha).length < 8) return res.status(400).json({ error: 'A senha precisa de pelo menos 8 caracteres' });
+  const emailInformado = Object.prototype.hasOwnProperty.call(req.body || {}, 'email');
+  const email = emailInformado ? normalizarEmail(req.body.email) : null;
+  if (emailInformado && email && !emailValido(email)) return res.status(400).json({ error: 'E-mail em formato inválido' });
+  /* Senha definida por outra pessoa é sempre provisória. */
+  const senha = gerar_senha ? gerarProvisoria() : undefined;
 
   const assinaturaInformada = typeof somente_assinatura === 'boolean';
   try {
@@ -200,9 +246,12 @@ router.patch('/usuarios/:id', autenticar, autorizar('admin', 'gestor'), async (r
         end,
         ativo = coalesce($3, ativo),
         senha_hash = coalesce($4, senha_hash),
-        somente_assinatura = case when $6::boolean then $5::boolean else somente_assinatura end
+        deve_trocar_senha = case when $4::text is not null then true else deve_trocar_senha end,
+        somente_assinatura = case when $6::boolean then $5::boolean else somente_assinatura end,
+        email = case when $7::boolean then nullif($8, '') else email end
        where id = $1
-      returning id, nome, usuario, perfil, ativo, somente_assinatura, criado_em, ultimo_acesso_em
+      returning id, nome, usuario, email, perfil, ativo, somente_assinatura, criado_em, ultimo_acesso_em,
+                deve_trocar_senha
     `, [
       req.params.id,
       perfil || null,
@@ -210,10 +259,30 @@ router.patch('/usuarios/:id', autenticar, autorizar('admin', 'gestor'), async (r
       senha !== undefined ? gerarHash(senha) : null,
       assinaturaInformada ? !!somente_assinatura : false,
       assinaturaInformada,
+      emailInformado,
+      email,
     ]);
     if (!u) return res.status(404).json({ error: 'Usuario nao encontrado' });
-    res.json(u);
-  } catch (e) { next(e); }
+    if (senha) {
+      await registrarEvento({
+        tipo: 'senha_provisoria',
+        titulo: 'Senha provisória gerada',
+        descricao: `${u.nome}: troca obrigatória no próximo acesso`,
+        ator: atorReq(req),
+        atorUsuarioId: req.usuario.id || null,
+        entidadeTipo: 'usuario',
+        entidadeId: u.id,
+        ip: ipReq(req),
+        navegador: navegadorReq(req),
+        dados: {},
+      });
+    }
+    res.json(senha ? { ...u, senha_provisoria: senha } : u);
+  } catch (e) {
+    if (e?.code === '23505') return res.status(409).json({ error: 'Esse e-mail já está em outro acesso' });
+    if (e?.code === '23514') return res.status(400).json({ error: 'E-mail em formato inválido' });
+    next(e);
+  }
 });
 
 /* Busca unidades para o administrador vincular a um gerente. */
@@ -352,13 +421,17 @@ const abrirParaLeitura = (req, _res, next) => { req.permitirEscritaLeitura = tru
 router.post('/senha', abrirParaLeitura, autenticar, async (req, res, next) => {
   const { atual, nova } = req.body || {};
   if (!atual || !nova) return res.status(400).json({ error: 'Informe a senha atual e a nova' });
-  if (String(nova).length < 8) return res.status(400).json({ error: 'A senha nova precisa de pelo menos 8 caracteres' });
+  const problema = problemaSenha(nova);
+  if (problema) return res.status(400).json({ error: problema });
+  if (String(nova) === String(atual)) return res.status(400).json({ error: 'A senha nova precisa ser diferente da atual.' });
   if (!req.usuario.id) return res.status(400).json({ error: 'O login de administracao nao troca a senha por aqui.' });
 
   try {
     const { rows: [u] } = await consulta('select senha_hash from usuarios where id = $1', [req.usuario.id]);
     if (!u || !conferirSenha(atual, u.senha_hash)) return res.status(401).json({ error: 'Senha atual incorreta' });
-    await consulta('update usuarios set senha_hash = $2 where id = $1', [req.usuario.id, gerarHash(nova)]);
+    await consulta(`
+      update usuarios set senha_hash = $2, deve_trocar_senha = false, senha_definida_em = now()
+       where id = $1`, [req.usuario.id, gerarHash(nova)]);
 
     await registrarEvento({
       tipo: 'senha_alterada',
@@ -373,7 +446,9 @@ router.post('/senha', abrirParaLeitura, autenticar, async (req, res, next) => {
       dados: {},
     });
 
-    res.json({ trocada: true });
+    /* token novo, já sem a marca de troca obrigatória */
+    const { trocar_senha, iat, exp, ...resto } = req.usuario;
+    res.json({ trocada: true, token: assinar(resto) });
   } catch (e) { next(e); }
 });
 

@@ -139,10 +139,10 @@ function Login({ aoEntrar }) {
           <p className="text-xs text-slate-500">Módulo Rodízio</p>
         </div>
         <input className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm mb-2"
-          placeholder="Usuário" value={usuario} onChange={(e) => setUsuario(e.target.value)}
+          placeholder="E-mail ou usuário" autoComplete="username" value={usuario} onChange={(e) => setUsuario(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && entrar()} />
         <input className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm mb-4"
-          placeholder="Senha" type="password" value={senha} onChange={(e) => setSenha(e.target.value)}
+          placeholder="Senha" type="password" autoComplete="current-password" value={senha} onChange={(e) => setSenha(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && entrar()} />
         {erro && <p className="text-[12px] text-rose-600 mb-3">{erro}</p>}
         <button onClick={entrar} disabled={carregando}
@@ -150,6 +150,88 @@ function Login({ aoEntrar }) {
           {carregando ? "Entrando..." : "Entrar"}
         </button>
       </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+ * CRIAR SENHA — 11/10/2026
+ * Primeiro acesso, ou acesso com senha provisória gerada por outra
+ * pessoa: antes de qualquer tela, a pessoa cria a senha dela. O backend
+ * recusa qualquer outra rota enquanto isso não acontece.
+ * ---------------------------------------------------------------- */
+function CriarSenha({ token, aoConcluir, sair }) {
+  const eu = lerToken(token) || {};
+  const [atual, setAtual] = useState("");
+  const [nova, setNova] = useState("");
+  const [confirmacao, setConfirmacao] = useState("");
+  const [erro, setErro] = useState("");
+  const [salvando, setSalvando] = useState(false);
+
+  const regras = [
+    [nova.length >= 8, "8 caracteres ou mais"],
+    [/[A-Za-zÀ-ÿ]/.test(nova) && /\d/.test(nova), "letras e números"],
+    [nova.length > 0 && nova !== atual, "diferente da senha provisória"],
+    [nova.length > 0 && nova === confirmacao, "confirmação igual"],
+  ];
+  const pronta = atual && regras.every(([ok]) => ok);
+
+  async function salvar(e) {
+    e.preventDefault();
+    if (!pronta) return;
+    setErro(""); setSalvando(true);
+    try {
+      const r = await fetch(API + "/auth/senha", {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+        body: JSON.stringify({ atual, nova }),
+      });
+      const d = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(d.error || "Não foi possível criar a senha");
+      localStorage.setItem("token", d.token);
+      aoConcluir(d.token);
+    } catch (e2) { setErro(e2.message); } finally { setSalvando(false); }
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-900 grid place-items-center px-4">
+      <form onSubmit={salvar} className="bg-white rounded-2xl p-8 w-full max-w-sm">
+        <div className="logo-shell inline-flex mb-4">
+          <img src="/logo-mmg.png" alt="MMG" className="h-10 w-auto block" />
+        </div>
+        <p className="text-[11px] uppercase tracking-wider text-teal-700 font-semibold">Primeiro acesso</p>
+        <h1 className="text-[18px] font-semibold text-slate-900 mt-1">Crie a sua senha, {String(eu.nome || "").split(" ")[0]}</h1>
+        <p className="text-[12.5px] text-slate-500 mt-1.5 leading-relaxed">
+          A senha que você usou foi criada por outra pessoa. A partir de agora só você vai conhecer a sua,
+          e é ela que garante que o que fica registrado no sistema com o seu nome foi feito por você.
+        </p>
+        <label className="block text-[12px] text-slate-600 mt-5">Senha que você recebeu
+          <input type="password" autoComplete="current-password" value={atual} onChange={(e) => setAtual(e.target.value)}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm mt-1" autoFocus />
+        </label>
+        <label className="block text-[12px] text-slate-600 mt-3">Nova senha
+          <input type="password" autoComplete="new-password" value={nova} onChange={(e) => setNova(e.target.value)}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm mt-1" />
+        </label>
+        <label className="block text-[12px] text-slate-600 mt-3">Repita a nova senha
+          <input type="password" autoComplete="new-password" value={confirmacao} onChange={(e) => setConfirmacao(e.target.value)}
+            className="w-full border border-slate-200 rounded-lg px-3 py-2.5 text-sm mt-1" />
+        </label>
+        <ul className="mt-3 space-y-1">
+          {regras.map(([ok, txt]) => (
+            <li key={txt} className={`text-[11.5px] flex items-center gap-1.5 ${ok ? "text-emerald-700" : "text-slate-400"}`}>
+              <span className={`w-3.5 h-3.5 rounded-full grid place-items-center text-[9px] ${ok ? "bg-emerald-500 text-white" : "border border-slate-300"}`}>{ok ? "✓" : ""}</span>
+              {txt}
+            </li>
+          ))}
+        </ul>
+        {erro && <p className="text-[12px] text-rose-600 mt-3">{erro}</p>}
+        <button type="submit" disabled={!pronta || salvando}
+          className="w-full mt-5 bg-teal-600 text-white rounded-lg py-2.5 text-sm font-semibold disabled:opacity-40">
+          {salvando ? "Salvando…" : "Criar senha e entrar"}
+        </button>
+        <button type="button" onClick={sair} className="w-full mt-2 text-[12px] text-slate-500 underline">Sair</button>
+      </form>
     </div>
   );
 }
@@ -1506,8 +1588,13 @@ function Usuarios({ token }) {
   const [linhas, setLinhas] = useState(null);
   const [erro, setErro] = useState("");
   const [aviso, setAviso] = useState("");
-  const [novo, setNovo] = useState({ nome: "", usuario: "", senha: "", perfil: "leitura", tipo: "gerente" });
+  const [novo, setNovo] = useState({ nome: "", email: "", perfil: "leitura", tipo: "gerente" });
   const [salvando, setSalvando] = useState(false);
+  /* 11/10/2026 — e-mail e senha provisória */
+  const [provisoria, setProvisoria] = useState(null);   // { nome, email, senha }
+  const [copiouProv, setCopiouProv] = useState(false);
+  const [editEmail, setEditEmail] = useState(null);     // { id, valor }
+  const [confirmaSenha, setConfirmaSenha] = useState(null); // id do acesso
 
   const [editandoUnidades, setEditandoUnidades] = useState(null);
   const [buscaUnidade, setBuscaUnidade] = useState("");
@@ -1552,16 +1639,17 @@ function Usuarios({ token }) {
       const gerente = souAdmin ? novo.tipo === "gerente" : true;
       const criado = await gravar("/auth/usuarios", token, {
         nome: novo.nome,
-        usuario: novo.usuario,
-        senha: novo.senha,
+        email: novo.email,
         perfil: gerente ? "leitura" : novo.perfil,
         somente_assinatura: gerente,
       }, "POST");
-      setNovo({ nome: "", usuario: "", senha: "", perfil: "leitura", tipo: "gerente" });
+      setNovo({ nome: "", email: "", perfil: "leitura", tipo: "gerente" });
+      setProvisoria({ nome: criado.nome, email: criado.email, senha: criado.senha_provisoria });
+      setCopiouProv(false);
       const dados = await recarregar();
       setAviso(gerente
         ? `${criado.nome} criado como gerente. Agora vincule as unidades pelas quais ele responde.`
-        : `${criado.nome} criado. Passe a senha por um canal seguro.`);
+        : `${criado.nome} criado.`);
       if (gerente) {
         const atualizado = dados.find((u) => u.id === criado.id) || { ...criado, unidades: [] };
         abrirUnidades(atualizado);
@@ -1572,9 +1660,26 @@ function Usuarios({ token }) {
   async function mudar(id, corpo) {
     setErro(""); setAviso("");
     try {
-      await gravar(`/auth/usuarios/${id}`, token, corpo, "PATCH");
+      const r = await gravar(`/auth/usuarios/${id}`, token, corpo, "PATCH");
       await recarregar();
-    } catch (e) { setErro(e.message); }
+      return r;
+    } catch (e) { setErro(e.message); return null; }
+  }
+
+  async function salvarEmail() {
+    const r = await mudar(editEmail.id, { email: editEmail.valor.trim() });
+    if (r) { setEditEmail(null); setAviso(`E-mail de ${r.nome} salvo.`); }
+  }
+
+  async function gerarProvisoria(u) {
+    const r = await mudar(u.id, { gerar_senha: true });
+    setConfirmaSenha(null);
+    if (r) { setProvisoria({ nome: r.nome, email: r.email, senha: r.senha_provisoria }); setCopiouProv(false); }
+  }
+
+  async function copiarProvisoria() {
+    const txt = `Acesso ao MMG Sindicatos\nEndereço: ${window.location.origin}\nEntrar com: ${provisoria.email || "seu usuário"}\nSenha provisória: ${provisoria.senha}\nNo primeiro acesso o sistema pede que você crie a sua senha.`;
+    try { await navigator.clipboard.writeText(txt); setCopiouProv(true); } catch (_e) { setCopiouProv(false); }
   }
 
   function abrirUnidades(u) {
@@ -1646,11 +1751,8 @@ function Usuarios({ token }) {
           <input value={novo.nome} onChange={(e) => setNovo({ ...novo, nome: e.target.value })}
             placeholder="Nome completo"
             className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
-          <input value={novo.usuario} onChange={(e) => setNovo({ ...novo, usuario: e.target.value })}
-            placeholder="Usuário para entrar"
-            className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
-          <input value={novo.senha} onChange={(e) => setNovo({ ...novo, senha: e.target.value })}
-            placeholder="Senha inicial (8 caracteres ou mais)"
+          <input value={novo.email} onChange={(e) => setNovo({ ...novo, email: e.target.value })}
+            placeholder="E-mail (é com ele que a pessoa entra)" type="email" autoComplete="off"
             className="border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
           {souAdmin ? (
             <select value={novo.tipo} onChange={(e) => setNovo({ ...novo, tipo: e.target.value })}
@@ -1672,7 +1774,10 @@ function Usuarios({ token }) {
             </select>
           )}
         </div>
-        <button onClick={criar} disabled={salvando || !novo.nome || !novo.usuario || !novo.senha}
+        <p className="text-[11px] text-slate-500 mt-2">
+          O sistema gera uma senha provisória, mostrada uma única vez. No primeiro acesso a pessoa cria a senha dela.
+        </p>
+        <button onClick={criar} disabled={salvando || !novo.nome || !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(novo.email.trim())}
           className="mt-3 bg-teal-600 text-white rounded-lg px-4 py-2 text-[13px] font-medium disabled:opacity-50">
           {salvando ? "Criando…" : novo.tipo === "gerente" ? "Criar gerente" : "Criar acesso"}
         </button>
@@ -1680,13 +1785,37 @@ function Usuarios({ token }) {
         {aviso && <p className="text-[12px] text-emerald-700 mt-2">{aviso}</p>}
       </div>
 
+      {provisoria && (
+        <div className="bg-amber-50 border-2 border-amber-300 rounded-xl p-4">
+          <div className="flex items-start gap-3 flex-wrap">
+            <div className="flex-1 min-w-[240px]">
+              <p className="text-[11px] uppercase tracking-wider text-amber-800 font-semibold">Senha provisória · aparece só agora</p>
+              <p className="text-[13px] text-slate-800 mt-1">
+                {provisoria.nome}{provisoria.email ? ` · entra com ${provisoria.email}` : " · ainda sem e-mail: entra pelo nome de usuário"}
+              </p>
+              <p className="text-[26px] font-semibold tracking-wider tabular-nums text-slate-900 mt-1 select-all">{provisoria.senha}</p>
+              <p className="text-[11.5px] text-slate-600 mt-1 leading-relaxed">
+                Passe para a pessoa por um canal seguro, de preferência em mensagem direta a ela.
+                No primeiro acesso o sistema pede a senha própria. Ao fechar este quadro, a senha não aparece mais.
+              </p>
+            </div>
+            <div className="flex flex-col gap-2">
+              <button onClick={copiarProvisoria} className="bg-amber-500 text-white rounded-lg px-3 py-2 text-[12.5px] font-semibold">
+                {copiouProv ? "Mensagem copiada" : "Copiar mensagem"}
+              </button>
+              <button onClick={() => setProvisoria(null)} className="border border-slate-300 bg-white rounded-lg px-3 py-2 text-[12.5px]">Fechar</button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
         <div className="overflow-x-auto">
           <table className="w-full text-[12px]">
             <thead className="bg-slate-50 text-slate-500">
               <tr>
                 <th className="text-left px-3 py-2">Nome</th>
-                <th className="text-left px-3 py-2">Usuário</th>
+                <th className="text-left px-3 py-2">E-mail / usuário</th>
                 <th className="text-left px-3 py-2">Tipo / perfil</th>
                 <th className="text-left px-3 py-2">Unidades</th>
                 <th className="text-left px-3 py-2">Último acesso</th>
@@ -1697,7 +1826,27 @@ function Usuarios({ token }) {
               {(linhas || []).map((u) => (
                 <tr key={u.id} className={`border-t border-slate-50 align-top ${u.ativo ? "" : "opacity-50"}`}>
                   <td className="px-3 py-2 font-medium">{u.nome}</td>
-                  <td className="px-3 py-2 text-slate-600">{u.usuario}</td>
+                  <td className="px-3 py-2 text-slate-600 min-w-[200px]">
+                    {editEmail?.id === u.id ? (
+                      <div className="flex gap-1">
+                        <input autoFocus type="email" value={editEmail.valor}
+                          onChange={(e) => setEditEmail({ ...editEmail, valor: e.target.value })}
+                          onKeyDown={(e) => { if (e.key === "Enter") salvarEmail(); if (e.key === "Escape") setEditEmail(null); }}
+                          className="border border-slate-300 rounded px-2 py-1 text-[11.5px] w-44" />
+                        <button onClick={salvarEmail} className="bg-teal-600 text-white rounded px-2 text-[11px]">Salvar</button>
+                        <button onClick={() => setEditEmail(null)} className="text-[11px] text-slate-500 px-1">×</button>
+                      </div>
+                    ) : (
+                      <>
+                        {u.email
+                          ? <span className="text-slate-800">{u.email}</span>
+                          : <span className="text-amber-700">sem e-mail</span>}
+                        <button onClick={() => setEditEmail({ id: u.id, valor: u.email || "" })}
+                          className="ml-2 text-[10.5px] text-teal-700 underline">{u.email ? "alterar" : "cadastrar"}</button>
+                        <span className="block text-[10px] text-slate-400">usuário: {u.usuario}</span>
+                      </>
+                    )}
+                  </td>
                   <td className="px-3 py-2 min-w-[190px]">
                     {u.somente_assinatura ? (
                       <div>
@@ -1744,12 +1893,27 @@ function Usuarios({ token }) {
                   <td className="px-3 py-2 text-slate-500">
                     {u.ultimo_acesso_em ? new Date(u.ultimo_acesso_em).toLocaleString("pt-BR") : "nunca entrou"}
                   </td>
-                  <td className="px-3 py-2">
+                  <td className="px-3 py-2 min-w-[170px]">
                     <button onClick={() => mudar(u.id, { ativo: !u.ativo })}
                       className={`text-[11px] px-2 py-1 rounded ${
                         u.ativo ? "bg-emerald-50 text-emerald-700" : "bg-slate-100 text-slate-600"}`}>
                       {u.ativo ? "ativo · desativar" : "desativado · reativar"}
                     </button>
+                    <span className={`block text-[10.5px] mt-1 ${u.deve_trocar_senha ? "text-amber-700" : "text-slate-400"}`}>
+                      {u.deve_trocar_senha ? "vai criar a senha no próximo acesso" : u.senha_definida_em ? `senha própria desde ${new Date(u.senha_definida_em).toLocaleDateString("pt-BR")}` : ""}
+                    </span>
+                    {confirmaSenha === u.id ? (
+                      <span className="block mt-1 text-[10.5px]">
+                        A senha atual deixa de valer.{" "}
+                        <button onClick={() => gerarProvisoria(u)} className="text-amber-700 font-semibold underline">Gerar</button>
+                        {" · "}
+                        <button onClick={() => setConfirmaSenha(null)} className="text-slate-500 underline">voltar</button>
+                      </span>
+                    ) : (
+                      <button onClick={() => setConfirmaSenha(u.id)} className="block mt-1 text-[10.5px] text-teal-700 underline">
+                        gerar senha provisória
+                      </button>
+                    )}
                   </td>
                 </tr>
               ))}
@@ -2822,6 +2986,11 @@ export default function App() {
   const codigoValidacao = params.get("validar");
   if (codigoValidacao) {
     return <ValidarAssinatura codigo={codigoValidacao} />;
+  }
+
+  /* 11/10/2026 — troca obrigatória de senha vem antes de qualquer tela com login */
+  if (token && lerToken(token)?.trocar_senha) {
+    return <CriarSenha token={token} aoConcluir={setToken} sair={sair} />;
   }
 
   /* QR de assinatura. O token `st` é da solicitação e não substitui o login:

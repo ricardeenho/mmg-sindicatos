@@ -11,6 +11,18 @@ function autenticar(req, res, next) {
     return res.status(401).json({ error: 'Token invalido ou expirado' });
   }
 
+  /* 11/10/2026 — troca obrigatoria de senha: o token so serve para criar
+     a senha propria e para consultar quem e o usuario. */
+  if (req.usuario.trocar_senha) {
+    const caminho = String(req.originalUrl || req.url || '').split('?')[0];
+    if (caminho !== '/auth/senha' && caminho !== '/auth/eu') {
+      return res.status(403).json({
+        error: 'Crie a sua senha antes de continuar.',
+        codigo: 'TROCAR_SENHA',
+      });
+    }
+  }
+
   /* Gerente de unidade: tem conta propria, mas nao ganha acesso ao painel
      interno da MMG. Pode usar somente o portal de assinaturas e trocar a
      propria senha. A verificacao fica no backend para nao depender da UI. */

@@ -3,6 +3,14 @@
 const API = String(import.meta.env.VITE_API_URL || 'http://localhost:3001').replace(/\/$/, '');
 const STORAGE = 'mmg_assinatura_jwt';
 
+/* 11/10/2026 — o token diz se a pessoa ainda precisa criar a senha própria */
+function precisaTrocarSenha(jwt) {
+  try {
+    const p = JSON.parse(atob(String(jwt).split('.')[1].replace(/-/g, '+').replace(/_/g, '/')));
+    return !!p.trocar_senha;
+  } catch (_e) { return false; }
+}
+
 function fmtData(d) {
   if (!d) return '—';
   const s = String(d).slice(0, 10).split('-');
@@ -104,7 +112,7 @@ function Login({ onLogin }) {
 
       <form onSubmit={entrar} className="form">
         <label>
-          Usuário
+          E-mail ou usuário
           <input
             autoFocus
             value={usuario}
@@ -136,7 +144,7 @@ function Login({ onLogin }) {
 }
 
 
-function TrocarSenhaPortal({ jwt, onClose, onDone }) {
+function TrocarSenhaPortal({ jwt, onClose, onDone, obrigatoria = false }) {
   const [atual, setAtual] = useState('');
   const [nova, setNova] = useState('');
   const [confirmacao, setConfirmacao] = useState('');
@@ -156,6 +164,10 @@ function TrocarSenhaPortal({ jwt, onClose, onDone }) {
       setErro('A nova senha precisa ter pelo menos 8 caracteres.');
       return;
     }
+    if (!/[A-Za-zÀ-ÿ]/.test(nova) || !/\d/.test(nova)) {
+      setErro('Use letras e números na nova senha.');
+      return;
+    }
     if (nova !== confirmacao) {
       setErro('A confirmação não é igual à nova senha.');
       return;
@@ -167,13 +179,13 @@ function TrocarSenhaPortal({ jwt, onClose, onDone }) {
 
     setSalvando(true);
     try {
-      await json('/auth/senha', {
+      const d = await json('/auth/senha', {
         method: 'POST',
         headers: authHeaders(jwt, true),
         body: JSON.stringify({ atual, nova }),
       });
       setSucesso(true);
-      setTimeout(onDone, 1100);
+      setTimeout(() => onDone(d), 1100);
     } catch (e) {
       setErro(e.message);
     } finally {
@@ -182,7 +194,7 @@ function TrocarSenhaPortal({ jwt, onClose, onDone }) {
   }
 
   return (
-    <div className="passwordOverlay" onClick={() => !salvando && !sucesso && onClose()}>
+    <div className="passwordOverlay" onClick={() => !obrigatoria && !salvando && !sucesso && onClose()}>
       <div className="passwordModal" onClick={(e) => e.stopPropagation()}>
         <div className="passwordModalHead">
           <div className="passwordIcon">
@@ -192,11 +204,13 @@ function TrocarSenhaPortal({ jwt, onClose, onDone }) {
             </svg>
           </div>
           <div className="passwordModalTitle">
-            <span>SEGURANÇA DA CONTA</span>
-            <strong>Trocar minha senha</strong>
-            <p>Informe sua senha atual e escolha uma nova.</p>
+            <span>{obrigatoria ? 'PRIMEIRO ACESSO' : 'SEGURANÇA DA CONTA'}</span>
+            <strong>{obrigatoria ? 'Crie a sua senha' : 'Trocar minha senha'}</strong>
+            <p>{obrigatoria
+              ? 'A senha que você usou foi criada por outra pessoa. Crie a sua para continuar.'
+              : 'Informe sua senha atual e escolha uma nova.'}</p>
           </div>
-          <button
+          {!obrigatoria && <button
             type="button"
             className="passwordClose"
             onClick={onClose}
@@ -204,18 +218,18 @@ function TrocarSenhaPortal({ jwt, onClose, onDone }) {
             aria-label="Fechar"
           >
             ×
-          </button>
+          </button>}
         </div>
 
         {sucesso ? (
           <div className="passwordSuccess">
-            <strong>✓ Senha alterada com sucesso</strong>
-            <span>Você será desconectado para entrar com a nova senha.</span>
+            <strong>✓ Senha {obrigatoria ? 'criada' : 'alterada'} com sucesso</strong>
+            <span>{obrigatoria ? 'Continuando…' : 'Você será desconectado para entrar com a nova senha.'}</span>
           </div>
         ) : (
           <form onSubmit={salvar} className="form passwordForm">
             <label>
-              Senha atual
+              {obrigatoria ? 'Senha que você recebeu' : 'Senha atual'}
               <input
                 autoFocus
                 type="password"
@@ -245,15 +259,15 @@ function TrocarSenhaPortal({ jwt, onClose, onDone }) {
               />
             </label>
 
-            <span className="passwordHint">Mínimo de 8 caracteres.</span>
+            <span className="passwordHint">Mínimo de 8 caracteres, com letras e números.</span>
             {erro && <div className="error">{erro}</div>}
 
             <div className="passwordActions">
               <button type="button" className="passwordCancel" onClick={onClose} disabled={salvando}>
-                Cancelar
+                {obrigatoria ? 'Sair' : 'Cancelar'}
               </button>
               <button type="submit" disabled={salvando}>
-                {salvando ? 'Alterando…' : 'Trocar senha'}
+                {salvando ? 'Salvando…' : obrigatoria ? 'Criar senha' : 'Trocar senha'}
               </button>
             </div>
           </form>
@@ -658,13 +672,19 @@ export default function App() {
           </div>
         )}
 
-        {trocarSenha && jwt && (
+        {(trocarSenha || precisaTrocarSenha(jwt)) && jwt && (
           <TrocarSenhaPortal
             jwt={jwt}
-            onClose={() => setTrocarSenha(false)}
-            onDone={() => {
+            obrigatoria={precisaTrocarSenha(jwt)}
+            onClose={() => (precisaTrocarSenha(jwt) ? logout() : setTrocarSenha(false))}
+            onDone={(d) => {
               setTrocarSenha(false);
-              logout();
+              if (precisaTrocarSenha(jwt) && d && d.token) {
+                localStorage.setItem(STORAGE, d.token);
+                setJwt(d.token);
+              } else {
+                logout();
+              }
             }}
           />
         )}
