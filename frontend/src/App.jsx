@@ -2,6 +2,7 @@
 import Importar from "./Importar.jsx";
 import Requisicao, { Requisicoes } from "./Requisicao.jsx";
 import Escalas from "./Escalas.jsx";
+import RodizioUnidade from "./RodizioUnidade.jsx";
 import Convocacao from "./Convocacao.jsx";
 import { AssinarRequisicao, ValidarAssinatura } from "./Assinaturas.jsx";
 import Validacoes from "./Validacoes.jsx";
@@ -1998,6 +1999,8 @@ function IconeMenu({ nome, className = "w-[18px] h-[18px]" }) {
       return <svg {...p}><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>;
     case "requisicoes":
       return <svg {...p}><path d="M6 3h9l3 3v15H6z"/><path d="M14 3v4h4M9 11h6M9 15h6"/></svg>;
+    case "rodizio":
+      return <svg {...p}><path d="M4 8h13l-3-3M20 16H7l3 3"/><circle cx="4" cy="16" r="1.4"/><circle cx="20" cy="8" r="1.4"/></svg>;
     case "escalas":
       return <svg {...p}><rect x="3" y="5" width="18" height="16" rx="2"/><path d="M8 3v4M16 3v4M3 10h18M8 14h.01M12 14h.01M16 14h.01M8 18h.01M12 18h.01"/></svg>;
     case "fila":
@@ -2040,7 +2043,7 @@ function Painel({ token, sair }) {
   const [erro, setErro] = useState("");
   const [aba, setAba] = useState(() => {
     const salva = localStorage.getItem("mmg_ultima_aba");
-    const validas = ["painel","requisicoes","escalas","fila","tomadora","atividades","safra","criterios","locais","safristas","cadastro","validacoes","importar","usuarios"];
+    const validas = ["painel","rodizio","requisicoes","escalas","fila","tomadora","atividades","safra","criterios","locais","safristas","cadastro","validacoes","importar","usuarios"];
     return validas.includes(salva) ? salva : "painel";
   });
   const [senhaAberta, setSenhaAberta] = useState(false);
@@ -2173,6 +2176,7 @@ function Painel({ token, sair }) {
     {
       titulo: "Operação",
       itens: [
+        ["rodizio", "Rodízio por Unidade", "rodizio"],
         ["requisicoes", "Requisições", "requisicoes"],
         ["escalas", "Escalas", "escalas"],
         ["fila", "Fila de rodízio", "fila"],
@@ -2537,6 +2541,9 @@ function Painel({ token, sair }) {
         {aba === "validacoes" && <Validacoes token={token} pedir={pedir} />}
         {aba === "requisicoes" && (
           <Requisicoes token={token} podeEditar={podeEditar} pedir={pedir} gravar={gravar} />
+        )}
+        {aba === "rodizio" && (
+          <RodizioUnidade token={token} podeEditar={podeEditar} pedir={pedir} gravar={gravar} />
         )}
         {aba === "escalas" && (
           <Escalas token={token} podeEditar={podeEditar} pedir={pedir} gravar={gravar} />

@@ -277,7 +277,10 @@ router.post('/ponto', async (req, res, next) => {
        group by cod_trab
       on conflict (sindicato_id, codigo) do update
         set primeiro_dia = least(trabalhadores.primeiro_dia, excluded.primeiro_dia),
-            ultimo_dia   = greatest(trabalhadores.ultimo_dia, excluded.ultimo_dia)
+            ultimo_dia   = greatest(trabalhadores.ultimo_dia, excluded.ultimo_dia),
+            -- 11/10/2026: o colaborador incluido a mao como provisorio deixa de
+            -- ser provisorio quando o codigo dele chega no Ponto
+            provisorio   = false
     `);
 
     /* um registro por (trabalhador, data, unidade); se o mesmo dia veio

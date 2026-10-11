@@ -65,7 +65,10 @@ router.get('/publico/:token', async (req, res, next) => {
       destino_local: c.destino_local,
       destino_setor: c.destino_setor,
       destino_cidade: c.destino_cidade,
-      escala: `${String(c.escala_numero).padStart(3, '0')}/${c.escala_ano}`,
+      /* a previa da quinzena ainda nao tem numero: so a definitiva ganha */
+      escala: c.escala_numero
+        ? `${String(c.escala_numero).padStart(3, '0')}/${c.escala_ano}`
+        : `Prévia ${c.escala_ano || ''}`.trim(),
       respondida_em: c.respondida_em,
       motivo_nome: c.motivo_nome,
       motivos,

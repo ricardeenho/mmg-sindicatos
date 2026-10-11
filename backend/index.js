@@ -47,6 +47,7 @@ app.use('/assinaturas', require('./routes/assinaturas'));
 app.use('/escalas', require('./routes/escalas'));
 app.use('/convocacoes', require('./routes/convocacoes'));
 app.use('/profissional', require('./routes/profissional'));
+app.use('/rodizio', require('./routes/rodizio'));
 
 app.use((err, req, res, next) => {
   console.error(err);
