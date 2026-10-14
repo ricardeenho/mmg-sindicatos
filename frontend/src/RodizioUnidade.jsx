@@ -839,13 +839,57 @@ function Incluir({ token, pedir, unidade, ocupado, aoIncluir, aoVoltar }) {
  * ESCALA GERAL — a mesma lista vista pelo sindicato, pelo fiscal de
  * uma unidade e pelo colaborador. Antes da prévia é um rascunho
  * calculado na tela; depois, as linhas gravadas no banco.
+ *
+ * 13/10/2026 — FILTROS. Tipo, resposta, "sem nome" e busca por código,
+ * nome ou unidade. Os filtros se somam e valem para a visão do
+ * Sindicato e a do Fiscal; na visão do Colaborador, a busca e o
+ * "sem nome" encurtam a lista de pessoas. Cada botão mostra quantas
+ * linhas ele traria, já considerando os outros filtros.
  * ---------------------------------------------------------------- */
+const TIPOS_FILTRO = [
+  ["todos", "Todos"],
+  ["rodizio", "Rodízio"],
+  ["permanece", "Permanece"],
+  ["base", "Na unidade de origem"],
+];
+const RESPOSTAS_FILTRO = [
+  ["todas", "Todas"],
+  ["aceita", "Aceitou"],
+  ["recusada", "Recusou"],
+  ["vista", "Viu, sem responder"],
+  ["enviada", "Sem resposta"],
+  ["nao_precisa", "Não precisa"],
+];
+const semNomeDe = (l) => !String(l.nome || "").trim();
+const chaveResposta = (l) => (l.tipo !== "rodizio" ? "nao_precisa" : (l.resposta || "sem_convocacao"));
+const semAcento = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+
+function Chip({ ativo, onClick, children, n, tom = "slate" }) {
+  const cores = {
+    slate: ativo ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-200 hover:border-slate-400",
+    amber: ativo ? "bg-amber-500 text-white border-amber-500" : "bg-white text-amber-700 border-amber-200 hover:border-amber-400",
+  };
+  return (
+    <button onClick={onClick}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[12px] font-semibold transition-colors ${cores[tom]}`}>
+      {children}
+      {n != null && (
+        <span className={`tabular-nums text-[10.5px] rounded-full px-1.5 ${ativo ? "bg-white/20" : "bg-slate-100 text-slate-500"}`}>{n}</span>
+      )}
+    </button>
+  );
+}
+
 function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
   const [linhasBanco, setLinhasBanco] = useState(null);
   const [verComo, setVerComo] = useState("sindicato");
   const [fiscal, setFiscal] = useState("");
   const [pessoa, setPessoa] = useState("");
   const [copiado, setCopiado] = useState("");
+  const [fTipo, setFTipo] = useState("todos");
+  const [fResposta, setFResposta] = useState("todas");
+  const [fSemNome, setFSemNome] = useState(false);
+  const [fBusca, setFBusca] = useState("");
   const escala = d.definitiva || d.previa;
   const q = d.quinzena;
 
@@ -878,12 +922,31 @@ function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
   const unidadesLista = [...new Map(linhas.map((l) => [l.unidade_id, l])).values()];
   const pessoasLista = [...new Map(linhas.map((l) => [l.trabalhador_id, l])).values()].sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
   const fiscalId = fiscal || unidadesLista[0]?.unidade_id;
-  const pessoaId = pessoa || pessoasLista[0]?.trabalhador_id;
-  const vis = verComo === "fiscal" ? linhas.filter((l) => l.unidade_id === fiscalId) : linhas;
+  const daVisao = verComo === "fiscal" ? linhas.filter((l) => l.unidade_id === fiscalId) : linhas;
   const rotTipo = { permanece: "Permanece", base: "Na unidade de origem", rodizio: "Rodízio" };
   const titulo = d.definitiva
     ? `Escala ${String(d.definitiva.numero).padStart(3, "0")}/${d.definitiva.ano} · publicada`
     : d.previa ? `Prévia enviada em ${horaBR(d.previa.previa_em)}` : "Rascunho · como vai sair hoje";
+
+  /* Cada filtro como função; para contar um botão, aplica todos os outros. */
+  const termo = semAcento(fBusca.trim());
+  const passa = {
+    tipo: (l, v = fTipo) => v === "todos" || l.tipo === v,
+    resposta: (l, v = fResposta) => v === "todas" || chaveResposta(l) === v,
+    semNome: (l) => !fSemNome || semNomeDe(l),
+    busca: (l) => !termo || semAcento(`${l.codigo} ${l.nome} ${l.unidade_codigo} ${l.unidade_nome} ${l.setor}`).includes(termo),
+  };
+  const filtrar = (lista, exceto) => lista.filter((l) =>
+    Object.entries(passa).every(([k, f]) => k === exceto || f(l)));
+  const vis = filtrar(daVisao);
+  const contaTipo = (v) => filtrar(daVisao, "tipo").filter((l) => passa.tipo(l, v)).length;
+  const contaResp = (v) => filtrar(daVisao, "resposta").filter((l) => passa.resposta(l, v)).length;
+  const totalSemNome = filtrar(daVisao, "semNome").filter(semNomeDe).length;
+  const filtrando = fTipo !== "todos" || fResposta !== "todas" || fSemNome || termo;
+  const limpar = () => { setFTipo("todos"); setFResposta("todas"); setFSemNome(false); setFBusca(""); };
+
+  const pessoasFiltradas = pessoasLista.filter((l) => passa.semNome(l) && passa.busca(l));
+  const pessoaId = (pessoasFiltradas.some((l) => l.trabalhador_id === pessoa) ? pessoa : null) || pessoasFiltradas[0]?.trabalhador_id;
 
   async function copiar(tk) {
     const url = `${window.location.origin}/?c=${tk}`;
@@ -897,7 +960,10 @@ function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
         <div className="flex flex-wrap gap-3 justify-between items-center">
           <div>
             <p className="text-[14px] font-semibold">Escala geral</p>
-            <p className="text-[11.5px] text-slate-500">{titulo} · {linhas.length} linhas · {pessoasLista.length} pessoas</p>
+            <p className="text-[11.5px] text-slate-500">
+              {titulo} · {filtrando && verComo !== "colaborador" ? <><b className="text-slate-700">{vis.length}</b> de </> : null}
+              {daVisao.length} linhas · {pessoasLista.length} pessoas
+            </p>
           </div>
           <div className="flex gap-1">
             {[["sindicato", "Sindicato"], ["fiscal", "Fiscal"], ["colaborador", "Colaborador"]].map(([k, r]) => (
@@ -914,23 +980,65 @@ function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
             <p className="text-[11.5px] text-slate-500">O fiscal recebe só quem trabalha na unidade dele, inclusive quem chega de fora no período da troca.</p>
           </>
         )}
-        {verComo === "colaborador" && (
-          <select value={pessoaId || ""} onChange={(e) => setPessoa(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
-            {pessoasLista.map((l) => <option key={l.trabalhador_id} value={l.trabalhador_id}>{cap(l.nome)} · {l.codigo}</option>)}
-          </select>
+      </div>
+
+      {/* ---------- filtros ---------- */}
+      <div className="px-4 py-3 border-b border-slate-100 bg-slate-50/60 space-y-2.5">
+        <div className="flex flex-wrap gap-2 items-center">
+          <div className="relative flex-1 min-w-[220px] max-w-md">
+            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" />
+            </svg>
+            <input value={fBusca} onChange={(e) => setFBusca(e.target.value)}
+              placeholder="Buscar código, nome ou unidade…"
+              className="w-full bg-white border border-slate-200 rounded-lg pl-9 pr-8 py-2 text-[13px] focus:outline-none focus:border-slate-400" />
+            {fBusca && (
+              <button onClick={() => setFBusca("")} aria-label="Limpar busca"
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-200 text-[13px] leading-none">×</button>
+            )}
+          </div>
+          <Chip tom="amber" ativo={fSemNome} onClick={() => setFSemNome(!fSemNome)} n={totalSemNome}>Sem nome</Chip>
+          {filtrando && (
+            <button onClick={limpar}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[12px] font-semibold text-slate-600 hover:border-slate-500">
+              Limpar filtros
+            </button>
+          )}
+        </div>
+
+        {verComo !== "colaborador" && (
+          <>
+            <div className="flex flex-wrap gap-1.5 items-center">
+              <span className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold w-20">Tipo</span>
+              {TIPOS_FILTRO.map(([k, r]) => (
+                <Chip key={k} ativo={fTipo === k} onClick={() => setFTipo(k)} n={contaTipo(k)}>{r}</Chip>
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-1.5 items-center">
+              <span className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold w-20">Resposta</span>
+              {RESPOSTAS_FILTRO.map(([k, r]) => (
+                <Chip key={k} ativo={fResposta === k} onClick={() => setFResposta(k)} n={contaResp(k)}>{r}</Chip>
+              ))}
+            </div>
+          </>
         )}
       </div>
 
       {verComo === "colaborador" ? (
-        <div className="p-4">
+        <div className="p-4 space-y-3">
+          {pessoasFiltradas.length > 0 && (
+            <select value={pessoaId || ""} onChange={(e) => setPessoa(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
+              {pessoasFiltradas.map((l) => <option key={l.trabalhador_id} value={l.trabalhador_id}>{l.nome ? cap(l.nome) : "(sem nome)"} · {l.codigo}</option>)}
+            </select>
+          )}
           {(() => {
             const minhas = linhas.filter((l) => l.trabalhador_id === pessoaId).sort((a, b) => a.data_inicio.localeCompare(b.data_inicio));
             const pp = minhas[0];
-            if (!pp) return <p className="text-[12.5px] text-slate-500">Ninguém na escala ainda.</p>;
+            if (!pp) return <p className="text-[12.5px] text-slate-500">{linhas.length ? "Ninguém com esses filtros." : "Ninguém na escala ainda."}</p>;
             return (
               <div className="max-w-sm border border-slate-200 rounded-2xl p-4 shadow-sm space-y-2">
-                <p className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold">O que {cap(primeiroNome(pp.nome))} vê</p>
-                <p className="text-[16px] font-semibold">{cap(pp.nome)}</p>
+                <p className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold">O que {pp.nome ? cap(primeiroNome(pp.nome)) : "o colaborador"} vê</p>
+                <p className="text-[16px] font-semibold">{pp.nome ? cap(pp.nome) : <span className="text-amber-700">Sem nome no cadastro</span>}</p>
                 <p className="text-[11.5px] text-slate-500">Código {pp.codigo} · {diaMes(q.inicio)} a {dataBR(q.fim)}</p>
                 {minhas.map((l, i) => (
                   <div key={i} className="flex justify-between gap-3 border-t border-slate-100 pt-2 text-[12.5px]">
@@ -957,7 +1065,11 @@ function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
               {vis.map((l, i) => (
                 <tr key={i} className="border-t border-slate-100">
                   <td className="px-3 py-2 tabular-nums">{l.codigo}</td>
-                  <td className="px-3 py-2">{cap(l.nome)}</td>
+                  <td className="px-3 py-2">
+                    {semNomeDe(l)
+                      ? <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-amber-50 text-amber-700">Sem nome</span>
+                      : cap(l.nome)}
+                  </td>
                   <td className="px-3 py-2"><b className="tabular-nums">{l.unidade_codigo}</b> {cap(l.unidade_nome)} · {cap(l.setor)}</td>
                   <td className="px-3 py-2 whitespace-nowrap">{diaMes(l.data_inicio)} a {diaMes(l.data_fim)}</td>
                   <td className="px-3 py-2">
@@ -979,7 +1091,13 @@ function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
                   </td>
                 </tr>
               ))}
-              {vis.length === 0 && <tr><td colSpan="6" className="px-3 py-5 text-slate-400">Ninguém na escala ainda.</td></tr>}
+              {vis.length === 0 && (
+                <tr><td colSpan="6" className="px-3 py-6 text-center text-slate-400">
+                  {daVisao.length === 0 ? "Ninguém na escala ainda." : (
+                    <>Nenhuma linha com esses filtros. <button onClick={limpar} className="text-teal-700 font-semibold">Limpar filtros</button></>
+                  )}
+                </td></tr>
+              )}
             </tbody>
           </table>
         </div>

@@ -24,11 +24,26 @@ const LOTE = 2000;
 
 const LIMITE_UNIDADES_NOVAS = 20;
 
+/* 13/10/2026 — DUAS TRAVAS NOVAS.
+   (1) DATA FUTURA: o arquivo de outubro trouxe duas linhas com data de
+   2027 (erro de digitacao no Ponto). Como a janela termina no ultimo
+   dia apurado, uma linha so derrubou o painel inteiro: janela de
+   24/07/2026 a 23/07/2027 e 1 ativo. Agora linha com data depois de
+   hoje (horario de Brasilia) e descartada e aparece nos problemas.
+   (2) NOME DO TRABALHADOR: o importador nunca gravava o nome — quem
+   chegava novo pelo Ponto ficava "sem nome" ate alguem preencher a
+   mao. Se o arquivo trouxer a coluna de nome, o trabalhador NOVO (ou
+   ainda sem nome) passa a recebe-lo. Nome ja cadastrado nao e trocado. */
+
+const hojeBrasilia = () =>
+  new Date(Date.now() - 3 * 3600 * 1000).toISOString().slice(0, 10);
+
 /* Nomes de coluna que cada campo pode ter, em minusculas e sem acento */
 const SINONIMOS = {
   data:         ['data', 'dia', 'dt', 'data_apuracao'],
   cod_trab:     ['codigo_trabavul', 'cod_trab', 'codigo_trabalhador', 'trabalhador', 'codigo', 'matricula', 'cod_trabalhador'],
   cod_unidade:  ['codigo_lotaseto', 'cod_unidade', 'codigo_unidade', 'unidade', 'lotaseto', 'cod_lotaseto'],
+  nome_trab:    ['nometrab', 'nome_trab', 'nome', 'nome_trabalhador', 'trabalhador_nome'],
   nome_unidade: ['nome_unidade', 'nomeunidade', 'nome_lotaseto', 'unidade_nome', 'descricao_unidade'],
   percentual:   ['percentual', 'perc', 'pct'],
 };
@@ -78,6 +93,8 @@ function lerCsv(texto) {
   let formato = 'posicional';
   let pos = { data: 0, cod_trab: 1, cod_unidade: 2, nome_unidade: 3 };
   let inicio = 0;
+  const hoje = hojeBrasilia();
+  let futuras = 0;
 
   if (linhas.length) {
     const primeira = dividir(linhas[0]);
@@ -95,11 +112,17 @@ function lerCsv(texto) {
     const data = c[pos.data] || '';
     const cod_trab = c[pos.cod_trab] || '';
     const cod_unidade = c[pos.cod_unidade] || '';
+    const nome_trab = pos.nome_trab != null ? (c[pos.nome_trab] || '').replace(/\s+/g, ' ').trim() : '';
     const nome_unidade = pos.nome_unidade != null ? (c[pos.nome_unidade] || '') : '';
     const percentual = pos.percentual != null ? parseFloat(String(c[pos.percentual] || '').replace(',', '.')) : NaN;
 
     if (!/^\d{4}-\d{2}-\d{2}$/.test(data)) {
       if (problemas.length < 20) problemas.push({ linha: i + 1, motivo: 'data inválida', conteudo: linhas[i].slice(0, 120) });
+      continue;
+    }
+    if (data > hoje) {
+      futuras++;
+      if (problemas.length < 20) problemas.push({ linha: i + 1, motivo: `data no futuro (${data.split('-').reverse().join('/')})`, conteudo: linhas[i].slice(0, 120) });
       continue;
     }
     if (!cod_trab || !cod_unidade) {
@@ -112,12 +135,13 @@ function lerCsv(texto) {
     }
     saida.push({
       data, cod_trab, cod_unidade,
+      nome_trab: nome_trab || null,
       nome_unidade: nome_unidade || null,
       tipo_diaria: Number.isFinite(percentual) && percentual > 0 && percentual < 100 ? 'MEIA' : 'CHEIA',
     });
   }
 
-  return { linhas: saida, problemas, totalLidas: linhas.length, formato };
+  return { linhas: saida, problemas, totalLidas: linhas.length, formato, futuras };
 }
 
 async function contarNovos(linhas) {
@@ -149,7 +173,7 @@ router.post('/conferir', async (req, res, next) => {
     const { conteudo } = req.body || {};
     if (!conteudo) return res.status(400).json({ error: 'Envie o conteúdo do arquivo' });
 
-    const { linhas, problemas, totalLidas, formato } = lerCsv(conteudo);
+    const { linhas, problemas, totalLidas, formato, futuras } = lerCsv(conteudo);
     if (!linhas.length) {
       return res.status(400).json({ error: 'Nenhuma linha válida encontrada', problemas });
     }
@@ -169,9 +193,14 @@ router.post('/conferir', async (req, res, next) => {
       trabalhadores: trabs.size,
       unidades: unids.size,
       meias_diarias: meias,
+      datas_futuras: futuras,
       trabalhadores_novos,
       unidades_novas,
-      alerta: unidades_novas > LIMITE_UNIDADES_NOVAS ? avisoColunas(unidades_novas) : null,
+      alerta: unidades_novas > LIMITE_UNIDADES_NOVAS
+        ? avisoColunas(unidades_novas)
+        : futuras > 0
+          ? `${futuras} ${futuras === 1 ? 'linha veio' : 'linhas vieram'} com data no futuro e ${futuras === 1 ? 'será descartada' : 'serão descartadas'}. Vale avisar o TI para corrigir no Ponto.`
+          : null,
     });
   } catch (e) { next(e); }
 });
@@ -183,7 +212,7 @@ router.post('/ponto', async (req, res, next) => {
   const { conteudo, arquivo_nome } = req.body || {};
   if (!conteudo) return res.status(400).json({ error: 'Envie o conteúdo do arquivo' });
 
-  const { linhas, problemas, totalLidas, formato } = lerCsv(conteudo);
+  const { linhas, problemas, totalLidas, formato, futuras } = lerCsv(conteudo);
   if (!linhas.length) {
     return res.status(400).json({ error: 'Nenhuma linha válida encontrada', problemas });
   }
@@ -202,7 +231,7 @@ router.post('/ponto', async (req, res, next) => {
 
     await cliente.query(`
       create temp table stg_imp (
-        data text, cod_trab text, cod_unidade text, nome_unidade text, tipo_diaria text
+        data text, cod_trab text, cod_unidade text, nome_unidade text, tipo_diaria text, nome_trab text
       ) on commit drop
     `);
 
@@ -210,13 +239,14 @@ router.post('/ponto', async (req, res, next) => {
       const bloco = linhas.slice(i, i + LOTE);
       await cliente.query(
         `insert into stg_imp
-         select * from unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[])`,
+         select * from unnest($1::text[], $2::text[], $3::text[], $4::text[], $5::text[], $6::text[])`,
         [
           bloco.map((l) => l.data),
           bloco.map((l) => l.cod_trab),
           bloco.map((l) => l.cod_unidade),
           bloco.map((l) => l.nome_unidade),
           bloco.map((l) => l.tipo_diaria),
+          bloco.map((l) => l.nome_trab),
         ]
       );
     }
@@ -271,13 +301,15 @@ router.post('/ponto', async (req, res, next) => {
     `);
 
     await cliente.query(`
-      insert into trabalhadores (sindicato_id, codigo, primeiro_dia, ultimo_dia)
-      select ${sind}, cod_trab, min(data::date), max(data::date)
+      insert into trabalhadores (sindicato_id, codigo, nome, primeiro_dia, ultimo_dia)
+      select ${sind}, cod_trab, nullif(max(nome_trab), ''), min(data::date), max(data::date)
         from stg_imp where cod_trab is not null
        group by cod_trab
       on conflict (sindicato_id, codigo) do update
         set primeiro_dia = least(trabalhadores.primeiro_dia, excluded.primeiro_dia),
             ultimo_dia   = greatest(trabalhadores.ultimo_dia, excluded.ultimo_dia),
+            -- 13/10/2026: nome do arquivo so entra onde ainda nao ha nome
+            nome         = coalesce(nullif(btrim(trabalhadores.nome), ''), excluded.nome),
             -- 11/10/2026: o colaborador incluido a mao como provisorio deixa de
             -- ser provisorio quando o codigo dele chega no Ponto
             provisorio   = false
@@ -329,6 +361,7 @@ router.post('/ponto', async (req, res, next) => {
       gravadas,
       repetidas: linhas.length - gravadas,
       descartadas: totalLidas - linhas.length,
+      datas_futuras: futuras,
       problemas,
     });
   } catch (e) {
