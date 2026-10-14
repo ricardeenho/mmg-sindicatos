@@ -16,7 +16,15 @@ router.use(autenticar);
    A COR da unidade (urgência) é calculada da apuração na hora; o que se
    grava é o andamento (pendente, em andamento, concluída, mantida, ajuste).
    Não confundir o Gestor MMG Responsável com o gerente de unidade
-   (unidade_gerentes), que é da EMPRESA TOMADORA e só assina requisição. */
+   (unidade_gerentes), que é da EMPRESA TOMADORA e só assina requisição.
+
+   14/10/2026 — PRÉVIA POR GESTOR. Cada Gestor MMG Responsável envia a
+   prévia das SUAS unidades quando termina, sem esperar os outros; só os
+   colaboradores delas recebem o pedido de aceite. Cada envio é uma escala
+   em "previa" com o nome do gestor (escalas.previa_gestor_id). A
+   quinzena entra em "ajustes" com a primeira prévia. A escala definitiva
+   é só do administrador e exige: todas as unidades resolvidas e a prévia
+   de cada gestor enviada depois da última mudança nas unidades dele. */
 
 const podeEscrever = autorizar('admin', 'gestor');
 const n = (x) => Math.trunc(Number(x)) || 0;
@@ -119,7 +127,8 @@ async function sincronizarRespostas(q, autor) {
              bool_or(c.status = 'recusada') as recusou,
              count(*) filter (where c.status = 'aceita') as aceites
         from rodizio_trocas t
-        join escala_itens i on i.troca_id = t.id and i.escala_id = $2 and i.tipo = 'rodizio'
+        join escala_itens i on i.troca_id = t.id and i.tipo = 'rodizio'
+        join escalas e on e.id = i.escala_id and e.quinzena_id = $1 and e.status = 'previa'
         join convocacoes c on c.escala_item_id = i.id
        where t.quinzena_id = $1 and t.estado = 'enviada'
        group by t.id
@@ -129,7 +138,7 @@ async function sincronizarRespostas(q, autor) {
       from r
      where t.id = r.id and (r.recusou or r.aceites >= 2)
     returning t.id, t.estado, t.a_unidade_id, t.b_unidade_id
-  `, [q.id, q.previa_escala_id]);
+  `, [q.id]);
 
   const recusadas = rows.filter((r) => r.estado === 'recusada');
   for (const r of recusadas) {
@@ -341,7 +350,7 @@ async function aplicarAfastamentos(sindicatoId) {
 }
 
 /* trocas e inclusões da quinzena que a restrição não permite */
-async function conflitosDeRestricao(q) {
+async function conflitosDeRestricao(q, soUnidades) {
   const restr = await restricoesDaQuinzena(q);
   const ids = Object.keys(restr);
   if (!ids.length) return [];
@@ -352,12 +361,13 @@ async function conflitosDeRestricao(q) {
   const { rows: incl } = await consulta(
     "select trabalhador_id, unidade_id from rodizio_pessoas where quinzena_id = $1 and tipo = 'incluido'", [q.id]);
   const itens = [
-    ...trocas.flatMap((t) => [[t.a_trabalhador_id, t.b_unidade_id], [t.b_trabalhador_id, t.a_unidade_id]]),
-    ...incl.map((x) => [x.trabalhador_id, x.unidade_id]),
+    ...trocas.flatMap((t) => [[t.a_trabalhador_id, t.b_unidade_id, t.a_unidade_id], [t.b_trabalhador_id, t.a_unidade_id, t.b_unidade_id]]),
+    ...incl.map((x) => [x.trabalhador_id, x.unidade_id, x.unidade_id]),
   ];
   const out = [];
-  for (const [tid, destino] of itens) {
+  for (const [tid, destino, origem] of itens) {
     if (!restr[tid]) continue;
+    if (soUnidades && !soUnidades.has(origem)) continue;
     const msg = restricaoImpede(restr[tid], un[destino], await nomeDe(tid));
     if (msg && !out.includes(msg)) out.push(msg);
   }
@@ -450,18 +460,18 @@ router.get('/quinzena', async (req, res, next) => {
     const { rows: trocas } = await consulta(`
       select t.id, t.a_trabalhador_id, t.a_unidade_id, t.b_trabalhador_id, t.b_unidade_id,
              t.data_inicio, t.data_fim, t.rodada, t.estado, t.montada_por, t.montada_em,
-             ra.status as a_resposta, ra.motivo as a_motivo,
-             rb.status as b_resposta, rb.motivo as b_motivo
+             ra.status as a_resposta, ra.motivo as a_motivo, ra.token as a_token,
+             rb.status as b_resposta, rb.motivo as b_motivo, rb.token as b_token
         from rodizio_trocas t
         left join lateral (
-          select c.status, mr.nome as motivo from escala_itens i
+          select c.status, mr.nome as motivo, c.token from escala_itens i
             join convocacoes c on c.escala_item_id = i.id
             left join motivos_recusa mr on mr.codigo = c.motivo_recusa
            where i.troca_id = t.id and i.trabalhador_id = t.a_trabalhador_id
            order by c.criado_em desc limit 1
         ) ra on true
         left join lateral (
-          select c.status, mr.nome as motivo from escala_itens i
+          select c.status, mr.nome as motivo, c.token from escala_itens i
             join convocacoes c on c.escala_item_id = i.id
             left join motivos_recusa mr on mr.codigo = c.motivo_recusa
            where i.troca_id = t.id and i.trabalhador_id = t.b_trabalhador_id
@@ -522,6 +532,37 @@ router.get('/quinzena', async (req, res, next) => {
       };
     });
 
+    /* prévia por gestor: situação de cada um e as convocações feitas.
+       O gestor vê as dele; o administrador vê todas. */
+    let gestores = [], convocados = [];
+    try {
+      gestores = await situacaoGestores(q, p);
+      const { rows: cv } = await consulta(`
+        select distinct on (i.troca_id, i.trabalhador_id)
+               c.id, c.token, c.status, c.criado_em, c.vista_em, c.respondida_em,
+               mr.nome as motivo, c.motivo_texto,
+               t.id as trabalhador_id, t.codigo, t.nome,
+               to_char(i.data_inicio, 'YYYY-MM-DD') as data_inicio,
+               to_char(i.data_fim, 'YYYY-MM-DD') as data_fim,
+               u.codigo as destino_codigo, coalesce(l.nome, u.nome_completo) as destino_nome, u.setor as destino_setor,
+               e.previa_gestor_id as gestor_id, us.nome as gestor_nome
+          from escalas e
+          join escala_itens i on i.escala_id = e.id and i.tipo = 'rodizio'
+          join convocacoes c on c.escala_item_id = i.id
+          join rodizio_trocas tr on tr.id = i.troca_id and tr.estado <> 'desfeita'
+          join trabalhadores t on t.id = i.trabalhador_id
+          join unidades u on u.id = i.destino_unidade_id
+          left join locais l on l.id = u.local_id
+          left join usuarios us on us.id = e.previa_gestor_id
+          left join motivos_recusa mr on mr.codigo = c.motivo_recusa
+         where e.quinzena_id = $1 and e.status = 'previa'
+         order by i.troca_id, i.trabalhador_id, c.criado_em
+      `, [q.id]);
+      const admin = req.usuario.perfil === 'admin';
+      convocados = cv.filter((x) => admin || (req.usuario.id && x.gestor_id === req.usuario.id))
+        .sort((a, b) => String(a.nome || '').localeCompare(String(b.nome || '')));
+    } catch (e) { console.error('prévia por gestor (leitura):', e.message); }
+
     /* link universal de requisição, para o botão "Fazer requisição" */
     const { rows: [link] } = await consulta(`
       select token from links_publicos
@@ -541,7 +582,7 @@ router.get('/quinzena', async (req, res, next) => {
                   ? { ativa: true, limite: regraRec.limite_recusas, janela_meses: regraRec.janela_meses, dias_para_cumprir: regraRec.dias_para_cumprir }
                   : { ativa: false } },
       eu: { id: req.usuario.id || null, nome: quem(req), perfil: req.usuario.perfil },
-      unidades, pessoas: pessoasRegra, trocas, afastados,
+      unidades, pessoas: pessoasRegra, trocas, afastados, gestores, convocados,
     });
   } catch (e) { next(e); }
 });
@@ -913,7 +954,7 @@ async function montarLinhas(cliente, q, p, estadosVivos) {
     linhas.push({
       trabalhador_id: pp.trabalhador_id, origem_local_id: pp.local_id, destino_unidade_id: destino,
       data_inicio: ini, data_fim: f, tipo, troca_id: trocaId || null,
-      requisicao_id: reqDe[destino] || null,
+      requisicao_id: reqDe[destino] || null, unidade_base: pp.unidade_id,
     });
   };
   for (const pp of pessoas) {
@@ -968,7 +1009,7 @@ async function pendencias(q, p) {
       select unidade_id from base
       union select unidade_id from rodizio_unidades where quinzena_id = $1
     )
-    select u.codigo, g.usuario_id is null as sem_gestor, coalesce(ru.status, 'pendente') as status
+    select u.id, u.codigo, g.usuario_id is null as sem_gestor, coalesce(ru.status, 'pendente') as status
       from ids join unidades u on u.id = ids.unidade_id
       left join unidade_gestor_mmg g on g.unidade_id = u.id
       left join rodizio_unidades ru on ru.quinzena_id = $1 and ru.unidade_id = u.id
@@ -986,46 +1027,165 @@ function textoPendencias(rows) {
 }
 
 /* ==================================================================
- * POST /rodizio/quinzenas/:qid/previa — envia a prévia
+ * PRÉVIA POR GESTOR — situação de cada gestor e convocações já feitas
+ * ================================================================ */
+async function unidadesDoGestor(usuarioId) {
+  const { rows } = await consulta('select unidade_id from unidade_gestor_mmg where usuario_id = $1', [usuarioId]);
+  return new Set(rows.map((r) => r.unidade_id));
+}
+
+/* convocação já feita, em qualquer prévia da quinzena, para cada troca+pessoa */
+async function convocacoesDaQuinzena(cliente, qid) {
+  const { rows } = await cliente.query(`
+    select distinct on (i.troca_id, i.trabalhador_id) i.troca_id, i.trabalhador_id, c.id
+      from escalas e
+      join escala_itens i on i.escala_id = e.id and i.tipo = 'rodizio' and i.troca_id is not null
+      join convocacoes c on c.escala_item_id = i.id
+     where e.quinzena_id = $1 and e.status = 'previa'
+     order by i.troca_id, i.trabalhador_id, c.criado_em`, [qid]);
+  return Object.fromEntries(rows.map((c) => [`${c.troca_id}|${c.trabalhador_id}`, c.id]));
+}
+
+/* Uma linha por Gestor MMG Responsável com unidade na quinzena:
+   unidades, resolvidas, última prévia, se mexeu depois dela e as
+   respostas das convocações que ele enviou. */
+async function situacaoGestores(q, p) {
+  const { rows } = await consulta(`
+    with ${basePessoas(p.dias_ativo_escala)},
+    ids as (
+      select unidade_id from base
+      union select unidade_id from rodizio_unidades where quinzena_id = $1
+    ),
+    uni as (
+      select g.usuario_id, ids.unidade_id, coalesce(ru.status, 'pendente') as status, ru.atualizado_em
+        from ids join unidade_gestor_mmg g on g.unidade_id = ids.unidade_id
+        left join rodizio_unidades ru on ru.quinzena_id = $1 and ru.unidade_id = ids.unidade_id
+    ),
+    ag as (
+      select usuario_id, count(*)::int as unidades,
+             count(*) filter (where status in ('concluida', 'mantida'))::int as resolvidas,
+             max(atualizado_em) as mexeu_em
+        from uni group by usuario_id
+    ),
+    pv as (
+      select previa_gestor_id as usuario_id, max(previa_em) as ultima, count(*)::int as envios
+        from escalas where quinzena_id = $1 and status = 'previa' and previa_gestor_id is not null
+       group by 1
+    ),
+    cv as (
+      select x.usuario_id, count(*)::int as convocados,
+             count(*) filter (where x.status = 'aceita')::int   as aceitas,
+             count(*) filter (where x.status = 'recusada')::int as recusadas,
+             count(*) filter (where x.status = 'vista')::int    as vistas,
+             count(*) filter (where x.status = 'enviada')::int  as sem_resposta
+        from (
+          select distinct on (i.troca_id, i.trabalhador_id) e.previa_gestor_id as usuario_id, c.status
+            from escalas e
+            join escala_itens i on i.escala_id = e.id and i.tipo = 'rodizio'
+            join convocacoes c on c.escala_item_id = i.id
+            join rodizio_trocas t on t.id = i.troca_id and t.estado <> 'desfeita'
+           where e.quinzena_id = $1 and e.status = 'previa' and e.previa_gestor_id is not null
+           order by i.troca_id, i.trabalhador_id, c.criado_em
+        ) x group by x.usuario_id
+    )
+    select ag.usuario_id as id, us.nome, ag.unidades, ag.resolvidas, ag.mexeu_em,
+           pv.ultima, coalesce(pv.envios, 0) as envios,
+           coalesce(cv.convocados, 0) as convocados, coalesce(cv.aceitas, 0) as aceitas,
+           coalesce(cv.recusadas, 0) as recusadas, coalesce(cv.vistas, 0) as vistas,
+           coalesce(cv.sem_resposta, 0) as sem_resposta
+      from ag join usuarios us on us.id = ag.usuario_id
+      left join pv on pv.usuario_id = ag.usuario_id
+      left join cv on cv.usuario_id = ag.usuario_id
+     order by us.nome
+  `, [q.id]);
+  const prazo = calendario(soData(q.inicio), p).previa;
+  const hoje = hojeSP();
+  return rows.map((g) => {
+    const desatualizada = !!g.ultima && !!g.mexeu_em && new Date(g.mexeu_em) > new Date(g.ultima);
+    const resolvido = g.resolvidas >= g.unidades;
+    return {
+      ...g, desatualizada,
+      em_dia: !!g.ultima && !desatualizada && resolvido,
+      atrasado: !g.ultima && hoje > prazo,
+      prazo,
+    };
+  });
+}
+
+/* ==================================================================
+ * POST /rodizio/quinzenas/:qid/previa — o gestor envia a prévia das
+ * unidades DELE. Pode reenviar quando mudar algo depois (troca nova,
+ * ajuste de recusa); quem já foi convocado não recebe link de novo.
  * ================================================================ */
 router.post('/quinzenas/:qid/previa', podeEscrever, async (req, res, next) => {
+  if (!req.usuario.id) {
+    return res.status(403).json({ error: 'Entre com o seu acesso pessoal: a prévia sai em nome do Gestor MMG Responsável.' });
+  }
   const cliente = await pool.connect();
   try {
     const p = await criterios();
-    const q = await quinzenaPorId(req.params.qid);
+    let q = await quinzenaPorId(req.params.qid);
     if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
-    if (!(await exigirEtapa(res, q, ['montagem']))) return;
+    if (!(await exigirEtapa(res, q, ['montagem', 'ajustes']))) return;
+    await sincronizarRespostas(q, quem(req));
     await aplicarAfastamentos(q.sindicato_id);
-    const pend = await pendencias(q, p);
-    if (pend.length) return res.status(409).json({ error: textoPendencias(pend), pendencias: pend });
-    const confl = await conflitosDeRestricao(q);
+    q = await quinzenaPorId(q.id);
+
+    const minhas = await unidadesDoGestor(req.usuario.id);
+    const eu = (await situacaoGestores(q, p)).find((g) => g.id === req.usuario.id);
+    if (!eu || !minhas.size) {
+      return res.status(409).json({ error: 'Você não é Gestor MMG Responsável por nenhuma unidade desta quinzena.' });
+    }
+    const pend = (await pendencias(q, p)).filter((r) => minhas.has(r.id));
+    if (pend.length) {
+      return res.status(409).json({
+        error: `Antes de enviar, finalize ou mantenha ${pend.length === 1 ? 'a sua unidade' : `as suas ${pend.length} unidades`}: ${pend.slice(0, 8).map((r) => r.codigo).join(', ')}${pend.length > 8 ? '…' : ''}.`,
+        pendencias: pend,
+      });
+    }
+    if (eu.ultima && !eu.desatualizada) {
+      return res.status(409).json({ error: 'A sua prévia já foi enviada e nada mudou nas suas unidades desde então.' });
+    }
+    const confl = await conflitosDeRestricao(q, minhas);
     if (confl.length) return res.status(409).json({ error: `Regra 9: ${confl.slice(0, 3).join(' ')} Desfaça a troca ou a inclusão antes de enviar a prévia.` });
 
     await cliente.query('begin');
     const { rows: [e] } = await cliente.query(`
-      insert into escalas (sindicato_id, ano, periodo_inicio, periodo_fim, titulo, criado_por, natureza, quinzena_id)
-      values ($1, extract(year from $2::date)::int, $2::date, $3::date, 'Prévia da quinzena', $4, 'quinzena', $5)
+      insert into escalas (sindicato_id, ano, periodo_inicio, periodo_fim, titulo, criado_por, natureza, quinzena_id, previa_gestor_id)
+      values ($1, extract(year from $2::date)::int, $2::date, $3::date, $6, $4, 'quinzena', $5, $7)
       returning id
-    `, [q.sindicato_id, soData(q.inicio), soData(q.fim), quem(req), q.id]);
+    `, [q.sindicato_id, soData(q.inicio), soData(q.fim), quem(req), q.id,
+        `Prévia de ${quem(req)}`, req.usuario.id]);
 
-    const linhas = await montarLinhas(cliente, q, p, ['montada']);
-    if (!linhas.length) throw Object.assign(new Error('Não há ninguém para escalar nesta quinzena.'), { code: 'P0001' });
+    const linhas = (await montarLinhas(cliente, q, p, ['montada', 'enviada', 'aceita']))
+      .filter((l) => minhas.has(l.unidade_base));
+    /* unidade sem ninguém ativo também é declarada: a prévia vale como "terminei" */
+    /* quem já recebeu o pedido de aceite numa prévia anterior não recebe outro */
+    const convDe = await convocacoesDaQuinzena(cliente, q.id);
+    for (const l of linhas) {
+      if (l.tipo === 'rodizio') l.convocacao_previa_id = convDe[`${l.troca_id}|${l.trabalhador_id}`] || null;
+    }
     await inserirLinhas(cliente, e.id, linhas);
+    const minhasTrocas = [...new Set(linhas.filter((l) => l.troca_id).map((l) => l.troca_id))];
 
     await cliente.query(`
       update escalas set status = 'previa', previa_em = now(), previa_por = $2, previa_hash = hash_da_escala($1)
        where id = $1`, [e.id, quem(req)]);
-    await cliente.query("update rodizio_trocas set estado = 'enviada' where quinzena_id = $1 and estado = 'montada'", [q.id]);
-    await cliente.query('update rodizio_quinzenas set previa_escala_id = $2 where id = $1', [q.id, e.id]);
+    await cliente.query(
+      "update rodizio_trocas set estado = 'enviada' where quinzena_id = $1 and estado = 'montada' and id = any($2::uuid[])",
+      [q.id, minhasTrocas]);
+    /* a primeira prévia da quinzena marca o início da etapa de ajustes */
+    await cliente.query(
+      'update rodizio_quinzenas set previa_escala_id = $2 where id = $1 and previa_escala_id is null', [q.id, e.id]);
     const { rows: [c] } = await cliente.query('select gerar_convocacoes($1, $2) as n', [e.id, quem(req)]);
     await cliente.query(
       "insert into escala_eventos (escala_id, tipo, descricao, quem) values ($1, 'previa', $2, $3)",
-      [e.id, `Prévia enviada com ${linhas.length} linhas; ${c.n} pedidos de aceite a quem muda de unidade`, quem(req)]);
+      [e.id, `Prévia de ${quem(req)} (${minhas.size} unidades) com ${linhas.length} linhas; ${c.n} pedidos de aceite novos`, quem(req)]);
     await cliente.query('commit');
 
     await registrarEvento({
-      tipo: 'rodizio_previa', titulo: 'Prévia da quinzena enviada',
-      descricao: `${soData(q.inicio)} a ${soData(q.fim)} · ${linhas.length} linhas · ${c.n} convocações`,
+      tipo: 'rodizio_previa', titulo: eu.ultima ? 'Prévia reenviada pelo gestor' : 'Prévia enviada pelo gestor',
+      descricao: `${quem(req)} · ${soData(q.inicio)} a ${soData(q.fim)} · ${linhas.length} linhas · ${c.n} convocações novas`,
       ator: quem(req), atorUsuarioId: req.usuario.id || null, entidadeTipo: 'escala', entidadeId: e.id,
       ip: ipReq(req), navegador: navegadorReq(req),
     });
@@ -1043,7 +1203,7 @@ router.post('/quinzenas/:qid/previa', podeEscrever, async (req, res, next) => {
  * resposta": o dever se cumpre ao oferecer. Trocas novas, feitas no
  * ajuste, ganham convocação própria.
  * ================================================================ */
-router.post('/quinzenas/:qid/publicar', podeEscrever, async (req, res, next) => {
+router.post('/quinzenas/:qid/publicar', autorizar('admin'), async (req, res, next) => {
   const cliente = await pool.connect();
   try {
     const p = await criterios();
@@ -1057,6 +1217,11 @@ router.post('/quinzenas/:qid/publicar', podeEscrever, async (req, res, next) => 
     if (pend.length) return res.status(409).json({ error: textoPendencias(pend), pendencias: pend });
     const confl = await conflitosDeRestricao(q);
     if (confl.length) return res.status(409).json({ error: `Regra 9: ${confl.slice(0, 3).join(' ')} Desfaça a troca ou a inclusão antes de publicar.` });
+    const atrasados = (await situacaoGestores(q, p)).filter((g) => !g.em_dia);
+    if (atrasados.length) {
+      const nomes = atrasados.slice(0, 5).map((g) => `${g.nome} (${!g.ultima ? 'não enviou' : g.desatualizada ? 'mudou depois da prévia' : 'unidades pendentes'})`).join('; ');
+      return res.status(409).json({ error: `Ainda falta a prévia em dia de ${atrasados.length} ${atrasados.length === 1 ? 'gestor' : 'gestores'}: ${nomes}${atrasados.length > 5 ? '…' : ''}.` });
+    }
 
     await cliente.query('begin');
     await cliente.query(
@@ -1069,12 +1234,7 @@ router.post('/quinzenas/:qid/publicar', podeEscrever, async (req, res, next) => 
     `, [q.sindicato_id, soData(q.inicio), soData(q.fim), quem(req), q.id, q.previa_escala_id]);
 
     const linhas = await montarLinhas(cliente, q, p, ['aceita', 'sem_resposta', 'montada']);
-    const { rows: conv } = await cliente.query(`
-      select i.troca_id, i.trabalhador_id, c.id from escala_itens i
-        join convocacoes c on c.escala_item_id = i.id
-       where i.escala_id = $1 and i.tipo = 'rodizio'
-    `, [q.previa_escala_id]);
-    const convDe = Object.fromEntries(conv.map((c) => [`${c.troca_id}|${c.trabalhador_id}`, c.id]));
+    const convDe = await convocacoesDaQuinzena(cliente, q.id);
     for (const l of linhas) {
       if (l.tipo === 'rodizio') l.convocacao_previa_id = convDe[`${l.troca_id}|${l.trabalhador_id}`] || null;
     }
