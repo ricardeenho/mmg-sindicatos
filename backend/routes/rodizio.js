@@ -80,12 +80,41 @@ async function acharOuCriarQuinzena(inicio, p, autor) {
   const { rows: [r] } = await consulta(
     'select * from rodizio_quinzenas where sindicato_id = $1 and inicio = $2::date',
     [p.sindicato_id, q.inicio]);
-  return r;
+  return aberta(r);
+}
+
+/* Escala definitiva CANCELADA (pela tela de Escalas) = quinzena reaberta:
+   volta à etapa de ajustes, com as prévias e as respostas já dadas. A
+   escala cancelada continua no arquivo; a nova publicação ganha outro
+   número. */
+async function aberta(q) {
+  if (q && q.definitiva_escala_id) {
+    const { rows: [e] } = await consulta('select status from escalas where id = $1', [q.definitiva_escala_id]);
+    if (e && e.status === 'cancelada') return { ...q, definitiva_escala_id: null, reaberta: true };
+  }
+  return q;
 }
 
 async function quinzenaPorId(id) {
   const { rows: [q] } = await consulta('select * from rodizio_quinzenas where id = $1', [id]);
-  return q;
+  return aberta(q);
+}
+
+/* Convocados da prévia que ainda não responderam (enviada ou só vista),
+   em trocas que seguem valendo. */
+async function aguardandoRespostas(qid) {
+  const { rows: [r] } = await consulta(`
+    select count(*)::int as n from (
+      select distinct on (i.troca_id, i.trabalhador_id) c.status
+        from escalas e
+        join escala_itens i on i.escala_id = e.id and i.tipo = 'rodizio'
+        join convocacoes c on c.escala_item_id = i.id
+        join rodizio_trocas t on t.id = i.troca_id and t.estado not in ('desfeita', 'recusada')
+       where e.quinzena_id = $1 and e.status = 'previa'
+       order by i.troca_id, i.trabalhador_id, c.criado_em
+    ) x where x.status in ('enviada', 'vista')
+  `, [qid]);
+  return r.n;
 }
 
 const etapaDe = (q) => (q.definitiva_escala_id ? 'publicada' : q.previa_escala_id ? 'ajustes' : 'montagem');
@@ -130,7 +159,7 @@ async function sincronizarRespostas(q, autor) {
         join escala_itens i on i.troca_id = t.id and i.tipo = 'rodizio'
         join escalas e on e.id = i.escala_id and e.quinzena_id = $1 and e.status = 'previa'
         join convocacoes c on c.escala_item_id = i.id
-       where t.quinzena_id = $1 and t.estado = 'enviada'
+       where t.quinzena_id = $1 and t.estado in ('enviada', 'sem_resposta')
        group by t.id
     )
     update rodizio_trocas t
@@ -571,7 +600,8 @@ router.get('/quinzena', async (req, res, next) => {
 
     res.json({
       link_requisicao: link ? link.token : null,
-      quinzena: { id: q.id, inicio, fim, numero: n(inicio.slice(8)) === 1 ? 1 : 2, etapa: etapaDe(q) },
+      quinzena: { id: q.id, inicio, fim, numero: n(inicio.slice(8)) === 1 ? 1 : 2, etapa: etapaDe(q), reaberta: !!q.reaberta,
+                  aguardando: q.previa_escala_id && !q.definitiva_escala_id ? await aguardandoRespostas(q.id).catch(() => 0) : 0 },
       calendario: { hoje, ...calendario(inicio, p) },
       opcoes,
       previa: await escalaInfo(q.previa_escala_id),
@@ -1082,6 +1112,10 @@ async function situacaoGestores(q, p) {
         from escalas where quinzena_id = $1 and status = 'previa' and previa_gestor_id is not null
        group by 1
     ),
+    lg as (
+      select max(previa_em) as ultima
+        from escalas where quinzena_id = $1 and status = 'previa' and previa_gestor_id is null
+    ),
     cv as (
       select x.usuario_id, count(*)::int as convocados,
              count(*) filter (where x.status = 'aceita')::int   as aceitas,
@@ -1099,11 +1133,12 @@ async function situacaoGestores(q, p) {
         ) x group by x.usuario_id
     )
     select ag.usuario_id as id, us.nome, ag.unidades, ag.resolvidas, ag.mexeu_em,
-           pv.ultima, coalesce(pv.envios, 0) as envios,
+           coalesce(pv.ultima, lg.ultima) as ultima, coalesce(pv.envios, 0) as envios,
            coalesce(cv.convocados, 0) as convocados, coalesce(cv.aceitas, 0) as aceitas,
            coalesce(cv.recusadas, 0) as recusadas, coalesce(cv.vistas, 0) as vistas,
            coalesce(cv.sem_resposta, 0) as sem_resposta
       from ag join usuarios us on us.id = ag.usuario_id
+      cross join lg
       left join pv on pv.usuario_id = ag.usuario_id
       left join cv on cv.usuario_id = ag.usuario_id
      order by us.nome
@@ -1233,6 +1268,22 @@ router.post('/quinzenas/:qid/publicar', autorizar('admin'), async (req, res, nex
       return res.status(409).json({ error: `Ainda falta a prévia em dia de ${atrasados.length} ${atrasados.length === 1 ? 'gestor' : 'gestores'}: ${nomes}${atrasados.length > 5 ? '…' : ''}.` });
     }
 
+    /* a publicação espera as respostas dos convocados. Depois do 1º dia
+       do período o administrador pode publicar mesmo assim, com motivo. */
+    const aguardando = await aguardandoRespostas(q.id);
+    let motivoSemResposta = '';
+    if (aguardando) {
+      motivoSemResposta = String((req.body || {}).motivo || '').trim();
+      const comecou = hojeSP() >= soData(q.inicio);
+      const quem_ = `${aguardando} ${aguardando === 1 ? 'convocado ainda não respondeu' : 'convocados ainda não responderam'}`;
+      if (!comecou) {
+        return res.status(409).json({ error: `Faltam respostas: ${quem_}. A escala definitiva só sai depois que todos responderem; a partir de ${soData(q.inicio).split('-').reverse().join('/')} (início do período) o administrador pode publicar mesmo assim, com motivo.` });
+      }
+      if (motivoSemResposta.length < 5) {
+        return res.status(409).json({ error: `Faltam respostas: ${quem_}. Para publicar assim, informe o motivo.`, precisa_motivo: true });
+      }
+    }
+
     await cliente.query('begin');
     await cliente.query(
       "update rodizio_trocas set estado = 'sem_resposta' where quinzena_id = $1 and estado = 'enviada'", [q.id]);
@@ -1263,7 +1314,7 @@ router.post('/quinzenas/:qid/publicar', autorizar('admin'), async (req, res, nex
       "update rodizio_trocas set estado = 'enviada' where quinzena_id = $1 and estado = 'montada'", [q.id]);
     await cliente.query(
       "insert into escala_eventos (escala_id, tipo, descricao, quem) values ($1, 'publicada', $2, $3)",
-      [e.id, `Escala ${pub.numero}/${pub.ano} da quinzena publicada com ${linhas.length} linhas; ${c.n} convocações novas (trocas do ajuste)`, quem(req)]);
+      [e.id, `Escala ${pub.numero}/${pub.ano} da quinzena publicada com ${linhas.length} linhas; ${c.n} convocações novas (trocas do ajuste)${aguardando ? `; publicada com ${aguardando} sem resposta — motivo: ${motivoSemResposta}` : ''}${q.reaberta ? '; republicação após cancelamento da escala anterior' : ''}`, quem(req)]);
     await cliente.query('commit');
 
     await registrarEvento({

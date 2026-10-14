@@ -51,40 +51,14 @@ function Selo({ status }) {
 }
 
 function urgencia(u, pessoas) {
-  const ps = pessoas.filter((p) => p.unidade_id === u.id && !indisponivel(p) && p.perfil === "permanente");
+  const ps = pessoas.filter((p) => p.unidade_id === u.id && !p.ausente && p.perfil === "permanente");
   const max = Math.max(0, ...ps.map((p) => p.falta));
   if (max === 0) return { k: "g", barra: "bg-emerald-500", chip: "bg-emerald-50 text-emerald-700", txt: "Ninguém deve dias" };
   if (max > 5 && !u.rodou) return { k: "r", barra: "bg-rose-500", chip: "bg-rose-50 text-rose-700", txt: `Há quem deva ${max} dias e a unidade não rodou na última quinzena` };
   return { k: "a", barra: "bg-amber-500", chip: "bg-amber-50 text-amber-700", txt: u.rodou ? `Rodou na última quinzena; ainda há quem deva ${max} dias` : `O maior saldo é de ${max} dias` };
 }
 
-/* Regra 9 (recusas). A pessoa está "indisponível" na escala quando está ausente
-   ou quando a regra a tira dela (afastada, ou só pode sair da unidade-mãe). */
-const indisponivel = (p) => !!p.ausente || !!p.fora_da_escala;
-/* a unidade x fica dentro da "mãe" da restrição da pessoa p? */
-const impede = (p, x) => {
-  const r = p?.restricao;
-  if (!r || !x) return false;
-  if (r.fase === "afastado") return true;
-  return x.id === r.unidade_mae_id || (!!r.local_mae_id && x.local_id === r.local_mae_id);
-};
-
-function TagRestricao({ p }) {
-  const r = p.restricao;
-  return (
-    <>
-      {r?.fase === "afastado" && <span title="Três recusas em 12 meses: fora desta quinzena (regra 9)" className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-rose-50 text-rose-700">Afastado · recusas</span>}
-      {r?.fase === "fora_da_mae" && <span title="Só pode ser escalado fora da unidade-mãe até cumprir um rodízio (regra 9)" className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-amber-50 text-amber-800">Só fora da unidade-mãe</span>}
-      {!r && p.recusas > 0 && <span title="Recusas que contam nos últimos 12 meses" className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-orange-50 text-orange-700">{p.recusas} recusa{p.recusas > 1 ? "s" : ""}</span>}
-    </>
-  );
-}
-
 function TagPessoa({ p }) {
-  return <><TagRestricao p={p} /><TagBase p={p} /></>;
-}
-
-function TagBase({ p }) {
   if (p.ausente) return <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-slate-100 text-slate-600">Ausente na quinzena</span>;
   if (p.perfil === "permanente" && p.falta > 0) return <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-amber-50 text-amber-700">Deve {p.falta} dias</span>;
   if (p.perfil === "permanente") return <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-emerald-50 text-emerald-700">Em dia</span>;
@@ -117,8 +91,6 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   const [painel, setPainel] = useState(null);
   const [motivoManter, setMotivoManter] = useState("");
   const [confirmar, setConfirmar] = useState(null);
-  const [encerrando, setEncerrando] = useState(null);
-  const [motivoEnc, setMotivoEnc] = useState("");
 
   const carregar = useCallback(async () => {
     try {
@@ -127,13 +99,6 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
     } catch (e) { setErro(e.message); }
   }, [inicio, token, pedir]);
   useEffect(() => { carregar(); }, [carregar]);
-  /* quem foi ao WhatsApp mandar os links e voltou vê as respostas novas */
-  useEffect(() => {
-    const aoVoltar = () => { if (!document.hidden) carregar(); };
-    document.addEventListener("visibilitychange", aoVoltar);
-    window.addEventListener("focus", aoVoltar);
-    return () => { document.removeEventListener("visibilitychange", aoVoltar); window.removeEventListener("focus", aoVoltar); };
-  }, [carregar]);
 
   async function agir(caminho, corpo, ok) {
     setOcupado(true);
@@ -176,9 +141,9 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
 
   const etapas = [
     ["montagem", `Até ${diaMes(d.calendario.previa)}`, "Cada gestor roda as suas unidades"],
-    ["previa", diaMes(d.calendario.previa), "Cada gestor envia a prévia das suas unidades"],
+    ["previa", diaMes(d.calendario.previa), "Prévia vai a quem muda de unidade"],
     ["ajustes", `${diaMes(d.calendario.publicacao)} · manhã`, "Ajustar o que foi recusado"],
-    ["publicada", diaMes(d.calendario.publicacao), "Administrador publica a escala definitiva"],
+    ["publicada", diaMes(d.calendario.publicacao), "Escala definitiva publicada"],
   ];
   const idxEtapa = q.etapa === "montagem" ? 0 : q.etapa === "ajustes" ? 2 : 3;
 
@@ -235,49 +200,30 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
     </div>
   );
 
-  /* 14/10/2026 — prévia por gestor; definitiva só do administrador */
-  const gestores = d.gestores || [];
-  const meu = gestores.find((g) => g.id === eu.id);
-  const souAdmin = eu.perfil === "admin";
-  const emDia = gestores.filter((g) => g.em_dia).length;
-  const prontoPublicar = q.etapa === "ajustes" && faltam === 0 && gestores.length > 0 && emDia === gestores.length;
-
   let acao;
-  if (q.etapa !== "publicada") {
-    const minhasFaltam = meu ? meu.unidades - meu.resolvidas : 0;
+  if (q.etapa === "montagem") {
     acao = (
-      <div className="flex flex-col items-end gap-2">
-        {meu && (
-          <div className="flex flex-col items-end gap-0.5">
-            <button disabled={!podeEditar || ocupado || minhasFaltam > 0 || meu.em_dia} onClick={() => setConfirmar("previa")}
-              className={`rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-40 ${meu.em_dia ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-600 text-white"}`}>
-              {meu.em_dia ? "Prévia enviada ✓" : meu.ultima ? "Reenviar minha prévia" : "Enviar minha prévia"}
-            </button>
-            <span className="text-[11.5px] text-slate-500">
-              {minhasFaltam > 0 ? `Faltam ${minhasFaltam} das suas ${meu.unidades} unidades`
-                : meu.em_dia ? `Enviada em ${horaBR(meu.ultima)} · ${meu.convocados} convocados`
-                : meu.desatualizada ? "Suas unidades mudaram depois da prévia"
-                : `Suas ${meu.unidades} unidades estão resolvidas`}
-            </span>
-          </div>
-        )}
-        {souAdmin && (
-          <div className="flex flex-col items-end gap-0.5">
-            <button disabled={!podeEditar || ocupado || !prontoPublicar} onClick={() => setConfirmar("publicar")}
-              className="bg-slate-900 text-white rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-40">
-              Publicar escala definitiva
-            </button>
-            <span className="text-[11.5px] text-slate-500">
-              {faltam ? `Faltam ${faltam} ${faltam === 1 ? "unidade" : "unidades"}${semGestor ? `, ${semGestor} sem Gestor MMG Responsável` : ""}`
-                : `${emDia} de ${gestores.length} gestores com prévia em dia`}
-            </span>
-          </div>
-        )}
-        {!meu && !souAdmin && (
-          <span className="text-[11.5px] text-slate-500 max-w-[240px] text-right">
-            Você não tem unidade nesta quinzena. A escala definitiva é publicada pelo administrador.
-          </span>
-        )}
+      <div className="flex flex-col items-end gap-1">
+        <button disabled={!podeEditar || faltam > 0 || ocupado} onClick={() => setConfirmar("previa")}
+          className="bg-teal-600 text-white rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-40">
+          Enviar prévia aos colaboradores
+        </button>
+        <span className="text-[11.5px] text-slate-500">
+          {faltam ? `Faltam ${faltam} ${faltam === 1 ? "unidade" : "unidades"}${semGestor ? `, ${semGestor} sem Gestor MMG Responsável` : ""}` : "Todas as unidades resolvidas"}
+        </span>
+      </div>
+    );
+  } else if (q.etapa === "ajustes") {
+    acao = (
+      <div className="flex flex-col items-end gap-1">
+        <button disabled={!podeEditar || faltam > 0 || ocupado} onClick={() => setConfirmar("publicar")}
+          className="bg-teal-600 text-white rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-40">
+          Publicar escala definitiva
+        </button>
+        <span className="text-[11.5px] text-slate-500">
+          {faltam ? `${faltam} ${faltam === 1 ? "unidade precisa" : "unidades precisam"} de atenção` : "Pronta para publicar"}
+          {d.previa && ` · prévia enviada em ${horaBR(d.previa.previa_em)} por ${d.previa.previa_por}`}
+        </span>
       </div>
     );
   } else {
@@ -315,70 +261,21 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
     </div>
   );
 
-  const painelGestores = q.etapa !== "publicada" && <SituacaoGestores gestores={gestores} euId={eu.id} aberto={souAdmin} />;
-  const painelConv = <MeusConvocados convocados={d.convocados || []} admin={souAdmin} />;
-
-  /* Regra 9: quem está afastado por recusas. O Gestor vê; só o admin encerra. */
-  const afastados = d.afastados || [];
-  const painelAf = afastados.length > 0 && (
-    <details className="bg-white border border-slate-200 rounded-2xl group">
-      <summary className="cursor-pointer list-none px-4 py-3 flex items-center justify-between gap-2">
-        <span className="text-[13px] font-semibold">
-          {afastados.length} colaborador{afastados.length > 1 ? "es" : ""} com restrição por recusas
-          <span className="text-slate-400 font-normal"> · regra 9 do regimento</span>
-        </span>
-        <span className="text-[11.5px] text-slate-500 group-open:rotate-180 transition-transform">▾</span>
-      </summary>
-      <div className="px-4 pb-4 space-y-2">
-        <p className="text-[11.5px] text-slate-500 leading-relaxed">
-          Três recusas em {regras.punicao?.janela_meses || 12} meses afastam da escala seguinte; depois, só fora da unidade-mãe até cumprir um rodízio
-          ({regras.punicao?.dias_para_cumprir || 5} dias de Ponto fora dela).
-        </p>
-        {afastados.map((a) => (
-          <div key={a.id} className="border border-slate-200 rounded-xl px-3 py-2 flex flex-wrap items-center justify-between gap-2">
-            <span className="min-w-0 text-[12.5px]">
-              <b>{cap(a.nome) || "Sem nome"}</b> <span className="text-slate-400 tabular-nums">{a.codigo}</span>
-              <span className="block text-[11px] text-slate-500">
-                {a.fase === "afastado" ? "Fora desta quinzena" : a.fase === "fora_da_mae" ? "Só fora da unidade-mãe" : "Começa em " + dataBR(a.desde_inicio)}
-                {" · desde "}{dataBR(a.desde_inicio)}{a.mae_codigo ? ` · mãe: ${a.mae_codigo}` : ""}
-              </span>
-            </span>
-            {eu.perfil === "admin" && (encerrando === a.id ? (
-              <span className="flex gap-1.5 items-center flex-wrap">
-                <input value={motivoEnc} onChange={(e) => setMotivoEnc(e.target.value)} placeholder="Motivo (mín. 5 letras)"
-                  className="border border-slate-200 rounded-lg px-2 py-1 text-[12px]" />
-                <button disabled={ocupado || motivoEnc.trim().length < 5}
-                  onClick={async () => {
-                    const r = await agir(`/rodizio/afastamentos/${a.id}/encerrar`, { motivo: motivoEnc.trim() }, "Afastamento encerrado");
-                    if (r) { setEncerrando(null); setMotivoEnc(""); }
-                  }}
-                  className="bg-rose-600 text-white rounded-lg px-2.5 py-1 text-[12px] font-semibold disabled:opacity-40">Encerrar</button>
-                <button onClick={() => { setEncerrando(null); setMotivoEnc(""); }} className="text-[12px] text-slate-500">Voltar</button>
-              </span>
-            ) : (
-              <button onClick={() => { setEncerrando(a.id); setMotivoEnc(""); }} className="text-[11.5px] text-slate-600 font-semibold border border-slate-300 rounded-lg px-2.5 py-1">Encerrar com motivo</button>
-            ))}
-          </div>
-        ))}
-      </div>
-    </details>
-  );
-
   const caixaConfirmar = typeof confirmar === "string" && (
     <div className="bg-white border-2 border-teal-500 rounded-2xl p-4 flex flex-col gap-2">
-      <b className="text-[14px]">{confirmar === "previa" ? (meu?.ultima ? "Reenviar a prévia das suas unidades?" : "Enviar a prévia das suas unidades?") : "Publicar a escala definitiva?"}</b>
+      <b className="text-[14px]">{confirmar === "previa" ? "Enviar a prévia da quinzena?" : "Publicar a escala definitiva?"}</b>
       <p className="text-[12.5px] text-slate-600 leading-relaxed max-w-2xl">
         {confirmar === "previa"
-          ? "A prévia fica registrada com data, hora e o seu nome e não pode mais ser alterada. Só quem muda de unidade, nas suas unidades, recebe o pedido de aceite: os links aparecem em “Meus convocados”, prontos para o WhatsApp. Se algo mudar depois, você reenvia — quem já recebeu o link não recebe outro."
-          : "Junta as prévias de todos os gestores numa escala só, com número, hora e autor; ela não pode mais ser alterada, e corrigir depois só por retificação. Quem não respondeu continua escalado, marcado como sem resposta."}
+          ? "A prévia fica registrada com data, hora e autor e não pode mais ser alterada. Quem muda de unidade recebe o pedido de aceite pelo link pessoal. O que for recusado volta para o Gestor MMG Responsável da unidade."
+          : "A escala recebe número, hora e autor e não pode mais ser alterada; corrigir depois só por retificação. Quem não respondeu à prévia continua escalado, marcado como sem resposta. Trocas feitas no ajuste recebem convocação nova."}
       </p>
       <div className="flex gap-2">
         <button disabled={ocupado} onClick={async () => {
           const r = await agir(`/rodizio/quinzenas/${q.id}/${confirmar === "previa" ? "previa" : "publicar"}`, {},
-            (r) => confirmar === "previa" ? `Prévia enviada: ${r.linhas} linhas, ${r.convocacoes} pedidos de aceite novos` : `Escala ${String(r.numero).padStart(3, "0")}/${r.ano} publicada`);
-          if (r) { if (confirmar === "publicar") setVista("escala"); setConfirmar(null); }
+            (r) => confirmar === "previa" ? `Prévia enviada: ${r.linhas} linhas, ${r.convocacoes} pedidos de aceite` : `Escala ${String(r.numero).padStart(3, "0")}/${r.ano} publicada`);
+          if (r) { setConfirmar(null); setVista("escala"); }
         }} className="bg-teal-600 text-white rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-40">
-          {ocupado ? "Aguarde…" : confirmar === "previa" ? (meu?.ultima ? "Reenviar prévia" : "Enviar prévia") : "Publicar"}
+          {ocupado ? "Aguarde…" : confirmar === "previa" ? "Enviar prévia" : "Publicar"}
         </button>
         <button onClick={() => setConfirmar(null)} className="border border-slate-300 rounded-lg px-3 py-2 text-[13px] text-slate-600">Voltar</button>
       </div>
@@ -388,7 +285,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   if (vista === "escala") {
     return (
       <div className="space-y-3">
-        {topo}{progresso}{caixaConfirmar}{painelGestores}{painelConv}{painelAf}
+        {topo}{progresso}{caixaConfirmar}
         <EscalaGeral token={token} pedir={pedir} d={d} pessoas={pessoas} trocas={trocasVivas} uDe={uDe} />
       </div>
     );
@@ -448,7 +345,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
         )}
         {lista.map((u) => {
           const ur = urgencia(u, pessoas);
-          const n = pessoas.filter((p) => p.unidade_id === u.id && !indisponivel(p)).length;
+          const n = pessoas.filter((p) => p.unidade_id === u.id && !p.ausente).length;
           return (
             <button key={u.id} onClick={() => abrirUnidade(u.id)}
               className={`relative w-full text-left border rounded-xl pl-4 pr-3 py-2.5 transition ${
@@ -498,7 +395,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   } else {
     const ur = urgencia(u, pessoas);
     const ps = pessoas.filter((p) => p.unidade_id === u.id);
-    const presentes = ps.filter((p) => !indisponivel(p)).length;
+    const presentes = ps.filter((p) => !p.ausente).length;
     const pode = editavel(u);
     const fechada = u.status === "concluida" || u.status === "mantida";
 
@@ -577,8 +474,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
           {ps.length === 0 && <p className="text-[12.5px] text-slate-500 border border-dashed border-slate-300 rounded-xl p-4 text-center">Ninguém ativo nesta unidade.</p>}
           {ps.map((p) => {
             const tr = trocaDe(p.id), rec = recusadaDe(p.id);
-            const afastado = p.restricao?.fase === "afastado";
-            const clicavel = pode && !tr && !p.ausente && !afastado && !fechada;
+            const clicavel = pode && !tr && !p.ausente && !fechada;
             let faixa = null;
             if (tr) {
               const ehA = tr.a_trabalhador_id === p.id;
@@ -610,7 +506,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
             return (
               <div key={p.id} onClick={() => clicavel && (setPSel(p.id), setDSel(null), setParSel(null), setBuscaOutra(null))}
                 className={`grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 items-center border rounded-xl px-3 py-2 ${
-                  pSel === p.id ? "border-teal-500 ring-1 ring-teal-500" : "border-slate-200"} ${clicavel ? "cursor-pointer hover:border-slate-400" : ""} ${p.ausente || afastado ? "opacity-60" : ""}`}>
+                  pSel === p.id ? "border-teal-500 ring-1 ring-teal-500" : "border-slate-200"} ${clicavel ? "cursor-pointer hover:border-slate-400" : ""} ${p.ausente ? "opacity-60" : ""}`}>
                 <span className="min-w-0">
                   <span className="text-[13px] font-semibold">{cap(p.nome) || "Sem cadastro"}</span>{" "}
                   <span className="text-[11.5px] text-slate-400 tabular-nums">{p.codigo}</span>
@@ -714,15 +610,15 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   } else {
     const origem = uDe(p.unidade_id);
     const nivel = (x) => (x.local_id && x.local_id === origem.local_id ? 1 : x.cidade && x.cidade === origem.cidade ? 2 : 3);
-    const comGente = (x) => pessoas.some((pp) => pp.unidade_id === x.id && !indisponivel(pp));
-    const dests = unidades.filter((x) => x.id !== origem.id && !impede(p, x) && minha(x) && comGente(x) && (cidade === "Todas" || x.cidade === cidade || x.local_id === origem.local_id))
+    const comGente = (x) => pessoas.some((pp) => pp.unidade_id === x.id && !pp.ausente);
+    const dests = unidades.filter((x) => x.id !== origem.id && minha(x) && comGente(x) && (cidade === "Todas" || x.cidade === cidade || x.local_id === origem.local_id))
       .map((x) => ({ x, n: nivel(x) })).sort((a, b) => a.n - b.n || a.x.codigo.localeCompare(b.x.codigo));
     const grupos = [[1, "No mesmo local · outro setor"], [2, `Em ${origem.cidade || "mesma cidade"} · outro local`], [3, "Em outra cidade"]];
     const dest = uDe(dSel);
     const qo = (buscaOutra || "").trim().toLowerCase();
-    const outras = buscaOutra === null ? [] : unidades.filter((x) => x.id !== origem.id && !impede(p, x) && !minha(x) && comGente(x) &&
+    const outras = buscaOutra === null ? [] : unidades.filter((x) => x.id !== origem.id && !minha(x) && comGente(x) &&
       (!qo || x.codigo.includes(qo) || (x.local_nome || "").toLowerCase().includes(qo) || (x.cidade || "").toLowerCase().includes(qo))).slice(0, 20);
-    const cand = dest ? pessoas.filter((x) => x.unidade_id === dest.id && !x.ausente && x.restricao?.fase !== "afastado" && !impede(x, origem) && !trocaDe(x.id))
+    const cand = dest ? pessoas.filter((x) => x.unidade_id === dest.id && !x.ausente && !trocaDe(x.id))
       .sort((a, b) => (b.perfil === "permanente" && b.falta > 0) - (a.perfil === "permanente" && a.falta > 0) || b.falta - a.falta) : [];
     const BotaoDestino = ({ x }) => (
       <button onClick={() => { if (x.gestor_id) { setDSel(x.id); setParSel(null); } }} disabled={!x.gestor_id}
@@ -731,7 +627,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
         <span className="min-w-0">
           <b className="text-[12.5px] tabular-nums">{x.codigo}</b> <span className="text-[12.5px]">{cap(x.local_nome)} · {cap(x.setor)}</span>
           <span className="block text-[11px] text-slate-500">
-            {minha(x) ? `${pessoas.filter((pp) => pp.unidade_id === x.id && !indisponivel(pp)).length} ativos · ${x.req_qtd ? `pede ${x.req_qtd}` : "sem requisição"}`
+            {minha(x) ? `${pessoas.filter((pp) => pp.unidade_id === x.id && !pp.ausente).length} ativos · ${x.req_qtd ? `pede ${x.req_qtd}` : "sem requisição"}`
               : x.gestor_id ? `${x.cidade || ""} · Gestor MMG Responsável: ${x.gestor_nome}` : `${x.cidade || ""} · sem Gestor MMG Responsável; precisa ser assumida antes`}
           </span>
         </span>
@@ -756,7 +652,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
               </div>
             );
           })}
-          {dests.length === 0 && <p className="text-[12px] text-slate-500 border border-dashed border-slate-300 rounded-xl p-3 text-center">Nenhuma unidade sua serve de destino com este filtro.{p.restricao?.fase === "fora_da_mae" ? " Pela regra 9, " + cap(primeiroNome(p.nome)) + " só pode ir para fora da unidade-mãe." : ""}</p>}
+          {dests.length === 0 && <p className="text-[12px] text-slate-500 border border-dashed border-slate-300 rounded-xl p-3 text-center">Nenhuma unidade sua serve de destino com este filtro.</p>}
 
           {buscaOutra === null ? (
             <button onClick={() => setBuscaOutra("")} className="border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold">Buscar outra unidade</button>
@@ -858,9 +754,6 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
     <div className="space-y-3">
       {topo}
       {progresso}
-      {painelGestores}
-      {painelConv}
-      {painelAf}
       {caixaConfirmar}
       {confirmaPequeno}
       <div className="grid gap-3 items-start grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[290px_minmax(0,1fr)_350px]">
@@ -922,7 +815,7 @@ function Incluir({ token, pedir, unidade, ocupado, aoIncluir, aoVoltar }) {
           <span className="text-[12.5px] min-w-0">
             <b>{cap(r.nome) || "Sem cadastro"}</b> <span className="text-slate-400 tabular-nums">{r.codigo}</span>
             <span className="block text-[11px] text-slate-500">
-              {r.restricao_desde ? "Afastado por recusas · só entra fora da unidade-mãe · " : ""}{r.provisorio ? "Provisório · ainda não veio no Ponto" : r.ultimo_dia ? `Último dia apurado ${dataBR(r.ultimo_dia)}${r.ultima_unidade ? ` na ${r.ultima_unidade}` : ""}` : "Sem dia apurado"}
+              {r.provisorio ? "Provisório · ainda não veio no Ponto" : r.ultimo_dia ? `Último dia apurado ${dataBR(r.ultimo_dia)}${r.ultima_unidade ? ` na ${r.ultima_unidade}` : ""}` : "Sem dia apurado"}
             </span>
           </span>
           <span className="text-[12px] font-semibold text-teal-700">Incluir</span>
@@ -939,177 +832,6 @@ function Incluir({ token, pedir, unidade, ocupado, aoIncluir, aoVoltar }) {
       )}
       <button onClick={aoVoltar} className="border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px] text-slate-600">Voltar</button>
     </div>
-  );
-}
-
-/* ------------------------------------------------------------------
- * 14/10/2026 — PRÉVIA POR GESTOR
- * SituacaoGestores: uma linha por Gestor MMG Responsável, para o
- * administrador saber quem já terminou e cobrar quem passou do prazo.
- * MeusConvocados: os pedidos de aceite que o gestor mandou, com o link
- * de cada pessoa para copiar ou abrir no WhatsApp.
- * ---------------------------------------------------------------- */
-const iniciais = (s) => String(s || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((x) => x[0]).join("").toUpperCase();
-
-function estadoGestor(g) {
-  if (g.em_dia) return { txt: "Prévia em dia", cls: "bg-emerald-50 text-emerald-700 border-emerald-200" };
-  if (g.desatualizada) return { txt: "Mudou depois da prévia · reenviar", cls: "bg-amber-50 text-amber-800 border-amber-200" };
-  if (g.ultima) return { txt: "Unidades pendentes", cls: "bg-amber-50 text-amber-800 border-amber-200" };
-  if (g.atrasado) return { txt: "Atrasado · não enviou", cls: "bg-rose-50 text-rose-700 border-rose-200" };
-  return { txt: "Ainda não enviou", cls: "bg-slate-50 text-slate-600 border-slate-200" };
-}
-
-function SituacaoGestores({ gestores, euId, aberto }) {
-  if (!gestores.length) return null;
-  const emDia = gestores.filter((g) => g.em_dia).length;
-  const atrasados = gestores.filter((g) => g.atrasado).length;
-  const prazo = gestores[0]?.prazo;
-  return (
-    <details open={aberto} className="bg-white border border-slate-200 rounded-2xl group">
-      <summary className="cursor-pointer list-none px-4 py-3 flex flex-wrap items-center justify-between gap-2">
-        <span className="flex items-center gap-3 min-w-0">
-          <span className="text-[13.5px] font-semibold">Situação dos gestores</span>
-          <span className="text-[11.5px] text-slate-500">
-            <b className={emDia === gestores.length ? "text-emerald-700" : "text-slate-700"}>{emDia} de {gestores.length}</b> com prévia em dia
-            {prazo && ` · prazo da prévia ${diaMes(prazo)}`}
-          </span>
-          {atrasados > 0 && <span className="text-[10.5px] font-semibold rounded-full px-2 py-0.5 bg-rose-600 text-white">{atrasados} atrasado{atrasados > 1 ? "s" : ""}</span>}
-        </span>
-        <span className="text-[11.5px] text-slate-400 group-open:rotate-180 transition-transform">▾</span>
-      </summary>
-      <div className="px-4 pb-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
-        {gestores.map((g) => {
-          const st = estadoGestor(g);
-          const pct = g.unidades ? Math.round((g.resolvidas / g.unidades) * 100) : 0;
-          return (
-            <div key={g.id} className={`border rounded-xl p-3 ${g.atrasado ? "border-rose-300 bg-rose-50/40" : "border-slate-200"} ${g.id === euId ? "ring-1 ring-teal-500" : ""}`}>
-              <div className="flex items-start gap-2.5">
-                <span className="w-8 h-8 rounded-full bg-slate-900 text-white text-[11px] font-semibold flex items-center justify-center shrink-0">{iniciais(g.nome)}</span>
-                <div className="min-w-0 flex-1">
-                  <p className="text-[13px] font-semibold truncate">{cap(g.nome)}{g.id === euId && <span className="text-teal-700 font-normal"> · você</span>}</p>
-                  <span className={`inline-block mt-0.5 text-[10.5px] font-semibold rounded-md border px-2 py-0.5 ${st.cls}`}>{st.txt}</span>
-                </div>
-              </div>
-              <div className="mt-2.5">
-                <div className="flex justify-between text-[11px] text-slate-500 mb-1">
-                  <span>{g.resolvidas} de {g.unidades} unidades resolvidas</span>
-                  <span>{g.ultima ? `prévia ${horaBR(g.ultima)}` : "sem prévia"}</span>
-                </div>
-                <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden">
-                  <i className={`block h-full ${pct === 100 ? "bg-emerald-500" : "bg-amber-500"}`} style={{ width: `${pct}%` }} />
-                </div>
-              </div>
-              {g.convocados > 0 && (
-                <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-2 text-[11px]">
-                  <span className="text-slate-500">{g.convocados} convocados:</span>
-                  <span className="text-emerald-700">{g.aceitas} aceitaram</span>
-                  {g.recusadas > 0 && <span className="text-rose-700">{g.recusadas} recusaram</span>}
-                  {g.vistas > 0 && <span className="text-amber-700">{g.vistas} viram</span>}
-                  {g.sem_resposta > 0 && <span className="text-slate-500">{g.sem_resposta} sem abrir</span>}
-                </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
-    </details>
-  );
-}
-
-const CONV_FILTRO = [
-  ["pendentes", "Faltam responder", (c) => c.status === "enviada" || c.status === "vista"],
-  ["aceita", "Aceitaram", (c) => c.status === "aceita"],
-  ["recusada", "Recusaram", (c) => c.status === "recusada"],
-  ["todos", "Todos", () => true],
-];
-const CONV_SELO = {
-  enviada:  { txt: "Não abriu",          cls: "bg-slate-100 text-slate-600" },
-  vista:    { txt: "Viu, sem responder", cls: "bg-amber-50 text-amber-800" },
-  aceita:   { txt: "Aceitou",            cls: "bg-emerald-50 text-emerald-700" },
-  recusada: { txt: "Recusou",            cls: "bg-rose-50 text-rose-700" },
-};
-
-function MeusConvocados({ convocados, admin }) {
-  const [filtro, setFiltro] = useState("pendentes");
-  const [copiado, setCopiado] = useState("");
-  const [todos, setTodos] = useState(false);
-  if (!convocados.length) return null;
-  const url = (c) => `${window.location.origin}/?c=${c.token}`;
-  const mensagem = (c) =>
-    `Olá, ${cap(primeiroNome(c.nome)) || "colaborador"}! Você está na escala de rodízio do Sindicato: ` +
-    `${c.destino_codigo} · ${cap(c.destino_nome)}${c.destino_setor ? ` (${cap(c.destino_setor)})` : ""}, ` +
-    `de ${diaMes(c.data_inicio)} a ${diaMes(c.data_fim)}. Confirme ou recuse por este link: ${url(c)}`;
-  async function copiar(c) {
-    try { await navigator.clipboard.writeText(mensagem(c)); setCopiado(c.id); setTimeout(() => setCopiado(""), 1800); }
-    catch { window.prompt("Copie a mensagem:", mensagem(c)); }
-  }
-  const conta = (f) => convocados.filter(f).length;
-  const atual = CONV_FILTRO.find(([k]) => k === filtro) || CONV_FILTRO[0];
-  const lista = convocados.filter(atual[2]);
-  const vis = todos ? lista : lista.slice(0, 8);
-  const pend = conta(CONV_FILTRO[0][2]);
-
-  return (
-    <section className="bg-white border border-slate-200 rounded-2xl">
-      <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
-        <div>
-          <p className="text-[13.5px] font-semibold">{admin ? "Convocados pelos gestores" : "Meus convocados"}</p>
-          <p className="text-[11.5px] text-slate-500">
-            {pend ? <><b className="text-slate-700">{pend}</b> ainda não responderam · mande a mensagem pelo WhatsApp</> : "Todos responderam"}
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-1.5">
-          {CONV_FILTRO.map(([k, rot, f]) => (
-            <Chip key={k} ativo={filtro === k} n={conta(f)} onClick={() => { setFiltro(k); setTodos(false); }}
-              tom={k === "pendentes" ? "amber" : "slate"}>{rot}</Chip>
-          ))}
-        </div>
-      </div>
-      <div className="divide-y divide-slate-100">
-        {vis.map((c) => {
-          const sel = CONV_SELO[c.status] || CONV_SELO.enviada;
-          return (
-            <div key={c.id} className="px-4 py-2.5 grid gap-x-4 gap-y-1.5 items-center grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_9.5rem_15rem]">
-              <span className="min-w-0">
-                <span className="text-[13px] font-semibold">{cap(c.nome) || "Sem nome"}</span>{" "}
-                <span className="text-[11.5px] text-slate-400 tabular-nums">{c.codigo}</span>
-                {admin && c.gestor_nome && <span className="block text-[11px] text-slate-500">por {cap(c.gestor_nome)}</span>}
-              </span>
-              <span className="min-w-0 text-[12px] text-slate-600">
-                <b className="tabular-nums text-slate-800">{c.destino_codigo}</b> {cap(c.destino_nome)}{c.destino_setor ? ` · ${cap(c.destino_setor)}` : ""}
-                <span className="block text-[11px] text-slate-500">{diaMes(c.data_inicio)} a {diaMes(c.data_fim)}</span>
-              </span>
-              <span className="flex flex-col items-start md:items-end">
-                <span className={`text-[10.5px] font-semibold rounded-md px-2 py-0.5 whitespace-nowrap ${sel.cls}`}>{sel.txt}</span>
-                {c.status === "recusada" && c.motivo && <span className="text-[10.5px] text-slate-500 mt-0.5">{c.motivo}</span>}
-              </span>
-              <span className="flex gap-1.5 md:justify-end">
-                {(c.status === "enviada" || c.status === "vista") ? (
-                  <>
-                    <button onClick={() => copiar(c)}
-                      className="border border-slate-300 rounded-lg px-2.5 py-1 text-[11.5px] font-semibold text-slate-700 hover:border-slate-500 whitespace-nowrap">
-                      {copiado === c.id ? "Copiado ✓" : "Copiar mensagem"}
-                    </button>
-                    <a href={`https://wa.me/?text=${encodeURIComponent(mensagem(c))}`} target="_blank" rel="noreferrer"
-                      className="rounded-lg px-2.5 py-1 text-[11.5px] font-semibold text-white bg-[#1f9d55] hover:bg-[#188a49] whitespace-nowrap">
-                      WhatsApp
-                    </a>
-                  </>
-                ) : (
-                  <span className="text-[11px] text-slate-400 whitespace-nowrap">{c.respondida_em ? `respondeu ${horaBR(c.respondida_em)}` : ""}</span>
-                )}
-              </span>
-            </div>
-          );
-        })}
-        {lista.length === 0 && <p className="px-4 py-5 text-center text-[12.5px] text-slate-400">Ninguém neste filtro.</p>}
-      </div>
-      {lista.length > 8 && (
-        <button onClick={() => setTodos(!todos)} className="w-full border-t border-slate-100 py-2 text-[12px] font-semibold text-teal-700">
-          {todos ? "Mostrar menos" : `Mostrar todos (${lista.length})`}
-        </button>
-      )}
-    </section>
   );
 }
 
@@ -1136,7 +858,6 @@ const RESPOSTAS_FILTRO = [
   ["recusada", "Recusou"],
   ["vista", "Viu, sem responder"],
   ["enviada", "Sem resposta"],
-  ["sem_convocacao", "Prévia não enviada"],
   ["nao_precisa", "Não precisa"],
 ];
 const semNomeDe = (l) => !String(l.nome || "").trim();
@@ -1169,9 +890,7 @@ function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
   const [fResposta, setFResposta] = useState("todas");
   const [fSemNome, setFSemNome] = useState(false);
   const [fBusca, setFBusca] = useState("");
-  /* antes da definitiva, a escala geral é calculada na tela, com as
-     respostas das prévias de cada gestor aparecendo ao vivo */
-  const escala = d.definitiva;
+  const escala = d.definitiva || d.previa;
   const q = d.quinzena;
 
   useEffect(() => {
@@ -1186,18 +905,13 @@ function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
     const out = [];
     for (const p of pessoas) {
       if (p.ausente) continue;
-      const emTroca = trocas.some((x) => x.a_trabalhador_id === p.id || x.b_trabalhador_id === p.id);
-      if (p.restricao?.fase === "afastado" || (p.fora_da_escala && !emTroca)) continue;
       const u0 = uDe(p.unidade_id);
       const base = { trabalhador_id: p.id, codigo: p.codigo, nome: p.nome };
       const t = trocas.find((x) => x.a_trabalhador_id === p.id || x.b_trabalhador_id === p.id);
-      const ehA = t && t.a_trabalhador_id === p.id;
-      const resp = t ? { resposta: (ehA ? t.a_resposta : t.b_resposta) || null, token: (ehA ? t.a_token : t.b_token) || null } : {};
-      const L = (u, ini, fim, tipo) => ini <= fim && out.push({ ...base, ...(tipo === "rodizio" ? resp : {}), unidade_id: u.id, unidade_codigo: u.codigo, unidade_nome: u.local_nome, setor: u.setor, data_inicio: ini, data_fim: fim, tipo });
+      const L = (u, ini, fim, tipo) => ini <= fim && out.push({ ...base, unidade_id: u.id, unidade_codigo: u.codigo, unidade_nome: u.local_nome, setor: u.setor, data_inicio: ini, data_fim: fim, tipo });
       if (!t) { L(u0, q.inicio, q.fim, "permanece"); continue; }
       const di = String(t.data_inicio).slice(0, 10), df = String(t.data_fim).slice(0, 10);
       const destino = uDe(t.a_trabalhador_id === p.id ? t.b_unidade_id : t.a_unidade_id);
-      if (p.restricao?.fase === "fora_da_mae") { L(destino, di, df, "rodizio"); continue; }
       L(u0, q.inicio, somaDias(di, -1), "base");
       L(destino, di, df, "rodizio");
       L(u0, somaDias(df, 1), q.fim, "base");
@@ -1212,9 +926,7 @@ function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
   const rotTipo = { permanece: "Permanece", base: "Na unidade de origem", rodizio: "Rodízio" };
   const titulo = d.definitiva
     ? `Escala ${String(d.definitiva.numero).padStart(3, "0")}/${d.definitiva.ano} · publicada`
-    : (d.gestores || []).some((g) => g.ultima)
-      ? `Prévias de ${(d.gestores || []).filter((g) => g.ultima).length} de ${(d.gestores || []).length} gestores · respostas ao vivo`
-      : "Rascunho · como vai sair hoje";
+    : d.previa ? `Prévia enviada em ${horaBR(d.previa.previa_em)}` : "Rascunho · como vai sair hoje";
 
   /* Cada filtro como função; para contar um botão, aplica todos os outros. */
   const termo = semAcento(fBusca.trim());
@@ -1368,7 +1080,7 @@ function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
                   <td className="px-3 py-2 text-slate-600">
                     {l.tipo !== "rodizio" ? <span className="text-slate-400">Não precisa</span> : (
                       <span className="flex gap-2 items-center flex-wrap">
-                        {l.resposta ? (RESPOSTA[l.resposta] || l.resposta) : <span className="text-slate-400">{d.definitiva ? "—" : "Prévia não enviada"}</span>}
+                        {l.resposta ? (RESPOSTA[l.resposta] || l.resposta) : "—"}
                         {l.token && (
                           <button onClick={() => copiar(l.token)} className="text-[11.5px] text-teal-700 font-semibold">
                             {copiado === l.token ? "Link copiado" : "Copiar link"}
