@@ -204,7 +204,10 @@ async function gestorDe(unidadeId) {
   return g || null;
 }
 
-/* Só o Gestor MMG Responsável mexe na unidade. */
+/* Só o Gestor MMG Responsável mexe na unidade. 14/10/2026: o administrador
+   também pode, para resolver o que um gestor deixou parado; a unidade
+   precisa ter gestor, e o nome de quem agiu fica gravado em cada ação
+   (atualizado_por, montada_por, evento da prévia). */
 async function exigirGestor(req, res, unidadeId) {
   if (!req.usuario.id) {
     res.status(403).json({ error: 'Entre com o seu acesso pessoal. O login de administração não pode ser Gestor MMG Responsável.' });
@@ -215,8 +218,8 @@ async function exigirGestor(req, res, unidadeId) {
     res.status(409).json({ error: 'Esta unidade ainda não tem Gestor MMG Responsável. Assuma a unidade antes.' });
     return false;
   }
-  if (g.usuario_id !== req.usuario.id) {
-    res.status(403).json({ error: `Só ${g.nome}, Gestor MMG Responsável por esta unidade, pode mexer nela.` });
+  if (g.usuario_id !== req.usuario.id && req.usuario.perfil !== 'admin') {
+    res.status(403).json({ error: `Só ${g.nome}, Gestor MMG Responsável por esta unidade, ou um administrador pode mexer nela.` });
     return false;
   }
   return true;
@@ -921,8 +924,8 @@ router.post('/trocas/:id/desfazer', podeEscrever, async (req, res, next) => {
 
     const gA = await gestorDe(t.a_unidade_id), gB = await gestorDe(t.b_unidade_id);
     const ids = [gA && gA.usuario_id, gB && gB.usuario_id];
-    if (!req.usuario.id || !ids.includes(req.usuario.id)) {
-      return res.status(403).json({ error: 'Só o Gestor MMG Responsável por uma das duas unidades pode desfazer esta troca.' });
+    if (!req.usuario.id || (!ids.includes(req.usuario.id) && req.usuario.perfil !== 'admin')) {
+      return res.status(403).json({ error: 'Só o Gestor MMG Responsável por uma das duas unidades, ou um administrador, pode desfazer esta troca.' });
     }
     const motivo = String((req.body || {}).motivo || '').trim();
     if (t.estado !== 'montada' && motivo.length < 5) {
@@ -1177,11 +1180,21 @@ router.post('/quinzenas/:qid/previa', podeEscrever, async (req, res, next) => {
     await aplicarAfastamentos(q.sindicato_id);
     q = await quinzenaPorId(q.id);
 
-    const minhas = await unidadesDoGestor(req.usuario.id);
-    const eu = (await situacaoGestores(q, p)).find((g) => g.id === req.usuario.id);
-    if (!eu || !minhas.size) {
-      return res.status(409).json({ error: 'Você não é Gestor MMG Responsável por nenhuma unidade desta quinzena.' });
+    /* o administrador pode enviar a prévia em nome de um gestor (fica registrado) */
+    const emNomeDe = String((req.body || {}).em_nome_de || '');
+    if (emNomeDe && emNomeDe !== req.usuario.id && req.usuario.perfil !== 'admin') {
+      return res.status(403).json({ error: 'Só o administrador envia a prévia em nome de outro gestor.' });
     }
+    const gid = emNomeDe || req.usuario.id;
+    const minhas = await unidadesDoGestor(gid);
+    const eu = (await situacaoGestores(q, p)).find((g) => g.id === gid);
+    if (!eu || !minhas.size) {
+      return res.status(409).json({ error: emNomeDe && emNomeDe !== req.usuario.id
+        ? 'Este gestor não tem unidade nesta quinzena.'
+        : 'Você não é Gestor MMG Responsável por nenhuma unidade desta quinzena.' });
+    }
+    const nomeGestor = emNomeDe && emNomeDe !== req.usuario.id ? eu.nome : quem(req);
+    const porAdmin = nomeGestor !== quem(req);
     const pend = (await pendencias(q, p)).filter((r) => minhas.has(r.id));
     if (pend.length) {
       return res.status(409).json({
@@ -1201,7 +1214,7 @@ router.post('/quinzenas/:qid/previa', podeEscrever, async (req, res, next) => {
       values ($1, extract(year from $2::date)::int, $2::date, $3::date, $6, $4, 'quinzena', $5, $7)
       returning id
     `, [q.sindicato_id, soData(q.inicio), soData(q.fim), quem(req), q.id,
-        `Prévia de ${quem(req)}`, req.usuario.id]);
+        `Prévia de ${nomeGestor}`, gid]);
 
     const linhas = (await montarLinhas(cliente, q, p, ['montada', 'enviada', 'aceita']))
       .filter((l) => minhas.has(l.unidade_base));
@@ -1216,7 +1229,7 @@ router.post('/quinzenas/:qid/previa', podeEscrever, async (req, res, next) => {
 
     await cliente.query(`
       update escalas set status = 'previa', previa_em = now(), previa_por = $2, previa_hash = hash_da_escala($1)
-       where id = $1`, [e.id, quem(req)]);
+       where id = $1`, [e.id, porAdmin ? `${quem(req)} (administrador, em nome de ${nomeGestor})` : quem(req)]);
     await cliente.query(
       "update rodizio_trocas set estado = 'enviada' where quinzena_id = $1 and estado = 'montada' and id = any($2::uuid[])",
       [q.id, minhasTrocas]);
@@ -1226,12 +1239,12 @@ router.post('/quinzenas/:qid/previa', podeEscrever, async (req, res, next) => {
     const { rows: [c] } = await cliente.query('select gerar_convocacoes($1, $2) as n', [e.id, quem(req)]);
     await cliente.query(
       "insert into escala_eventos (escala_id, tipo, descricao, quem) values ($1, 'previa', $2, $3)",
-      [e.id, `Prévia de ${quem(req)} (${minhas.size} unidades) com ${linhas.length} linhas; ${c.n} pedidos de aceite novos`, quem(req)]);
+      [e.id, `Prévia de ${nomeGestor}${porAdmin ? ` enviada pelo administrador ${quem(req)}` : ''} (${minhas.size} unidades) com ${linhas.length} linhas; ${c.n} pedidos de aceite novos`, quem(req)]);
     await cliente.query('commit');
 
     await registrarEvento({
-      tipo: 'rodizio_previa', titulo: eu.ultima ? 'Prévia reenviada pelo gestor' : 'Prévia enviada pelo gestor',
-      descricao: `${quem(req)} · ${soData(q.inicio)} a ${soData(q.fim)} · ${linhas.length} linhas · ${c.n} convocações novas`,
+      tipo: 'rodizio_previa', titulo: porAdmin ? `Prévia de ${nomeGestor} enviada pelo administrador` : (eu.ultima ? 'Prévia reenviada pelo gestor' : 'Prévia enviada pelo gestor'),
+      descricao: `${porAdmin ? `${nomeGestor} (por ${quem(req)})` : quem(req)} · ${soData(q.inicio)} a ${soData(q.fim)} · ${linhas.length} linhas · ${c.n} convocações novas`,
       ator: quem(req), atorUsuarioId: req.usuario.id || null, entidadeTipo: 'escala', entidadeId: e.id,
       ip: ipReq(req), navegador: navegadorReq(req),
     });

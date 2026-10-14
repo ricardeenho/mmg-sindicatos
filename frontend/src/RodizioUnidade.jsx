@@ -50,6 +50,9 @@ function Selo({ status }) {
   return <span className={`text-[10.5px] font-semibold rounded-md px-2 py-0.5 whitespace-nowrap ${s.cls}`}>{s.txt}</span>;
 }
 
+/* unidade que ainda pede ação do gestor: não foi finalizada nem mantida */
+const precisaAtencao = (u) => (u.gestor_id && !["concluida", "mantida"].includes(u.status) ? 1 : 0);
+
 function urgencia(u, pessoas) {
   const ps = pessoas.filter((p) => p.unidade_id === u.id && !indisponivel(p) && p.perfil === "permanente");
   const max = Math.max(0, ...ps.map((p) => p.falta));
@@ -118,6 +121,8 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   const [motivoManter, setMotivoManter] = useState("");
   const [motivoPub, setMotivoPub] = useState("");
   const [gerandoPub, setGerandoPub] = useState(false);
+  const [verId, setVerId] = useState(null);      /* gestor cujas unidades estou vendo (null = eu) */
+  const [soAtencao, setSoAtencao] = useState(false);
   const [confirmar, setConfirmar] = useState(null);
   const [encerrando, setEncerrando] = useState(null);
   const [motivoEnc, setMotivoEnc] = useState("");
@@ -155,7 +160,13 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   const trocasVivas = useMemo(() => (d?.trocas || []).filter((t) => t.estado !== "recusada"), [d]);
   const uDe = (id) => unidades.find((u) => u.id === id);
   const pDe = (id) => pessoas.find((p) => p.id === id);
-  const minha = (u) => !!u && !!eu.id && u.gestor_id === eu.id;
+  /* 14/10/2026 — clicar num gestor mostra as unidades dele. O administrador,
+     além de ver, age em nome dele (a API registra quem fez). */
+  const admin = eu.perfil === "admin";
+  const alvoId = verId || eu.id;
+  const gAlvo = (d?.gestores || []).find((g) => g.id === alvoId);
+  const noAlvo = (u) => !!u && !!alvoId && u.gestor_id === alvoId;
+  const minha = (u) => !!u && !!eu.id && u.gestor_id === (admin ? alvoId : eu.id);
   const trocaDe = (id) => trocasVivas.find((t) => t.a_trabalhador_id === id || t.b_trabalhador_id === id);
   const recusadaDe = (id) => (d?.trocas || []).find((t) => t.estado === "recusada" && (t.a_trabalhador_id === id || t.b_trabalhador_id === id));
   const editavel = (u) => podeEditar && minha(u) && q && q.etapa !== "publicada";
@@ -239,8 +250,10 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
 
   /* 14/10/2026 — prévia por gestor; definitiva só do administrador */
   const gestores = d.gestores || [];
-  const meu = gestores.find((g) => g.id === eu.id);
   const souAdmin = eu.perfil === "admin";
+  const meu = gestores.find((g) => g.id === (souAdmin ? alvoId : eu.id));
+  const agindoPor = souAdmin && verId && verId !== eu.id ? gestores.find((g) => g.id === verId) : null;
+  const nomeAlvo = primeiroNome(cap(agindoPor?.nome || ""));
   const emDia = gestores.filter((g) => g.em_dia).length;
   const prontoPublicar = q.etapa === "ajustes" && faltam === 0 && gestores.length > 0 && emDia === gestores.length;
 
@@ -271,13 +284,15 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
           <div className="flex flex-col items-end gap-0.5">
             <button disabled={!podeEditar || ocupado || minhasFaltam > 0 || meu.em_dia} onClick={() => setConfirmar("previa")}
               className={`rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-40 ${meu.em_dia ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-600 text-white"}`}>
-              {meu.em_dia ? "Prévia enviada ✓" : meu.ultima ? "Reenviar minha prévia" : "Enviar minha prévia"}
+              {meu.em_dia ? "Prévia enviada ✓"
+                : agindoPor ? `${meu.ultima ? "Reenviar" : "Enviar"} prévia em nome de ${nomeAlvo}`
+                : meu.ultima ? "Reenviar minha prévia" : "Enviar minha prévia"}
             </button>
             <span className="text-[11.5px] text-slate-500">
-              {minhasFaltam > 0 ? `Faltam ${minhasFaltam} das suas ${meu.unidades} unidades`
+              {minhasFaltam > 0 ? `Faltam ${minhasFaltam} ${agindoPor ? `das ${meu.unidades} de ${nomeAlvo}` : `das suas ${meu.unidades} unidades`}`
                 : meu.em_dia ? `Enviada em ${horaBR(meu.ultima)} · ${meu.convocados} convocados`
-                : meu.desatualizada ? "Suas unidades mudaram depois da prévia"
-                : `Suas ${meu.unidades} unidades estão resolvidas`}
+                : meu.desatualizada ? (agindoPor ? `As unidades de ${nomeAlvo} mudaram depois da prévia` : "Suas unidades mudaram depois da prévia")
+                : `${agindoPor ? `As ${meu.unidades} unidades de ${nomeAlvo}` : `Suas ${meu.unidades} unidades`} estão resolvidas`}
             </span>
           </div>
         )}
@@ -346,7 +361,24 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
     </div>
   );
 
-  const painelGestores = q.etapa !== "publicada" && <SituacaoGestores gestores={gestores} euId={eu.id} aberto={souAdmin} />;
+  const escolherGestor = (g) => {
+    const proprio = g.id === eu.id;
+    setVerId(proprio ? null : g.id); setFiltro("minhas"); setSoAtencao(g.unidades - g.resolvidas > 0);
+    setVista("unidades"); abrirUnidade(null); setCidade("Todas");
+    setTimeout(() => document.getElementById("rod-unidades")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
+  };
+  const painelGestores = q.etapa !== "publicada" && <SituacaoGestores gestores={gestores} euId={eu.id} aberto={souAdmin} verId={alvoId} aoEscolher={escolherGestor} />;
+  const faixaAgindo = q.etapa !== "publicada" && verId && verId !== eu.id && (
+    <div className="bg-amber-50 border border-amber-300 rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+      <p className="text-[12.5px] text-amber-900 leading-relaxed max-w-3xl">
+        <b>Você está vendo as unidades de {cap(gAlvo?.nome || "")}.</b>{" "}
+        {souAdmin ? "Como administrador, você pode resolvê-las e enviar a prévia em nome dele; cada ação fica registrada com o seu nome."
+          : "Você só consulta: quem resolve e envia é o próprio gestor."}
+      </p>
+      <button onClick={() => { setVerId(null); setSoAtencao(false); abrirUnidade(null); }}
+        className="border border-amber-400 bg-white text-amber-900 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold">Voltar às minhas unidades</button>
+    </div>
+  );
   const painelConv = <MeusConvocados convocados={d.convocados || []} admin={souAdmin} />;
 
   /* Regra 9: quem está afastado por recusas. O Gestor vê; só o admin encerra. */
@@ -397,10 +429,12 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
 
   const caixaConfirmar = typeof confirmar === "string" && (
     <div className="bg-white border-2 border-teal-500 rounded-2xl p-4 flex flex-col gap-2">
-      <b className="text-[14px]">{confirmar === "previa" ? (meu?.ultima ? "Reenviar a prévia das suas unidades?" : "Enviar a prévia das suas unidades?") : "Publicar a escala definitiva?"}</b>
+      <b className="text-[14px]">{confirmar === "previa"
+        ? (agindoPor ? `${meu?.ultima ? "Reenviar" : "Enviar"} a prévia das unidades de ${nomeAlvo}, em nome dele?` : meu?.ultima ? "Reenviar a prévia das suas unidades?" : "Enviar a prévia das suas unidades?")
+        : "Publicar a escala definitiva?"}</b>
       <p className="text-[12.5px] text-slate-600 leading-relaxed max-w-2xl">
         {confirmar === "previa"
-          ? "A prévia fica registrada com data, hora e o seu nome e não pode mais ser alterada. Só quem muda de unidade, nas suas unidades, recebe o pedido de aceite: os links aparecem em “Meus convocados”, prontos para o WhatsApp. Se algo mudar depois, você reenvia — quem já recebeu o link não recebe outro."
+          ? (agindoPor ? `A prévia sai em nome de ${agindoPor.nome}, e o registro mostra que foi enviada por você, administrador. ` : "") + "A prévia fica registrada com data, hora e o seu nome e não pode mais ser alterada. Só quem muda de unidade, nas suas unidades, recebe o pedido de aceite: os links aparecem em “Meus convocados”, prontos para o WhatsApp. Se algo mudar depois, você reenvia — quem já recebeu o link não recebe outro."
           : "Junta as prévias de todos os gestores numa escala só, com número, hora e autor; ela não pode mais ser alterada, e corrigir depois só por retificação."}
       </p>
       {confirmar === "publicar" && q.aguardando > 0 && (
@@ -419,7 +453,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
       )}
       <div className="flex gap-2">
         <button disabled={ocupado} onClick={async () => {
-          const r = await agir(`/rodizio/quinzenas/${q.id}/${confirmar === "previa" ? "previa" : "publicar"}`, confirmar === "publicar" ? { motivo: motivoPub } : {},
+          const r = await agir(`/rodizio/quinzenas/${q.id}/${confirmar === "previa" ? "previa" : "publicar"}`, confirmar === "publicar" ? { motivo: motivoPub } : (agindoPor ? { em_nome_de: agindoPor.id } : {}),
             (r) => confirmar === "previa" ? `Prévia enviada: ${r.linhas} linhas, ${r.convocacoes} pedidos de aceite novos` : `Escala ${String(r.numero).padStart(3, "0")}/${r.ano} publicada`);
           if (r) { if (confirmar === "publicar") { setVista("escala"); setMotivoPub(""); } setConfirmar(null); }
         }} className="bg-teal-600 text-white rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-40">
@@ -433,7 +467,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   if (vista === "escala") {
     return (
       <div className="space-y-3">
-        {topo}{progresso}{caixaConfirmar}{painelGestores}{painelConv}{painelAf}
+        {topo}{progresso}{caixaConfirmar}{painelGestores}{faixaAgindo}{painelConv}{painelAf}
         <EscalaGeral token={token} pedir={pedir} d={d} pessoas={pessoas} trocas={trocasVivas} uDe={uDe} />
       </div>
     );
@@ -444,21 +478,31 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
    * =============================================================== */
   const t = busca.trim().toLowerCase();
   const lista = unidades.filter((u) =>
-    (filtro === "todas" || (filtro === "minhas" ? minha(u) : !u.gestor_id)) &&
+    (filtro === "todas" || (filtro === "minhas" ? noAlvo(u) && (!soAtencao || precisaAtencao(u)) : !u.gestor_id)) &&
     (cidade === "Todas" || u.cidade === cidade) &&
-    (!t || u.codigo.includes(t) || (u.local_nome || "").toLowerCase().includes(t) || (u.setor || "").toLowerCase().includes(t)));
-  const nMinhas = unidades.filter(minha).length;
+    (!t || u.codigo.includes(t) || (u.local_nome || "").toLowerCase().includes(t) || (u.setor || "").toLowerCase().includes(t)))
+    .sort((a, b) => (filtro === "minhas" ? (precisaAtencao(b) - precisaAtencao(a)) : 0));
+  const nMinhas = unidades.filter(noAlvo).length;
+  const nAtencao = unidades.filter((u) => noAlvo(u) && precisaAtencao(u)).length;
+  const rotuloMinhas = verId && verId !== eu.id ? primeiroNome(cap(gAlvo?.nome || "gestor")) : "Minhas";
 
   const col1 = (
-    <aside className="bg-white border border-slate-200 rounded-2xl flex flex-col min-w-0">
+    <aside id="rod-unidades" className="scroll-mt-4 bg-white border border-slate-200 rounded-2xl flex flex-col min-w-0">
       <div className="p-3 border-b border-slate-100 space-y-2">
         <p className="text-[13.5px] font-semibold">Unidades</p>
         <div className="flex gap-1">
-          {[["minhas", `Minhas ${nMinhas}`], ["semgestor", `Sem gestor ${semGestor}`], ["todas", "Todas"]].map(([k, r]) => (
+          {[["minhas", `${rotuloMinhas} ${nMinhas}`], ["semgestor", `Sem gestor ${semGestor}`], ["todas", "Todas"]].map(([k, r]) => (
             <button key={k} onClick={() => { setFiltro(k); setCidadesAbertas(k !== "minhas"); }}
               className={`flex-1 rounded-lg px-2 py-1.5 text-[11.5px] font-semibold border ${filtro === k ? "bg-slate-900 text-white border-slate-900" : "bg-slate-50 text-slate-500 border-slate-200"}`}>{r}</button>
           ))}
         </div>
+        {filtro === "minhas" && nMinhas > 0 && (
+          <button onClick={() => setSoAtencao((v) => !v)}
+            className={`w-full flex items-center justify-between rounded-lg px-3 py-1.5 text-[12px] border ${soAtencao ? "bg-amber-50 border-amber-300 text-amber-900 font-semibold" : "bg-white border-slate-200 text-slate-600"}`}>
+            <span>{soAtencao ? "Mostrando só as que pedem atenção" : "Mostrar só as que pedem atenção"}</span>
+            <b className={nAtencao ? "text-amber-700" : "text-emerald-700"}>{nAtencao}</b>
+          </button>
+        )}
         <input value={busca} onChange={(e) => setBusca(e.target.value)} placeholder="Número ou nome da unidade"
           className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
         <div className="flex items-center gap-2 flex-wrap">
@@ -487,7 +531,8 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
         {lista.length === 0 && (
           <p className="text-[12.5px] text-slate-500 border border-dashed border-slate-300 rounded-xl p-4 text-center">
             {filtro === "minhas" && nMinhas === 0
-              ? "Você ainda não é Gestor MMG Responsável por nenhuma unidade. Abra a aba \"Sem gestor\" para assumir as suas."
+              ? (verId && verId !== eu.id ? "Este gestor não tem unidade nesta quinzena." : "Você ainda não é Gestor MMG Responsável por nenhuma unidade. Abra a aba \"Sem gestor\" para assumir as suas.")
+              : filtro === "minhas" && soAtencao ? "Nenhuma unidade pede atenção. Tudo resolvido por aqui."
               : "Nenhuma unidade com esse filtro."}
           </p>
         )}
@@ -509,7 +554,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
               </span>
               <span className="block text-[11.5px] mt-0.5">
                 {u.gestor_id
-                  ? <span className="text-slate-500">{minha(u) ? "Você é o Gestor MMG Responsável" : `Gestor MMG Responsável: ${u.gestor_nome}`}</span>
+                  ? <span className="text-slate-500">{u.gestor_id === eu.id ? "Você é o Gestor MMG Responsável" : `Gestor MMG Responsável: ${cap(u.gestor_nome)}`}</span>
                   : <span className="text-amber-700 font-semibold">Sem Gestor MMG Responsável</span>}
               </span>
             </button>
@@ -554,7 +599,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
             <div className="min-w-0">
               <p className="text-[15.5px] font-semibold">{u.codigo} · {cap(u.local_nome)}</p>
               <p className="text-[12px] text-slate-500">
-                {cap(u.setor)} · {u.cidade || "sem cidade"} · {u.gestor_id ? `Gestor MMG Responsável: ${minha(u) ? "você" : u.gestor_nome}` : "sem Gestor MMG Responsável"}
+                {cap(u.setor)} · {u.cidade || "sem cidade"} · {u.gestor_id ? `Gestor MMG Responsável: ${u.gestor_id === eu.id ? "você" : cap(u.gestor_nome)}` : "sem Gestor MMG Responsável"}
               </p>
             </div>
             <div className="flex gap-1.5 flex-wrap">
@@ -712,7 +757,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
           ))}
           {u.gestor_id && (minha(u) || eu.perfil === "admin") && podeEditar && (
             <button onClick={() => setConfirmar({ deixar: u })} className="ml-auto text-[11.5px] text-teal-700 font-semibold">
-              {minha(u) ? "Deixar de ser o Gestor MMG Responsável" : "Retirar o Gestor MMG Responsável"}
+              {u.gestor_id === eu.id ? "Deixar de ser o Gestor MMG Responsável" : "Retirar o Gestor MMG Responsável"}
             </button>
           )}
         </div>
@@ -904,6 +949,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
       {topo}
       {progresso}
       {painelGestores}
+      {faixaAgindo}
       {painelConv}
       {painelAf}
       {caixaConfirmar}
@@ -1004,7 +1050,7 @@ function estadoGestor(g) {
   return { txt: "Ainda não enviou", cls: "bg-slate-50 text-slate-600 border-slate-200" };
 }
 
-function SituacaoGestores({ gestores, euId, aberto }) {
+function SituacaoGestores({ gestores, euId, aberto, verId, aoEscolher }) {
   if (!gestores.length) return null;
   const emDia = gestores.filter((g) => g.em_dia).length;
   const atrasados = gestores.filter((g) => g.atrasado).length;
@@ -1027,7 +1073,9 @@ function SituacaoGestores({ gestores, euId, aberto }) {
           const st = estadoGestor(g);
           const pct = g.unidades ? Math.round((g.resolvidas / g.unidades) * 100) : 0;
           return (
-            <div key={g.id} className={`border rounded-xl p-3 ${g.atrasado ? "border-rose-300 bg-rose-50/40" : "border-slate-200"} ${g.id === euId ? "ring-1 ring-teal-500" : ""}`}>
+            <button type="button" key={g.id} onClick={() => aoEscolher && aoEscolher(g)}
+              aria-label={`Ver as unidades de ${cap(g.nome)}`}
+              className={`text-left border rounded-xl p-3 transition cursor-pointer hover:shadow-sm hover:border-slate-400 ${g.atrasado ? "border-rose-300 bg-rose-50/40" : "border-slate-200 bg-white"} ${g.id === verId ? "ring-2 ring-teal-500 border-teal-500" : g.id === euId ? "ring-1 ring-teal-500" : ""}`}>
               <div className="flex items-start gap-2.5">
                 <span className="w-8 h-8 rounded-full bg-slate-900 text-white text-[11px] font-semibold flex items-center justify-center shrink-0">{iniciais(g.nome)}</span>
                 <div className="min-w-0 flex-1">
@@ -1044,6 +1092,12 @@ function SituacaoGestores({ gestores, euId, aberto }) {
                   <i className={`block h-full ${pct === 100 ? "bg-emerald-500" : "bg-amber-500"}`} style={{ width: `${pct}%` }} />
                 </div>
               </div>
+              <div className="flex items-center justify-between mt-2 text-[11.5px]">
+                {g.unidades - g.resolvidas > 0
+                  ? <b className="text-amber-700">{g.unidades - g.resolvidas} {g.unidades - g.resolvidas === 1 ? "unidade pede" : "unidades pedem"} atenção</b>
+                  : <span className="text-emerald-700 font-semibold">Todas as unidades resolvidas</span>}
+                <span className="text-teal-700 font-semibold">Ver unidades ›</span>
+              </div>
               {g.convocados > 0 && (
                 <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-2 text-[11px]">
                   <span className="text-slate-500">{g.convocados} convocados:</span>
@@ -1053,7 +1107,7 @@ function SituacaoGestores({ gestores, euId, aberto }) {
                   {g.sem_resposta > 0 && <span className="text-slate-500">{g.sem_resposta} sem abrir</span>}
                 </div>
               )}
-            </div>
+            </button>
           );
         })}
       </div>
