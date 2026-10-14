@@ -31,6 +31,30 @@ async function achar(token) {
   return c;
 }
 
+
+/* Regra 9: quantas recusas que CONTAM o trabalhador desta convocacao ja tem.
+   Devolve null quando a regra esta desligada ou a estrutura nao existe. */
+async function avisoDeRecusas(token) {
+  try {
+    const { rows: [cfg] } = await consulta(
+      'select ativa, limite_recusas, janela_meses from rodizio_regra_recusa where id');
+    if (!cfg || !cfg.ativa) return null;
+    const { rows: [r] } = await consulta(`
+      select count(*)::int as n
+        from v_recusas_rodizio v
+       where v.trabalhador_id = (
+         select i.trabalhador_id
+           from convocacoes c join escala_itens i on i.id = c.escala_item_id
+          where c.token = $1)`, [token]);
+    return {
+      ativa: true,
+      limite: cfg.limite_recusas,
+      janela_meses: cfg.janela_meses,
+      contadas: (r && r.n) || 0,
+    };
+  } catch (_) { return null; }
+}
+
 /* ==================================================================
  * PARTE PUBLICA — o trabalhador, sem login, pelo link do WhatsApp
  * ================================================================ */
@@ -49,8 +73,18 @@ router.get('/publico/:token', async (req, res, next) => {
       c.status = 'vista';
     }
 
-    const { rows: motivos } = await consulta(
-      'select codigo, nome from motivos_recusa where ativa order by ordem, nome');
+    /* Regra 9 (afastamento por recusas): se a estrutura nova ainda nao existe
+       no banco, tudo abaixo cai no comportamento antigo, sem quebrar a pagina. */
+    let motivos;
+    try {
+      ({ rows: motivos } = await consulta(
+        `select codigo, nome, conta_como_recusa as conta
+           from motivos_recusa where ativa order by ordem, nome`));
+    } catch (_) {
+      ({ rows: motivos } = await consulta(
+        'select codigo, nome from motivos_recusa where ativa order by ordem, nome'));
+    }
+    const aviso = await avisoDeRecusas(req.params.token);
 
     res.json({
       nome: c.trabalhador_nome,
@@ -72,6 +106,7 @@ router.get('/publico/:token', async (req, res, next) => {
       respondida_em: c.respondida_em,
       motivo_nome: c.motivo_nome,
       motivos,
+      aviso_recusas: aviso,
     });
   } catch (e) { next(e); }
 });
@@ -131,7 +166,20 @@ router.post('/publico/:token/recusar', async (req, res, next) => {
         status: atual.status,
       });
     }
-    res.json({ status: 'recusada' });
+    /* devolve se esta recusa conta e em quantas o trabalhador esta */
+    let conta = true;
+    try {
+      const { rows: [m] } = await consulta(
+        'select conta_como_recusa from motivos_recusa where codigo = $1', [motivo]);
+      if (m) conta = m.conta_como_recusa !== false;
+    } catch (_) { /* coluna ainda nao existe */ }
+    const aviso = await avisoDeRecusas(req.params.token);
+    res.json({
+      status: 'recusada',
+      conta,
+      recusas_contadas: aviso ? aviso.contadas : null,
+      limite: aviso ? aviso.limite : null,
+    });
   } catch (e) { next(e); }
 });
 
@@ -189,7 +237,13 @@ router.get('/resumo', autenticar, async (req, res, next) => {
        where c.status = 'recusada'
        group by mr.nome order by vezes desc
     `);
-    res.json({ ...r, motivos });
+    let regra = null;
+    try {
+      const { rows: [g] } = await consulta(
+        'select ativa, limite_recusas as limite, janela_meses from rodizio_regra_recusa where id');
+      if (g) regra = g;
+    } catch (_) { /* regra 9 ainda nao instalada */ }
+    res.json({ ...r, motivos, regra });
   } catch (e) { next(e); }
 });
 

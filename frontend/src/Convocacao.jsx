@@ -33,6 +33,7 @@ export default function Convocacao({ token }) {
   const [motivo, setMotivo] = useState("");
   const [texto, setTexto] = useState("");
   const [enviando, setEnviando] = useState(false);
+  const [resultado, setResultado] = useState(null); // { conta, recusas_contadas, limite } depois de recusar
 
   useEffect(() => {
     fetch(`${API}/convocacoes/publico/${token}`)
@@ -55,6 +56,9 @@ export default function Convocacao({ token }) {
       });
       const d = await r.json();
       if (!r.ok) throw new Error(d.error || "Não consegui registrar");
+      if (d.status === "recusada") {
+        setResultado({ conta: d.conta, contadas: d.recusas_contadas, limite: d.limite });
+      }
       setC({ ...c, status: d.status, respondida_em: new Date().toISOString() });
       setRecusando(false);
     } catch (e) { setErro(e.message); } finally { setEnviando(false); }
@@ -102,7 +106,13 @@ export default function Convocacao({ token }) {
           ) : (
             <p className="mt-3 text-[13.5px] text-slate-600 leading-relaxed">
               O sindicato foi avisado{c.motivo_nome ? ` — ${c.motivo_nome.toLowerCase()}` : ""}.
-              Não há nenhum problema: você continua na fila normalmente e será chamado de novo.
+              {c.aviso_recusas?.ativa
+                ? resultado && resultado.conta === false
+                  ? " Esse motivo não conta como recusa: você continua na fila normalmente."
+                  : resultado && resultado.contadas != null
+                    ? ` Essa recusa foi contada: você está com ${resultado.contadas} de ${resultado.limite}. Ao chegar em ${resultado.limite} recusas em ${c.aviso_recusas.janela_meses} meses, você sai da próxima escala e só volta a ser escalado fora da sua unidade, até cumprir um rodízio.`
+                    : " Lembre-se: três recusas em 12 meses afastam você da próxima escala."
+                : " Não há nenhum problema: você continua na fila normalmente e será chamado de novo."}
             </p>
           )}
 
@@ -167,10 +177,29 @@ export default function Convocacao({ token }) {
               className="w-full bg-white border border-slate-300 text-slate-700 rounded-xl py-4 text-[15px] font-medium">
               Não vou poder ir
             </button>
-            <p className="text-[12px] text-slate-500 text-center leading-relaxed px-2">
-              Você pode recusar sem nenhum problema. Não há punição, não perde a vez
-              e continua na fila para as próximas.
-            </p>
+            {c.aviso_recusas?.ativa ? (
+              <div className="rounded-xl bg-amber-50 border border-amber-200 px-4 py-3 text-[12px] text-amber-900 leading-relaxed">
+                <p className="font-semibold mb-1">Antes de recusar, saiba como funciona</p>
+                <p>
+                  Você pode recusar, mas <b>{c.aviso_recusas.limite} recusas em {c.aviso_recusas.janela_meses} meses</b> afastam
+                  você da próxima escala. Depois disso, você só é escalado fora da sua unidade, até cumprir um rodízio.
+                </p>
+                <p className="mt-1">
+                  Recusa por <b>saúde</b> ou por <b>falta de transporte do sindicato</b> não conta.
+                  Abrir o link e não responder até o primeiro dia do período conta como recusa.
+                </p>
+                {c.aviso_recusas.contadas > 0 && (
+                  <p className="mt-1 font-medium">
+                    Hoje você tem {c.aviso_recusas.contadas} de {c.aviso_recusas.limite} recusas.
+                  </p>
+                )}
+              </div>
+            ) : (
+              <p className="text-[12px] text-slate-500 text-center leading-relaxed px-2">
+                Você pode recusar sem nenhum problema. Não há punição, não perde a vez
+                e continua na fila para as próximas.
+              </p>
+            )}
           </>
         ) : (
           <div className="bg-white rounded-2xl p-5">
@@ -187,6 +216,12 @@ export default function Convocacao({ token }) {
                       ? "bg-slate-900 text-white border-slate-900"
                       : "bg-white border-slate-200 text-slate-700"}`}>
                   {m.nome}
+                  {c.aviso_recusas?.ativa && m.conta === false && (
+                    <span className={`block text-[11px] mt-0.5 ${
+                      motivo === m.codigo ? "text-slate-300" : "text-emerald-600"}`}>
+                      não conta como recusa
+                    </span>
+                  )}
                 </button>
               ))}
             </div>
@@ -227,10 +262,13 @@ export function BlocoConvocacoes({ token, escalaId, podeEditar, pedir, gravar })
   const [motivo, setMotivo] = useState("");
   const [obs, setObs] = useState("");
   const [motivos, setMotivos] = useState([]);
+  const [regra, setRegra] = useState(null);
 
   async function carregar() {
     try { setLinhas(await pedir(`/convocacoes?escala=${escalaId}`, token)); }
     catch (e) { setErro(e.message); }
+    try { const r = await pedir(`/convocacoes/resumo`, token); setRegra(r?.regra || null); }
+    catch (_) { /* sem a regra, vale o texto antigo */ }
   }
   useEffect(() => { carregar(); }, [escalaId, token]);
 
@@ -413,7 +451,9 @@ export function BlocoConvocacoes({ token, escalaId, podeEditar, pedir, gravar })
       {linhas && linhas.length > 0 && (
         <p className="text-[11px] text-slate-400 mt-3 leading-relaxed">
           {pendentes && "Esta lista se atualiza sozinha enquanto houver resposta pendente. "}
-          A recusa não altera a escala e não gera penalidade — a pessoa continua na fila.
+          {regra?.ativa
+            ? `A recusa não altera a escala, mas conta: ${regra.limite} recusas em ${regra.janela_meses} meses afastam a pessoa da escala seguinte (saúde e falta de transporte do sindicato não contam).`
+            : "A recusa não altera a escala e não gera penalidade — a pessoa continua na fila."}
           O que a escala registra é que o sindicato ofereceu; a convocação registra o que
           a pessoa respondeu. As duas coisas juntas é que formam a prova.
         </p>

@@ -193,6 +193,177 @@ async function exigirEtapa(res, q, permitidas) {
   return true;
 }
 
+
+/* ==================================================================
+ * 13/10/2026 — REGRA 9 DO REGIMENTO: RECUSAS E AFASTAMENTO
+ *
+ * Três recusas que CONTAM (v_recusas_rodizio), dentro da janela, afastam
+ * a pessoa da primeira quinzena ainda sem prévia depois da última
+ * recusa. Daí em diante ela só pode ser escalada FORA da unidade-mãe, até
+ * cumprir um rodízio — confirmado pelo Ponto, nunca pelo clique do
+ * aceite. Cumprir um rodízio zera a contagem.
+ *
+ * "Unidade-mãe" = o LOCAL (empresa/estabelecimento) da unidade em que a
+ * pessoa estava quando a recusa que fechou a conta aconteceu. Trocar de
+ * setor dentro do mesmo local não conta como sair da mãe.
+ *
+ * Tudo isto fica DESLIGADO enquanto rodizio_regra_recusa.ativa for false
+ * — e, se a estrutura do banco ainda nem existir, o módulo funciona como
+ * antes (nenhum destes caminhos derruba a tela).
+ * ================================================================ */
+let _regra = { em: 0, v: null };
+async function regraRecusa() {
+  if (Date.now() - _regra.em < 5000) return _regra.v;
+  let v = null;
+  try {
+    const { rows: [x] } = await consulta('select * from rodizio_regra_recusa where id');
+    v = x && x.ativa ? x : null;
+  } catch (e) { v = null; }
+  _regra = { em: Date.now(), v };
+  return v;
+}
+
+async function unidadesPorId(sindicatoId) {
+  const { rows } = await consulta('select id, codigo, local_id from unidades where sindicato_id = $1', [sindicatoId]);
+  return Object.fromEntries(rows.map((u) => [u.id, u]));
+}
+
+/* a unidade u fica dentro da "mãe" da restrição r? */
+const dentroDaMae = (r, u) => !!u && (u.id === r.unidade_mae_id || (!!r.local_mae_id && u.local_id === r.local_mae_id));
+
+/* devolve o texto do impedimento, ou null se a restrição permite esse destino */
+function restricaoImpede(r, un, nome) {
+  const quem = nome || 'Este colaborador';
+  if (r.fase === 'afastado') {
+    return `${quem} está afastado desta quinzena por recusas (regra 9 do regimento) e não entra na escala.`;
+  }
+  if (dentroDaMae(r, un)) {
+    return `${quem} só pode ser escalado FORA da unidade-mãe até cumprir um rodízio (regra 9 do regimento). Escolha uma unidade de outro local.`;
+  }
+  return null;
+}
+
+async function nomeDe(id) {
+  const { rows: [t] } = await consulta('select nome, codigo from trabalhadores where id = $1', [id]);
+  return t ? `${t.nome || 'Sem nome'} (${t.codigo})` : null;
+}
+
+/* restrições em vigor para uma quinzena: { trabalhador_id: {fase, ...} }.
+   fase 'afastado' = é a quinzena do afastamento; 'fora_da_mae' = as seguintes. */
+async function restricoesDaQuinzena(q) {
+  if (!(await regraRecusa())) return {};
+  const { rows } = await consulta(`
+    select af.id, af.trabalhador_id, af.unidade_mae_id, af.local_mae_id, af.tipo,
+           to_char(af.desde_inicio, 'YYYY-MM-DD') as desde_inicio,
+           case when af.desde_inicio = $2::date then 'afastado' else 'fora_da_mae' end as fase
+      from rodizio_afastamentos af
+      join trabalhadores t on t.id = af.trabalhador_id
+     where af.encerrado_em is null and t.sindicato_id = $1 and af.desde_inicio <= $2::date
+  `, [q.sindicato_id, soData(q.inicio)]);
+  return Object.fromEntries(rows.map((x) => [x.trabalhador_id, x]));
+}
+
+/* primeira quinzena DEPOIS de uma data que ainda não tem prévia: escala
+   publicada ou em prévia não se mexe */
+async function primeiraQuinzenaLivre(sindicatoId, depoisDe) {
+  let qz = quinzenaSeguinte(quinzenaQueContem(depoisDe));
+  for (let i = 0; i < 8; i++) {
+    const { rows: [r] } = await consulta(
+      'select previa_escala_id from rodizio_quinzenas where sindicato_id = $1 and inicio = $2::date',
+      [sindicatoId, qz.inicio]);
+    if (!r || !r.previa_escala_id) return qz;
+    qz = quinzenaSeguinte(qz);
+  }
+  return qz;
+}
+
+/* Roda a cada vez que a tela pede a quinzena (e antes da prévia e da
+   publicação): (1) encerra a restrição de quem já cumpriu o rodízio fora
+   da mãe; (2) afasta quem chegou ao limite. Nunca derruba quem chamou. */
+async function aplicarAfastamentos(sindicatoId) {
+  const regra = await regraRecusa();
+  if (!regra) return;
+  try {
+    await consulta(`
+      with c as (
+        select af.id,
+               (select count(distinct a.data)
+                  from apuracao_dia a join unidades u on u.id = a.unidade_id
+                 where a.trabalhador_id = af.trabalhador_id and a.data >= af.desde_inicio
+                   and a.unidade_id is distinct from af.unidade_mae_id
+                   and (af.local_mae_id is null or u.local_id is distinct from af.local_mae_id)) as dias
+          from rodizio_afastamentos af join trabalhadores t on t.id = af.trabalhador_id
+         where af.encerrado_em is null and t.sindicato_id = $1)
+      update rodizio_afastamentos af
+         set encerrado_em = now(), encerrado_por = 'apuração do Ponto',
+             encerrado_motivo = 'Rodízio cumprido: ' || c.dias || ' dias de trabalho fora da unidade-mãe'
+        from c where c.id = af.id and c.dias >= $2
+    `, [sindicatoId, regra.dias_para_cumprir]);
+
+    const { rows: alvos } = await consulta(`
+      select r.trabalhador_id
+        from v_recusas_rodizio r join trabalhadores t on t.id = r.trabalhador_id
+       where t.sindicato_id = $1
+       group by r.trabalhador_id
+      having count(*) >= $2
+         and not exists (select 1 from rodizio_afastamentos af
+                          where af.trabalhador_id = r.trabalhador_id and af.encerrado_em is null)
+    `, [sindicatoId, regra.limite_recusas]);
+
+    for (const a of alvos) {
+      const { rows: ev } = await consulta(`
+        select troca_id, convocacao_id, tipo, motivo_recusa, quando,
+               to_char(quando_dia, 'YYYY-MM-DD') as quando_dia,
+               to_char(data_inicio, 'YYYY-MM-DD') as data_inicio,
+               to_char(data_fim, 'YYYY-MM-DD') as data_fim, unidade_mae_id
+          from v_recusas_rodizio where trabalhador_id = $1 order by quando`, [a.trabalhador_id]);
+      if (!ev.length) continue;
+      const ultimo = ev[ev.length - 1];
+      const qz = await primeiraQuinzenaLivre(sindicatoId, ultimo.quando_dia);
+      const { rows: [mae] } = await consulta('select local_id from unidades where id = $1', [ultimo.unidade_mae_id]);
+      const { rowCount } = await consulta(`
+        insert into rodizio_afastamentos (trabalhador_id, tipo, unidade_mae_id, local_mae_id, desde_inicio, eventos, criado_por)
+        values ($1, 'recusas', $2, $3, $4::date, $5::jsonb, 'sistema')
+        on conflict (trabalhador_id) where encerrado_em is null do nothing
+      `, [a.trabalhador_id, ultimo.unidade_mae_id, mae ? mae.local_id : null, qz.inicio, JSON.stringify(ev)]);
+      if (rowCount) {
+        try {
+          await registrarEvento({
+            tipo: 'rodizio_afastamento', titulo: 'Afastado do rodízio por recusas (regra 9)',
+            descricao: `${await nomeDe(a.trabalhador_id)} · ${ev.length} recusas · afastado a partir de ${qz.inicio}`,
+            ator: 'sistema', atorUsuarioId: null, entidadeTipo: 'trabalhador',
+            entidadeId: a.trabalhador_id, ip: null, navegador: null,
+          });
+        } catch (e) { /* o registro de auditoria geral nunca derruba a regra */ }
+      }
+    }
+  } catch (e) { console.error('afastamentos:', e.message); }
+}
+
+/* trocas e inclusões da quinzena que a restrição não permite */
+async function conflitosDeRestricao(q) {
+  const restr = await restricoesDaQuinzena(q);
+  const ids = Object.keys(restr);
+  if (!ids.length) return [];
+  const un = await unidadesPorId(q.sindicato_id);
+  const { rows: trocas } = await consulta(`
+    select a_trabalhador_id, b_trabalhador_id, a_unidade_id, b_unidade_id from rodizio_trocas
+     where quinzena_id = $1 and estado not in ('desfeita', 'recusada')`, [q.id]);
+  const { rows: incl } = await consulta(
+    "select trabalhador_id, unidade_id from rodizio_pessoas where quinzena_id = $1 and tipo = 'incluido'", [q.id]);
+  const itens = [
+    ...trocas.flatMap((t) => [[t.a_trabalhador_id, t.b_unidade_id], [t.b_trabalhador_id, t.a_unidade_id]]),
+    ...incl.map((x) => [x.trabalhador_id, x.unidade_id]),
+  ];
+  const out = [];
+  for (const [tid, destino] of itens) {
+    if (!restr[tid]) continue;
+    const msg = restricaoImpede(restr[tid], un[destino], await nomeDe(tid));
+    if (msg && !out.includes(msg)) out.push(msg);
+  }
+  return out;
+}
+
 /* ==================================================================
  * GET /rodizio/quinzena?inicio=AAAA-MM-DD
  * Tudo que a tela precisa de uma vez: unidades, pessoas e trocas.
@@ -207,6 +378,7 @@ router.get('/quinzena', async (req, res, next) => {
 
     let q = await acharOuCriarQuinzena(pedida, p, quem(req));
     await sincronizarRespostas(q, quem(req));
+    await aplicarAfastamentos(q.sindicato_id);
     q = await quinzenaPorId(q.id);
     const inicio = soData(q.inicio), fim = soData(q.fim);
 
@@ -308,6 +480,48 @@ router.get('/quinzena', async (req, res, next) => {
       return e || null;
     };
 
+    /* regra 9: recusas contadas, restrições e afastados */
+    const regraRec = await regraRecusa();
+    let contagens = {}, afastados = [];
+    const restr = await restricoesDaQuinzena(q);
+    if (regraRec) {
+      try {
+        const { rows: cs } = await consulta(`
+          select r.trabalhador_id, count(*)::int as n
+            from v_recusas_rodizio r join trabalhadores t on t.id = r.trabalhador_id
+           where t.sindicato_id = $1 group by 1`, [q.sindicato_id]);
+        contagens = Object.fromEntries(cs.map((x) => [x.trabalhador_id, x.n]));
+        const { rows: af } = await consulta(`
+          select af.id, af.tipo, to_char(af.desde_inicio, 'YYYY-MM-DD') as desde_inicio,
+                 af.criado_em, af.eventos, t.id as trabalhador_id, t.codigo, t.nome,
+                 um.codigo as mae_codigo, coalesce(lm.nome, um.nome_completo) as mae_nome
+            from rodizio_afastamentos af
+            join trabalhadores t on t.id = af.trabalhador_id
+            left join unidades um on um.id = af.unidade_mae_id
+            left join locais lm on lm.id = af.local_mae_id
+           where af.encerrado_em is null and t.sindicato_id = $1
+           order by af.desde_inicio, t.nome`, [q.sindicato_id]);
+        afastados = af.map((x) => ({
+          ...x, fase: x.desde_inicio === inicio ? 'afastado' : x.desde_inicio < inicio ? 'fora_da_mae' : 'futuro',
+        }));
+      } catch (e) { console.error('regra 9 (leitura):', e.message); }
+    }
+    const unById = Object.fromEntries(unidades.map((u) => [u.id, u]));
+    const emTroca = new Set();
+    trocas.filter((t) => t.estado !== 'recusada').forEach((t) => { emTroca.add(t.a_trabalhador_id); emTroca.add(t.b_trabalhador_id); });
+    const pessoasRegra = pessoas.map((p) => {
+      const rs = restr[p.id];
+      const fora = !rs ? false
+        : rs.fase === 'afastado' ? true
+        : !emTroca.has(p.id) && dentroDaMae(rs, unById[p.unidade_id]);
+      return {
+        ...p,
+        recusas: contagens[p.id] || 0,
+        restricao: rs ? { fase: rs.fase, desde_inicio: rs.desde_inicio, unidade_mae_id: rs.unidade_mae_id, local_mae_id: rs.local_mae_id } : null,
+        fora_da_escala: fora,
+      };
+    });
+
     /* link universal de requisição, para o botão "Fazer requisição" */
     const { rows: [link] } = await consulta(`
       select token from links_publicos
@@ -322,9 +536,12 @@ router.get('/quinzena', async (req, res, next) => {
       previa: await escalaInfo(q.previa_escala_id),
       definitiva: await escalaInfo(q.definitiva_escala_id),
       regras: { dias_ativo_escala: n(p.dias_ativo_escala) || 5, dias_por_mes: n(p.dias_por_mes) || 5,
-                ultimo_dia_apurado: (await consulta('select max(data) as d from apuracao_dia')).rows[0].d },
+                ultimo_dia_apurado: (await consulta('select max(data) as d from apuracao_dia')).rows[0].d,
+                punicao: regraRec
+                  ? { ativa: true, limite: regraRec.limite_recusas, janela_meses: regraRec.janela_meses, dias_para_cumprir: regraRec.dias_para_cumprir }
+                  : { ativa: false } },
       eu: { id: req.usuario.id || null, nome: quem(req), perfil: req.usuario.perfil },
-      unidades, pessoas, trocas,
+      unidades, pessoas: pessoasRegra, trocas, afastados,
     });
   } catch (e) { next(e); }
 });
@@ -471,6 +688,17 @@ router.get('/pessoas/buscar', async (req, res, next) => {
        order by (t.codigo = $1) desc, t.ultimo_dia desc nulls last
        limit 15
     `, [t.replace(/\D/g, '') || '§', t]);
+    /* regra 9: quem está afastado ou só pode ir para fora da unidade-mãe */
+    if (rows.length && (await regraRecusa())) {
+      try {
+        const { rows: af } = await consulta(`
+          select trabalhador_id, to_char(desde_inicio, 'YYYY-MM-DD') as desde_inicio
+            from rodizio_afastamentos
+           where encerrado_em is null and trabalhador_id = any($1::uuid[])`, [rows.map((x) => x.id)]);
+        const m = Object.fromEntries(af.map((x) => [x.trabalhador_id, x.desde_inicio]));
+        rows.forEach((x) => { x.restricao_desde = m[x.id] || null; });
+      } catch (e) { /* sem a tabela, sem a etiqueta */ }
+    }
     res.json(rows);
   } catch (e) { next(e); }
 });
@@ -509,6 +737,12 @@ router.post('/quinzenas/:qid/incluir', podeEscrever, async (req, res, next) => {
         `, [q.sindicato_id, codigo, nome.toUpperCase(), quem(req)]);
         id = novo.id;
       }
+    }
+    const rsInc = (await restricoesDaQuinzena(q))[id];
+    if (rsInc) {
+      const un = await unidadesPorId(q.sindicato_id);
+      const bloqueio = restricaoImpede(rsInc, un[unidade_id], await nomeDe(id));
+      if (bloqueio) { await cliente.query('rollback'); return res.status(409).json({ error: bloqueio }); }
     }
     const { rows: [troca] } = await cliente.query(`
       select 1 from rodizio_trocas where quinzena_id = $1
@@ -575,6 +809,14 @@ router.post('/quinzenas/:qid/trocas', podeEscrever, async (req, res, next) => {
       select 1 from rodizio_pessoas where quinzena_id = $1 and tipo = 'ausente'
          and trabalhador_id in ($2, $3)`, [q.id, a_trabalhador_id, b_trabalhador_id]);
     if (aus.length) return res.status(409).json({ error: 'Uma das pessoas está marcada como ausente na quinzena.' });
+
+    const restrT = await restricoesDaQuinzena(q);
+    if (restrT[a_trabalhador_id] || restrT[b_trabalhador_id]) {
+      const un = await unidadesPorId(q.sindicato_id);
+      const ea = restrT[a_trabalhador_id] && restricaoImpede(restrT[a_trabalhador_id], un[b_unidade_id], await nomeDe(a_trabalhador_id));
+      const eb = restrT[b_trabalhador_id] && restricaoImpede(restrT[b_trabalhador_id], un[a_unidade_id], await nomeDe(b_trabalhador_id));
+      if (ea || eb) return res.status(409).json({ error: ea || eb });
+    }
 
     await cliente.query('begin');
     const { rows: [t] } = await cliente.query(`
@@ -660,6 +902,10 @@ async function montarLinhas(cliente, q, p, estadosVivos) {
     trocaDe[t.a_trabalhador_id] = { t, destino: t.b_unidade_id };
     trocaDe[t.b_trabalhador_id] = { t, destino: t.a_unidade_id };
   }
+  /* regra 9: afastado não entra; quem só pode ir para fora da mãe não
+     "permanece" nela nem tem linha de base nela */
+  const restr = await restricoesDaQuinzena(q);
+  const un = Object.keys(restr).length ? await unidadesPorId(q.sindicato_id) : {};
 
   const linhas = [];
   const add = (pp, destino, ini, f, tipo, trocaId) => {
@@ -672,6 +918,15 @@ async function montarLinhas(cliente, q, p, estadosVivos) {
   };
   for (const pp of pessoas) {
     const tr = trocaDe[pp.trabalhador_id];
+    const rs = restr[pp.trabalhador_id];
+    if (rs) {
+      if (rs.fase === 'afastado') continue;
+      if (!tr && dentroDaMae(rs, un[pp.unidade_id])) continue;
+      if (tr) {
+        add(pp, tr.destino, soData(tr.t.data_inicio), soData(tr.t.data_fim), 'rodizio', tr.t.id);
+        continue;
+      }
+    }
     if (!tr) { add(pp, pp.unidade_id, inicio, fim, 'permanece'); continue; }
     const di = soData(tr.t.data_inicio), df = soData(tr.t.data_fim);
     add(pp, pp.unidade_id, inicio, somaDias(di, -1), 'base');
@@ -740,8 +995,11 @@ router.post('/quinzenas/:qid/previa', podeEscrever, async (req, res, next) => {
     const q = await quinzenaPorId(req.params.qid);
     if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
     if (!(await exigirEtapa(res, q, ['montagem']))) return;
+    await aplicarAfastamentos(q.sindicato_id);
     const pend = await pendencias(q, p);
     if (pend.length) return res.status(409).json({ error: textoPendencias(pend), pendencias: pend });
+    const confl = await conflitosDeRestricao(q);
+    if (confl.length) return res.status(409).json({ error: `Regra 9: ${confl.slice(0, 3).join(' ')} Desfaça a troca ou a inclusão antes de enviar a prévia.` });
 
     await cliente.query('begin');
     const { rows: [e] } = await cliente.query(`
@@ -794,8 +1052,11 @@ router.post('/quinzenas/:qid/publicar', podeEscrever, async (req, res, next) => 
     if (!(await exigirEtapa(res, q, ['ajustes']))) return;
     await sincronizarRespostas(q, quem(req));
     q = await quinzenaPorId(q.id);
+    await aplicarAfastamentos(q.sindicato_id);
     const pend = await pendencias(q, p);
     if (pend.length) return res.status(409).json({ error: textoPendencias(pend), pendencias: pend });
+    const confl = await conflitosDeRestricao(q);
+    if (confl.length) return res.status(409).json({ error: `Regra 9: ${confl.slice(0, 3).join(' ')} Desfaça a troca ou a inclusão antes de publicar.` });
 
     await cliente.query('begin');
     await cliente.query(
@@ -847,6 +1108,34 @@ router.post('/quinzenas/:qid/publicar', podeEscrever, async (req, res, next) => 
     if (erroDeRegra(e)) return res.status(409).json({ error: e.message });
     next(e);
   } finally { cliente.release(); }
+});
+
+/* ==================================================================
+ * POST /rodizio/afastamentos/:id/encerrar — só administrador, com motivo.
+ * Existe para corrigir erro (recusa mal registrada, motivo errado); o
+ * afastamento continua no arquivo, com quem encerrou e por quê.
+ * ================================================================ */
+router.post('/afastamentos/:id/encerrar', autorizar('admin'), async (req, res, next) => {
+  try {
+    const motivo = String((req.body || {}).motivo || '').trim();
+    if (motivo.length < 5) return res.status(400).json({ error: 'Informe o motivo do encerramento (ao menos 5 letras).' });
+    const { rows: [a] } = await consulta(`
+      update rodizio_afastamentos
+         set encerrado_em = now(), encerrado_por = $2, encerrado_motivo = $3
+       where id = $1 and encerrado_em is null
+       returning trabalhador_id`, [req.params.id, quem(req), motivo]);
+    if (!a) return res.status(409).json({ error: 'Afastamento já encerrado ou inexistente.' });
+    try {
+      await registrarEvento({
+        tipo: 'rodizio_afastamento', titulo: 'Afastamento encerrado pelo administrador',
+        descricao: `${await nomeDe(a.trabalhador_id)} · ${motivo}`,
+        ator: quem(req), atorUsuarioId: req.usuario.id || null, entidadeTipo: 'trabalhador',
+        entidadeId: a.trabalhador_id, ip: ipReq(req), navegador: navegadorReq(req),
+      });
+    } catch (e) { /* auditoria geral é complemento */ }
+    _regra = { em: 0, v: null };
+    res.json({ ok: true });
+  } catch (e) { next(e); }
 });
 
 /* ==================================================================

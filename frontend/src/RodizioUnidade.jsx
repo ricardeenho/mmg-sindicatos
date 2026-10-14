@@ -51,14 +51,40 @@ function Selo({ status }) {
 }
 
 function urgencia(u, pessoas) {
-  const ps = pessoas.filter((p) => p.unidade_id === u.id && !p.ausente && p.perfil === "permanente");
+  const ps = pessoas.filter((p) => p.unidade_id === u.id && !indisponivel(p) && p.perfil === "permanente");
   const max = Math.max(0, ...ps.map((p) => p.falta));
   if (max === 0) return { k: "g", barra: "bg-emerald-500", chip: "bg-emerald-50 text-emerald-700", txt: "Ninguém deve dias" };
   if (max > 5 && !u.rodou) return { k: "r", barra: "bg-rose-500", chip: "bg-rose-50 text-rose-700", txt: `Há quem deva ${max} dias e a unidade não rodou na última quinzena` };
   return { k: "a", barra: "bg-amber-500", chip: "bg-amber-50 text-amber-700", txt: u.rodou ? `Rodou na última quinzena; ainda há quem deva ${max} dias` : `O maior saldo é de ${max} dias` };
 }
 
+/* Regra 9 (recusas). A pessoa está "indisponível" na escala quando está ausente
+   ou quando a regra a tira dela (afastada, ou só pode sair da unidade-mãe). */
+const indisponivel = (p) => !!p.ausente || !!p.fora_da_escala;
+/* a unidade x fica dentro da "mãe" da restrição da pessoa p? */
+const impede = (p, x) => {
+  const r = p?.restricao;
+  if (!r || !x) return false;
+  if (r.fase === "afastado") return true;
+  return x.id === r.unidade_mae_id || (!!r.local_mae_id && x.local_id === r.local_mae_id);
+};
+
+function TagRestricao({ p }) {
+  const r = p.restricao;
+  return (
+    <>
+      {r?.fase === "afastado" && <span title="Três recusas em 12 meses: fora desta quinzena (regra 9)" className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-rose-50 text-rose-700">Afastado · recusas</span>}
+      {r?.fase === "fora_da_mae" && <span title="Só pode ser escalado fora da unidade-mãe até cumprir um rodízio (regra 9)" className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-amber-50 text-amber-800">Só fora da unidade-mãe</span>}
+      {!r && p.recusas > 0 && <span title="Recusas que contam nos últimos 12 meses" className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-orange-50 text-orange-700">{p.recusas} recusa{p.recusas > 1 ? "s" : ""}</span>}
+    </>
+  );
+}
+
 function TagPessoa({ p }) {
+  return <><TagRestricao p={p} /><TagBase p={p} /></>;
+}
+
+function TagBase({ p }) {
   if (p.ausente) return <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-slate-100 text-slate-600">Ausente na quinzena</span>;
   if (p.perfil === "permanente" && p.falta > 0) return <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-amber-50 text-amber-700">Deve {p.falta} dias</span>;
   if (p.perfil === "permanente") return <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-emerald-50 text-emerald-700">Em dia</span>;
@@ -91,6 +117,8 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   const [painel, setPainel] = useState(null);
   const [motivoManter, setMotivoManter] = useState("");
   const [confirmar, setConfirmar] = useState(null);
+  const [encerrando, setEncerrando] = useState(null);
+  const [motivoEnc, setMotivoEnc] = useState("");
 
   const carregar = useCallback(async () => {
     try {
@@ -261,6 +289,52 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
     </div>
   );
 
+  /* Regra 9: quem está afastado por recusas. O Gestor vê; só o admin encerra. */
+  const afastados = d.afastados || [];
+  const painelAf = afastados.length > 0 && (
+    <details className="bg-white border border-slate-200 rounded-2xl group">
+      <summary className="cursor-pointer list-none px-4 py-3 flex items-center justify-between gap-2">
+        <span className="text-[13px] font-semibold">
+          {afastados.length} colaborador{afastados.length > 1 ? "es" : ""} com restrição por recusas
+          <span className="text-slate-400 font-normal"> · regra 9 do regimento</span>
+        </span>
+        <span className="text-[11.5px] text-slate-500 group-open:rotate-180 transition-transform">▾</span>
+      </summary>
+      <div className="px-4 pb-4 space-y-2">
+        <p className="text-[11.5px] text-slate-500 leading-relaxed">
+          Três recusas em {regras.punicao?.janela_meses || 12} meses afastam da escala seguinte; depois, só fora da unidade-mãe até cumprir um rodízio
+          ({regras.punicao?.dias_para_cumprir || 5} dias de Ponto fora dela).
+        </p>
+        {afastados.map((a) => (
+          <div key={a.id} className="border border-slate-200 rounded-xl px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+            <span className="min-w-0 text-[12.5px]">
+              <b>{cap(a.nome) || "Sem nome"}</b> <span className="text-slate-400 tabular-nums">{a.codigo}</span>
+              <span className="block text-[11px] text-slate-500">
+                {a.fase === "afastado" ? "Fora desta quinzena" : a.fase === "fora_da_mae" ? "Só fora da unidade-mãe" : "Começa em " + dataBR(a.desde_inicio)}
+                {" · desde "}{dataBR(a.desde_inicio)}{a.mae_codigo ? ` · mãe: ${a.mae_codigo}` : ""}
+              </span>
+            </span>
+            {eu.perfil === "admin" && (encerrando === a.id ? (
+              <span className="flex gap-1.5 items-center flex-wrap">
+                <input value={motivoEnc} onChange={(e) => setMotivoEnc(e.target.value)} placeholder="Motivo (mín. 5 letras)"
+                  className="border border-slate-200 rounded-lg px-2 py-1 text-[12px]" />
+                <button disabled={ocupado || motivoEnc.trim().length < 5}
+                  onClick={async () => {
+                    const r = await agir(`/rodizio/afastamentos/${a.id}/encerrar`, { motivo: motivoEnc.trim() }, "Afastamento encerrado");
+                    if (r) { setEncerrando(null); setMotivoEnc(""); }
+                  }}
+                  className="bg-rose-600 text-white rounded-lg px-2.5 py-1 text-[12px] font-semibold disabled:opacity-40">Encerrar</button>
+                <button onClick={() => { setEncerrando(null); setMotivoEnc(""); }} className="text-[12px] text-slate-500">Voltar</button>
+              </span>
+            ) : (
+              <button onClick={() => { setEncerrando(a.id); setMotivoEnc(""); }} className="text-[11.5px] text-slate-600 font-semibold border border-slate-300 rounded-lg px-2.5 py-1">Encerrar com motivo</button>
+            ))}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+
   const caixaConfirmar = typeof confirmar === "string" && (
     <div className="bg-white border-2 border-teal-500 rounded-2xl p-4 flex flex-col gap-2">
       <b className="text-[14px]">{confirmar === "previa" ? "Enviar a prévia da quinzena?" : "Publicar a escala definitiva?"}</b>
@@ -285,7 +359,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   if (vista === "escala") {
     return (
       <div className="space-y-3">
-        {topo}{progresso}{caixaConfirmar}
+        {topo}{progresso}{painelAf}{caixaConfirmar}
         <EscalaGeral token={token} pedir={pedir} d={d} pessoas={pessoas} trocas={trocasVivas} uDe={uDe} />
       </div>
     );
@@ -345,7 +419,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
         )}
         {lista.map((u) => {
           const ur = urgencia(u, pessoas);
-          const n = pessoas.filter((p) => p.unidade_id === u.id && !p.ausente).length;
+          const n = pessoas.filter((p) => p.unidade_id === u.id && !indisponivel(p)).length;
           return (
             <button key={u.id} onClick={() => abrirUnidade(u.id)}
               className={`relative w-full text-left border rounded-xl pl-4 pr-3 py-2.5 transition ${
@@ -395,7 +469,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   } else {
     const ur = urgencia(u, pessoas);
     const ps = pessoas.filter((p) => p.unidade_id === u.id);
-    const presentes = ps.filter((p) => !p.ausente).length;
+    const presentes = ps.filter((p) => !indisponivel(p)).length;
     const pode = editavel(u);
     const fechada = u.status === "concluida" || u.status === "mantida";
 
@@ -474,7 +548,8 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
           {ps.length === 0 && <p className="text-[12.5px] text-slate-500 border border-dashed border-slate-300 rounded-xl p-4 text-center">Ninguém ativo nesta unidade.</p>}
           {ps.map((p) => {
             const tr = trocaDe(p.id), rec = recusadaDe(p.id);
-            const clicavel = pode && !tr && !p.ausente && !fechada;
+            const afastado = p.restricao?.fase === "afastado";
+            const clicavel = pode && !tr && !p.ausente && !afastado && !fechada;
             let faixa = null;
             if (tr) {
               const ehA = tr.a_trabalhador_id === p.id;
@@ -506,7 +581,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
             return (
               <div key={p.id} onClick={() => clicavel && (setPSel(p.id), setDSel(null), setParSel(null), setBuscaOutra(null))}
                 className={`grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 items-center border rounded-xl px-3 py-2 ${
-                  pSel === p.id ? "border-teal-500 ring-1 ring-teal-500" : "border-slate-200"} ${clicavel ? "cursor-pointer hover:border-slate-400" : ""} ${p.ausente ? "opacity-60" : ""}`}>
+                  pSel === p.id ? "border-teal-500 ring-1 ring-teal-500" : "border-slate-200"} ${clicavel ? "cursor-pointer hover:border-slate-400" : ""} ${p.ausente || afastado ? "opacity-60" : ""}`}>
                 <span className="min-w-0">
                   <span className="text-[13px] font-semibold">{cap(p.nome) || "Sem cadastro"}</span>{" "}
                   <span className="text-[11.5px] text-slate-400 tabular-nums">{p.codigo}</span>
@@ -610,15 +685,15 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   } else {
     const origem = uDe(p.unidade_id);
     const nivel = (x) => (x.local_id && x.local_id === origem.local_id ? 1 : x.cidade && x.cidade === origem.cidade ? 2 : 3);
-    const comGente = (x) => pessoas.some((pp) => pp.unidade_id === x.id && !pp.ausente);
-    const dests = unidades.filter((x) => x.id !== origem.id && minha(x) && comGente(x) && (cidade === "Todas" || x.cidade === cidade || x.local_id === origem.local_id))
+    const comGente = (x) => pessoas.some((pp) => pp.unidade_id === x.id && !indisponivel(pp));
+    const dests = unidades.filter((x) => x.id !== origem.id && !impede(p, x) && minha(x) && comGente(x) && (cidade === "Todas" || x.cidade === cidade || x.local_id === origem.local_id))
       .map((x) => ({ x, n: nivel(x) })).sort((a, b) => a.n - b.n || a.x.codigo.localeCompare(b.x.codigo));
     const grupos = [[1, "No mesmo local · outro setor"], [2, `Em ${origem.cidade || "mesma cidade"} · outro local`], [3, "Em outra cidade"]];
     const dest = uDe(dSel);
     const qo = (buscaOutra || "").trim().toLowerCase();
-    const outras = buscaOutra === null ? [] : unidades.filter((x) => x.id !== origem.id && !minha(x) && comGente(x) &&
+    const outras = buscaOutra === null ? [] : unidades.filter((x) => x.id !== origem.id && !impede(p, x) && !minha(x) && comGente(x) &&
       (!qo || x.codigo.includes(qo) || (x.local_nome || "").toLowerCase().includes(qo) || (x.cidade || "").toLowerCase().includes(qo))).slice(0, 20);
-    const cand = dest ? pessoas.filter((x) => x.unidade_id === dest.id && !x.ausente && !trocaDe(x.id))
+    const cand = dest ? pessoas.filter((x) => x.unidade_id === dest.id && !x.ausente && x.restricao?.fase !== "afastado" && !impede(x, origem) && !trocaDe(x.id))
       .sort((a, b) => (b.perfil === "permanente" && b.falta > 0) - (a.perfil === "permanente" && a.falta > 0) || b.falta - a.falta) : [];
     const BotaoDestino = ({ x }) => (
       <button onClick={() => { if (x.gestor_id) { setDSel(x.id); setParSel(null); } }} disabled={!x.gestor_id}
@@ -627,7 +702,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
         <span className="min-w-0">
           <b className="text-[12.5px] tabular-nums">{x.codigo}</b> <span className="text-[12.5px]">{cap(x.local_nome)} · {cap(x.setor)}</span>
           <span className="block text-[11px] text-slate-500">
-            {minha(x) ? `${pessoas.filter((pp) => pp.unidade_id === x.id && !pp.ausente).length} ativos · ${x.req_qtd ? `pede ${x.req_qtd}` : "sem requisição"}`
+            {minha(x) ? `${pessoas.filter((pp) => pp.unidade_id === x.id && !indisponivel(pp)).length} ativos · ${x.req_qtd ? `pede ${x.req_qtd}` : "sem requisição"}`
               : x.gestor_id ? `${x.cidade || ""} · Gestor MMG Responsável: ${x.gestor_nome}` : `${x.cidade || ""} · sem Gestor MMG Responsável; precisa ser assumida antes`}
           </span>
         </span>
@@ -652,7 +727,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
               </div>
             );
           })}
-          {dests.length === 0 && <p className="text-[12px] text-slate-500 border border-dashed border-slate-300 rounded-xl p-3 text-center">Nenhuma unidade sua serve de destino com este filtro.</p>}
+          {dests.length === 0 && <p className="text-[12px] text-slate-500 border border-dashed border-slate-300 rounded-xl p-3 text-center">Nenhuma unidade sua serve de destino com este filtro.{p.restricao?.fase === "fora_da_mae" ? " Pela regra 9, " + cap(primeiroNome(p.nome)) + " só pode ir para fora da unidade-mãe." : ""}</p>}
 
           {buscaOutra === null ? (
             <button onClick={() => setBuscaOutra("")} className="border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold">Buscar outra unidade</button>
@@ -754,6 +829,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
     <div className="space-y-3">
       {topo}
       {progresso}
+      {painelAf}
       {caixaConfirmar}
       {confirmaPequeno}
       <div className="grid gap-3 items-start grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[290px_minmax(0,1fr)_350px]">
@@ -815,7 +891,7 @@ function Incluir({ token, pedir, unidade, ocupado, aoIncluir, aoVoltar }) {
           <span className="text-[12.5px] min-w-0">
             <b>{cap(r.nome) || "Sem cadastro"}</b> <span className="text-slate-400 tabular-nums">{r.codigo}</span>
             <span className="block text-[11px] text-slate-500">
-              {r.provisorio ? "Provisório · ainda não veio no Ponto" : r.ultimo_dia ? `Último dia apurado ${dataBR(r.ultimo_dia)}${r.ultima_unidade ? ` na ${r.ultima_unidade}` : ""}` : "Sem dia apurado"}
+              {r.restricao_desde ? "Afastado por recusas · só entra fora da unidade-mãe · " : ""}{r.provisorio ? "Provisório · ainda não veio no Ponto" : r.ultimo_dia ? `Último dia apurado ${dataBR(r.ultimo_dia)}${r.ultima_unidade ? ` na ${r.ultima_unidade}` : ""}` : "Sem dia apurado"}
             </span>
           </span>
           <span className="text-[12px] font-semibold text-teal-700">Incluir</span>
@@ -905,6 +981,8 @@ function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
     const out = [];
     for (const p of pessoas) {
       if (p.ausente) continue;
+      const emTroca = trocas.some((x) => x.a_trabalhador_id === p.id || x.b_trabalhador_id === p.id);
+      if (p.restricao?.fase === "afastado" || (p.fora_da_escala && !emTroca)) continue;
       const u0 = uDe(p.unidade_id);
       const base = { trabalhador_id: p.id, codigo: p.codigo, nome: p.nome };
       const t = trocas.find((x) => x.a_trabalhador_id === p.id || x.b_trabalhador_id === p.id);
@@ -912,6 +990,7 @@ function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
       if (!t) { L(u0, q.inicio, q.fim, "permanece"); continue; }
       const di = String(t.data_inicio).slice(0, 10), df = String(t.data_fim).slice(0, 10);
       const destino = uDe(t.a_trabalhador_id === p.id ? t.b_unidade_id : t.a_unidade_id);
+      if (p.restricao?.fase === "fora_da_mae") { L(destino, di, df, "rodizio"); continue; }
       L(u0, q.inicio, somaDias(di, -1), "base");
       L(destino, di, df, "rodizio");
       L(u0, somaDias(df, 1), q.fim, "base");
