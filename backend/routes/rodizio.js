@@ -1001,13 +1001,19 @@ async function inserirLinhas(cliente, escalaId, linhas) {
 }
 
 /* O que ainda impede a quinzena de seguir: unidade sem gestor ou que
-   não foi finalizada nem mantida. */
+   não foi finalizada nem mantida. 14/10/2026: o conjunto de unidades é o
+   mesmo da tela — quem tem gente ativa, quem já foi mexido na quinzena e
+   quem tem requisição viva no período (mesmo sem ninguém ativo ainda). */
 async function pendencias(q, p) {
   const { rows } = await consulta(`
     with ${basePessoas(p.dias_ativo_escala)},
     ids as (
       select unidade_id from base
       union select unidade_id from rodizio_unidades where quinzena_id = $1
+      union select r.unidade_id from requisicoes r
+             where r.status in ('aberta', 'em_atendimento')
+               and r.previsao_inicio <= $3::date
+               and coalesce(r.previsao_fim, date '9999-12-31') >= $2::date
     )
     select u.id, u.codigo, g.usuario_id is null as sem_gestor, coalesce(ru.status, 'pendente') as status
       from ids join unidades u on u.id = ids.unidade_id
@@ -1015,7 +1021,7 @@ async function pendencias(q, p) {
       left join rodizio_unidades ru on ru.quinzena_id = $1 and ru.unidade_id = u.id
      where g.usuario_id is null or coalesce(ru.status, 'pendente') not in ('concluida', 'mantida')
      order by u.codigo
-  `, [q.id]);
+  `, [q.id, soData(q.inicio), soData(q.fim)]);
   return rows;
 }
 function textoPendencias(rows) {
@@ -1055,6 +1061,10 @@ async function situacaoGestores(q, p) {
     ids as (
       select unidade_id from base
       union select unidade_id from rodizio_unidades where quinzena_id = $1
+      union select r.unidade_id from requisicoes r
+             where r.status in ('aberta', 'em_atendimento')
+               and r.previsao_inicio <= $3::date
+               and coalesce(r.previsao_fim, date '9999-12-31') >= $2::date
     ),
     uni as (
       select g.usuario_id, ids.unidade_id, coalesce(ru.status, 'pendente') as status, ru.atualizado_em
@@ -1097,7 +1107,7 @@ async function situacaoGestores(q, p) {
       left join pv on pv.usuario_id = ag.usuario_id
       left join cv on cv.usuario_id = ag.usuario_id
      order by us.nome
-  `, [q.id]);
+  `, [q.id, soData(q.inicio), soData(q.fim)]);
   const prazo = calendario(soData(q.inicio), p).previa;
   const hoje = hojeSP();
   return rows.map((g) => {
