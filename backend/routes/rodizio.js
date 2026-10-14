@@ -2,6 +2,7 @@ const express = require('express');
 const { consulta, pool } = require('../db');
 const { autenticar, autorizar } = require('../middlewares/auth');
 const { registrarEvento, ipReq, navegadorReq } = require('../lib/auditoria');
+const { gerarPublicacao } = require('../lib/publicacao');
 
 const router = express.Router();
 router.use(autenticar);
@@ -1382,6 +1383,60 @@ router.get('/escala/:escalaId/linhas', async (req, res, next) => {
        order by u.codigo, t.nome, i.data_inicio
     `, [req.params.escalaId]);
     res.json(rows);
+  } catch (e) { next(e); }
+});
+
+/* ==================================================================
+ * GET /rodizio/quinzenas/:qid/publicacao — pacote de divulgação (.zip)
+ * Só o administrador, e só de escala definitiva já publicada: Escala
+ * Geral, uma escala por empresa e uma por unidade/setor (mural).
+ * Devolve o arquivo em base64 dentro do JSON, para a tela baixar.
+ * ================================================================ */
+router.get('/quinzenas/:qid/publicacao', autorizar('admin'), async (req, res, next) => {
+  try {
+    const q = await quinzenaPorId(req.params.qid);
+    if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
+    if (!q.definitiva_escala_id) {
+      return res.status(409).json({ error: 'A publicação só sai de uma escala definitiva já publicada. Publique a escala primeiro.' });
+    }
+    const { rows: [e] } = await consulta(`
+      select numero, ano, status, publicada_em, publicada_por, hash_publicacao
+        from escalas where id = $1`, [q.definitiva_escala_id]);
+    if (!e || e.status !== 'publicada') return res.status(409).json({ error: 'A escala definitiva desta quinzena não está publicada.' });
+
+    const { rows: linhas } = await consulta(`
+      select i.trabalhador_id, t.codigo, t.nome,
+             to_char(i.data_inicio, 'YYYY-MM-DD') as data_inicio,
+             to_char(i.data_fim, 'YYYY-MM-DD') as data_fim,
+             lo.nome as origem_nome, lo.cidade as origem_cidade,
+             u.id as unidade_id, u.codigo as ucodigo, u.setor,
+             l.id as local_id, coalesce(l.nome, u.nome_completo) as empresa,
+             coalesce(l.cidade, u.cidade) as cidade
+        from escala_itens i
+        join trabalhadores t on t.id = i.trabalhador_id
+        join unidades u on u.id = i.destino_unidade_id
+        left join locais l on l.id = u.local_id
+        left join locais lo on lo.id = i.origem_local_id
+       where i.escala_id = $1
+    `, [q.definitiva_escala_id]);
+    if (!linhas.length) return res.status(409).json({ error: 'A escala publicada não tem linhas.' });
+
+    const meta = {
+      rotulo: `${String(e.numero).padStart(3, '0')}/${e.ano}`,
+      inicio: soData(q.inicio), fim: soData(q.fim),
+      publicada_em: e.publicada_em, publicada_por: e.publicada_por, hash: e.hash_publicacao,
+    };
+    const r = await gerarPublicacao(meta, linhas);
+    const nome = `Publicacao Escala ${String(e.numero).padStart(3, '0')}-${e.ano} (${soData(q.inicio)} a ${soData(q.fim)}).zip`;
+
+    await registrarEvento({
+      tipo: 'rodizio_publicacao', titulo: `Publicação da Escala ${meta.rotulo} gerada`,
+      descricao: `${r.empresas} empresas · ${r.unidades} unidades · ${r.pessoas} trabalhadores`,
+      ator: quem(req), atorUsuarioId: req.usuario.id || null, entidadeTipo: 'escala', entidadeId: q.definitiva_escala_id,
+      ip: ipReq(req), navegador: navegadorReq(req),
+    }).catch((err) => console.error('publicação (auditoria):', err.message));
+
+    res.json({ nome, zip_base64: r.zip.toString('base64'), empresas: r.empresas, unidades: r.unidades, pessoas: r.pessoas, arquivos: r.arquivos });
   } catch (e) { next(e); }
 });
 

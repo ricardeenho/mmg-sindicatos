@@ -117,6 +117,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   const [painel, setPainel] = useState(null);
   const [motivoManter, setMotivoManter] = useState("");
   const [motivoPub, setMotivoPub] = useState("");
+  const [gerandoPub, setGerandoPub] = useState(false);
   const [confirmar, setConfirmar] = useState(null);
   const [encerrando, setEncerrando] = useState(null);
   const [motivoEnc, setMotivoEnc] = useState("");
@@ -243,6 +244,24 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   const emDia = gestores.filter((g) => g.em_dia).length;
   const prontoPublicar = q.etapa === "ajustes" && faltam === 0 && gestores.length > 0 && emDia === gestores.length;
 
+  /* Publicação: .zip com a Escala Geral, uma por empresa e uma por unidade */
+  async function baixarPublicacao() {
+    setGerandoPub(true);
+    try {
+      const r = await pedir(`/rodizio/quinzenas/${q.id}/publicacao`, token);
+      const bin = atob(r.zip_base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/zip" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = r.nome;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      toast(`Publicação gerada: ${r.pessoas} trabalhadores · ${r.empresas} empresas · ${r.unidades} unidades`);
+    } catch (e) { toast(e.message || "Não foi possível gerar a publicação", "erro"); }
+    finally { setGerandoPub(false); }
+  }
+
   let acao;
   if (q.etapa !== "publicada") {
     const minhasFaltam = meu ? meu.unidades - meu.resolvidas : 0;
@@ -287,6 +306,16 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
       <div className="text-right">
         <p className="text-[13px] font-semibold">Escala {String(d.definitiva.numero).padStart(3, "0")}/{d.definitiva.ano} publicada</p>
         <p className="text-[11.5px] text-slate-500">{horaBR(d.definitiva.publicada_em)} por {d.definitiva.publicada_por} · não se altera</p>
+        {souAdmin && (
+          <div className="mt-2 flex flex-col items-end gap-0.5">
+            <button disabled={gerandoPub} onClick={baixarPublicacao}
+              className="inline-flex items-center gap-2 bg-slate-900 text-white rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-50">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" /></svg>
+              {gerandoPub ? "Gerando os arquivos…" : "Publicação"}
+            </button>
+            <span className="text-[11.5px] text-slate-500 max-w-[260px]">.zip com a Escala Geral, uma escala por empresa e uma por unidade (mural)</span>
+          </div>
+        )}
       </div>
     );
   }
