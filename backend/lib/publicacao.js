@@ -207,7 +207,7 @@ async function gerarPublicacao(meta, linhas) {
   ].filter((x, i, a) => x !== '' || a[i - 1] !== '').join('\r\n');
   arquivos.push({ nome: 'LEIA-ME.txt', dados: Buffer.from(`﻿${leia}\r\n`, 'utf8') });
 
-  return { zip: montarZip(arquivos), empresas: emps.length, unidades: unis.length, pessoas, arquivos: arquivos.length };
+  return { zip: montarZip(arquivos), lista: arquivos, empresas: emps.length, unidades: unis.length, pessoas, arquivos: arquivos.length };
 }
 
 module.exports = { gerarPublicacao };

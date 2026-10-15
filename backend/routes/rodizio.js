@@ -1400,46 +1400,52 @@ router.get('/escala/:escalaId/linhas', async (req, res, next) => {
 });
 
 /* ==================================================================
- * GET /rodizio/quinzenas/:qid/publicacao — pacote de divulgação (.zip)
- * Só o administrador, e só de escala definitiva já publicada: Escala
- * Geral, uma escala por empresa e uma por unidade/setor (mural).
- * Devolve o arquivo em base64 dentro do JSON, para a tela baixar.
+ * PUBLICAÇÃO — pacote de divulgação (Escala Geral, por empresa, por unidade)
+ * Só o administrador, e só de escala definitiva já publicada.
+ *   GET  /rodizio/quinzenas/:qid/publicacao        -> .zip (base64 no JSON)
+ *   POST /rodizio/quinzenas/:qid/publicacao/drive  -> envia os PDFs ao Google Drive
+ *   GET  /rodizio/quinzenas/:qid/publicacao/drive  -> andamento do envio
  * ================================================================ */
+const erroHttp = (status, msg, extra = {}) => Object.assign(new Error(msg), { status, ...extra });
+
+async function prepararPublicacao(qid) {
+  const q = await quinzenaPorId(qid);
+  if (!q) throw erroHttp(404, 'Quinzena não encontrada');
+  if (!q.definitiva_escala_id) throw erroHttp(409, 'A publicação só sai de uma escala definitiva já publicada. Publique a escala primeiro.');
+  const { rows: [e] } = await consulta(`
+    select numero, ano, status, publicada_em, publicada_por, hash_publicacao
+      from escalas where id = $1`, [q.definitiva_escala_id]);
+  if (!e || e.status !== 'publicada') throw erroHttp(409, 'A escala definitiva desta quinzena não está publicada.');
+
+  const { rows: linhas } = await consulta(`
+    select i.trabalhador_id, t.codigo, t.nome,
+           to_char(i.data_inicio, 'YYYY-MM-DD') as data_inicio,
+           to_char(i.data_fim, 'YYYY-MM-DD') as data_fim,
+           lo.nome as origem_nome, lo.cidade as origem_cidade,
+           u.id as unidade_id, u.codigo as ucodigo, u.setor,
+           l.id as local_id, coalesce(l.nome, u.nome_completo) as empresa,
+           coalesce(l.cidade, u.cidade) as cidade
+      from escala_itens i
+      join trabalhadores t on t.id = i.trabalhador_id
+      join unidades u on u.id = i.destino_unidade_id
+      left join locais l on l.id = u.local_id
+      left join locais lo on lo.id = i.origem_local_id
+     where i.escala_id = $1
+  `, [q.definitiva_escala_id]);
+  if (!linhas.length) throw erroHttp(409, 'A escala publicada não tem linhas.');
+
+  const meta = {
+    rotulo: `${String(e.numero).padStart(3, '0')}/${e.ano}`,
+    inicio: soData(q.inicio), fim: soData(q.fim),
+    publicada_em: e.publicada_em, publicada_por: e.publicada_por, hash: e.hash_publicacao,
+  };
+  const r = await gerarPublicacao(meta, linhas);
+  return { q, e, meta, r };
+}
+
 router.get('/quinzenas/:qid/publicacao', autorizar('admin'), async (req, res, next) => {
   try {
-    const q = await quinzenaPorId(req.params.qid);
-    if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
-    if (!q.definitiva_escala_id) {
-      return res.status(409).json({ error: 'A publicação só sai de uma escala definitiva já publicada. Publique a escala primeiro.' });
-    }
-    const { rows: [e] } = await consulta(`
-      select numero, ano, status, publicada_em, publicada_por, hash_publicacao
-        from escalas where id = $1`, [q.definitiva_escala_id]);
-    if (!e || e.status !== 'publicada') return res.status(409).json({ error: 'A escala definitiva desta quinzena não está publicada.' });
-
-    const { rows: linhas } = await consulta(`
-      select i.trabalhador_id, t.codigo, t.nome,
-             to_char(i.data_inicio, 'YYYY-MM-DD') as data_inicio,
-             to_char(i.data_fim, 'YYYY-MM-DD') as data_fim,
-             lo.nome as origem_nome, lo.cidade as origem_cidade,
-             u.id as unidade_id, u.codigo as ucodigo, u.setor,
-             l.id as local_id, coalesce(l.nome, u.nome_completo) as empresa,
-             coalesce(l.cidade, u.cidade) as cidade
-        from escala_itens i
-        join trabalhadores t on t.id = i.trabalhador_id
-        join unidades u on u.id = i.destino_unidade_id
-        left join locais l on l.id = u.local_id
-        left join locais lo on lo.id = i.origem_local_id
-       where i.escala_id = $1
-    `, [q.definitiva_escala_id]);
-    if (!linhas.length) return res.status(409).json({ error: 'A escala publicada não tem linhas.' });
-
-    const meta = {
-      rotulo: `${String(e.numero).padStart(3, '0')}/${e.ano}`,
-      inicio: soData(q.inicio), fim: soData(q.fim),
-      publicada_em: e.publicada_em, publicada_por: e.publicada_por, hash: e.hash_publicacao,
-    };
-    const r = await gerarPublicacao(meta, linhas);
+    const { q, e, meta, r } = await prepararPublicacao(req.params.qid);
     const nome = `Publicacao Escala ${String(e.numero).padStart(3, '0')}-${e.ano} (${soData(q.inicio)} a ${soData(q.fim)}).zip`;
 
     await registrarEvento({
@@ -1450,7 +1456,117 @@ router.get('/quinzenas/:qid/publicacao', autorizar('admin'), async (req, res, ne
     }).catch((err) => console.error('publicação (auditoria):', err.message));
 
     res.json({ nome, zip_base64: r.zip.toString('base64'), empresas: r.empresas, unidades: r.unidades, pessoas: r.pessoas, arquivos: r.arquivos });
-  } catch (e) { next(e); }
+  } catch (e) {
+    if (e.status) return res.status(e.status).json({ error: e.message });
+    next(e);
+  }
+});
+
+/* ---------- envio ao Google Drive ---------- */
+const jobsDrive = new Map(); // quinzena_id -> andamento (fica na memória do servidor)
+
+async function emailsDosGestores() {
+  // to_jsonb: não quebra se a coluna "email" não existir com esse nome
+  const { rows } = await consulta(`
+    select distinct us.id, us.nome,
+           coalesce(nullif(trim(to_jsonb(us)->>'email'), ''),
+                    case when to_jsonb(us)->>'usuario' like '%@%' then trim(to_jsonb(us)->>'usuario') end) as email
+      from unidade_gestor_mmg g
+      join usuarios us on us.id = g.usuario_id
+     order by us.nome`);
+  return rows;
+}
+
+async function enviarPublicacaoAoDrive(job, qid, ctx) {
+  const D = require('../lib/driveRodizio');
+  const { q, meta, r } = ctx;
+  try {
+    const cli = D.cliente();
+    const ini = soData(q.inicio);
+    const nomeQ = `${ini.slice(5, 7)}.${ini.slice(0, 4)} ${n(ini.slice(8)) === 1 ? 1 : 2}`;
+    const raiz = await D.pasta(cli, D.RAIZ, null);
+    const pastaQ = await D.pasta(cli, nomeQ, raiz);
+    job.pasta = nomeQ; job.link = D.linkPasta(pastaQ); job.link_raiz = D.linkPasta(raiz);
+
+    // pastas filhas + o que já existe nelas (reenviar atualiza, não duplica)
+    const ids = { '': pastaQ }, existentes = {};
+    for (const a of r.lista) {
+      const sub = a.nome.includes('/') ? a.nome.split('/')[0] : '';
+      if (!(sub in ids)) ids[sub] = await D.pasta(cli, sub, pastaQ);
+    }
+    for (const sub of Object.keys(ids)) existentes[sub] = await D.arquivosDaPasta(cli, ids[sub]);
+
+    // 4 envios ao mesmo tempo, com 3 tentativas cada
+    const fila = [...r.lista];
+    const trabalhar = async () => {
+      for (let a = fila.shift(); a; a = fila.shift()) {
+        const partes = a.nome.split('/');
+        const base = partes.pop(), sub = partes[0] || '';
+        let ok = false, ultimoErro = '';
+        for (let t = 1; t <= 3 && !ok; t++) {
+          try {
+            await D.enviar(cli, {
+              nome: base, pastaId: ids[sub], existente: existentes[sub].get(base),
+              mime: base.endsWith('.pdf') ? 'application/pdf' : 'text/plain', buffer: a.dados,
+            });
+            ok = true;
+          } catch (err) { ultimoErro = err.message; await new Promise((f) => setTimeout(f, 800 * t)); }
+        }
+        if (ok) job.feito++; else job.falhas.push({ arquivo: a.nome, erro: ultimoErro });
+      }
+    };
+    await Promise.all([trabalhar(), trabalhar(), trabalhar(), trabalhar()]);
+
+    // acesso: só os e-mails dos gestores, na pasta raiz (vale para todas as quinzenas)
+    const gestores = await emailsDosGestores();
+    const jaTem = await D.quemTemAcesso(cli, raiz).catch(() => new Set());
+    for (const g of gestores) {
+      const email = String(g.email || '').trim().toLowerCase();
+      if (!email || !email.includes('@')) { job.sem_email.push(g.nome); continue; }
+      if (jaTem.has(email)) { job.compartilhado.push(g.nome); continue; }
+      try { await D.compartilhar(cli, raiz, email); job.compartilhado.push(g.nome); }
+      catch (err) { job.sem_acesso.push({ nome: g.nome, email, erro: err.message }); }
+    }
+    job.estado = job.falhas.length ? 'parcial' : 'concluido';
+    job.terminou_em = new Date().toISOString();
+
+    await registrarEvento({
+      tipo: 'rodizio_publicacao_drive', titulo: `Publicação da Escala ${meta.rotulo} enviada ao Google Drive`,
+      descricao: `${job.feito} de ${job.total} arquivos · pasta ${nomeQ} · acesso a ${job.compartilhado.length} gestor(es)`,
+      ator: job.por, atorUsuarioId: job.por_id || null, entidadeTipo: 'escala', entidadeId: q.definitiva_escala_id,
+    }).catch((err) => console.error('publicação drive (auditoria):', err.message));
+  } catch (err) {
+    job.estado = 'erro';
+    job.erro = /invalid_grant/.test(err.message) ? 'O Google recusou a autorização (invalid_grant). A autorização do Drive precisa ser refeita.' : err.message;
+    job.terminou_em = new Date().toISOString();
+    console.error('publicação drive:', err.message);
+  }
+}
+
+router.post('/quinzenas/:qid/publicacao/drive', autorizar('admin'), async (req, res, next) => {
+  try {
+    const D = require('../lib/driveRodizio');
+    if (!D.credenciaisPresentes()) return res.status(409).json({ error: 'O Google Drive ainda não está configurado neste servidor (faltam as variáveis GOOGLE_* no Railway).' });
+    const atual = jobsDrive.get(req.params.qid);
+    if (atual && atual.estado === 'rodando') return res.status(409).json({ error: 'Já existe um envio em andamento.', ...atual });
+
+    const ctx = await prepararPublicacao(req.params.qid);
+    const job = {
+      estado: 'rodando', feito: 0, total: ctx.r.lista.length, pasta: null, link: null, link_raiz: null,
+      compartilhado: [], sem_email: [], sem_acesso: [], falhas: [],
+      iniciou_em: new Date().toISOString(), por: quem(req), por_id: req.usuario.id || null,
+    };
+    jobsDrive.set(req.params.qid, job);
+    res.status(202).json(job);
+    enviarPublicacaoAoDrive(job, req.params.qid, ctx); // segue em segundo plano
+  } catch (e) {
+    if (e.status) return res.status(e.status).json({ error: e.message });
+    next(e);
+  }
+});
+
+router.get('/quinzenas/:qid/publicacao/drive', autorizar('admin'), (req, res) => {
+  res.json(jobsDrive.get(req.params.qid) || { estado: 'nenhum' });
 });
 
 module.exports = router;
