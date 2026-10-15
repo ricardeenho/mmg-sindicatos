@@ -121,7 +121,6 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   const [motivoManter, setMotivoManter] = useState("");
   const [motivoPub, setMotivoPub] = useState("");
   const [gerandoPub, setGerandoPub] = useState(false);
-  const [drive, setDrive] = useState(null);
   const [verId, setVerId] = useState(null);      /* gestor cujas unidades estou vendo (null = eu) */
   const [soAtencao, setSoAtencao] = useState(false);
   const [confirmar, setConfirmar] = useState(null);
@@ -174,13 +173,6 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
 
   const semanas = useMemo(() => (q ? semanasDa(q.inicio, q.fim) : []), [q]);
   useEffect(() => { if (q) { setPIni(semanas[0]?.[0] || q.inicio); setPFim(semanas[0]?.[0] ? somaDias(semanas[0][0], 2) : q.inicio); } }, [q?.id]); // eslint-disable-line
-
-  useEffect(() => {
-    if (eu.perfil !== "admin" || q?.etapa !== "publicada") return;
-    pedir(`/rodizio/quinzenas/${q.id}/publicacao/drive`, token)
-      .then((j) => { if (j && j.estado !== "nenhum") { setDrive(j); if (j.estado === "rodando") acompanharDrive(q.id); } })
-      .catch(() => {});
-  }, [q?.id, q?.etapa, eu.perfil]); // eslint-disable-line
 
   if (erro && !d) return <p className="text-sm text-rose-600">{erro}</p>;
   if (!d) return <p className="text-sm text-slate-400">Carregando…</p>;
@@ -283,26 +275,6 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
     finally { setGerandoPub(false); }
   }
 
-  /* Google Drive: envia os PDFs, dá acesso só aos gestores e devolve o link */
-  async function acompanharDrive(qid) {
-    for (let i = 0; i < 240; i++) {
-      const j = await pedir(`/rodizio/quinzenas/${qid}/publicacao/drive`, token);
-      setDrive(j);
-      if (j.estado !== "rodando") return j;
-      await new Promise((f) => setTimeout(f, 2500));
-    }
-  }
-  async function enviarAoDrive() {
-    try {
-      const j = await gravar(`/rodizio/quinzenas/${q.id}/publicacao/drive`, token, {}, "POST");
-      setDrive(j);
-      const fim = await acompanharDrive(q.id);
-      if (fim?.estado === "concluido") toast("Publicação enviada ao Google Drive");
-      else if (fim?.estado === "parcial") toast(`Enviada, mas ${fim.falhas.length} arquivo(s) falharam`, "erro");
-      else if (fim?.estado === "erro") toast(fim.erro || "Não foi possível enviar ao Drive", "erro");
-    } catch (e) { toast(e.message || "Não foi possível enviar ao Drive", "erro"); }
-  }
-
   let acao;
   if (q.etapa !== "publicada") {
     const minhasFaltam = meu ? meu.unidades - meu.resolvidas : 0;
@@ -357,37 +329,6 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
               {gerandoPub ? "Gerando os arquivos…" : "Publicação"}
             </button>
             <span className="text-[11.5px] text-slate-500 max-w-[260px]">.zip com a Escala Geral, uma escala por empresa e uma por unidade (mural)</span>
-            <button disabled={drive?.estado === "rodando"} onClick={enviarAoDrive}
-              className="mt-2 inline-flex items-center gap-2 bg-white text-slate-800 border border-slate-300 rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-60">
-              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16" /></svg>
-              {drive?.estado === "rodando" ? `Enviando ao Drive… ${drive.feito}/${drive.total}` : drive?.link ? "Enviar de novo ao Drive" : "Enviar ao Google Drive"}
-            </button>
-            {drive && drive.estado !== "nenhum" && (
-              <div className="mt-2 w-[300px] rounded-xl border border-slate-200 bg-white p-3 text-left text-[12px]">
-                {drive.estado === "rodando" && (
-                  <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden mb-2">
-                    <div className="h-full bg-teal-500 transition-all" style={{ width: `${drive.total ? (100 * drive.feito) / drive.total : 0}%` }} />
-                  </div>
-                )}
-                {drive.estado === "erro" && <p className="text-rose-700 font-medium">{drive.erro}</p>}
-                {drive.link && (
-                  <>
-                    <p className="font-semibold text-slate-800">Pasta {drive.pasta} · {drive.feito} de {drive.total} arquivos</p>
-                    <div className="mt-1.5 flex gap-2">
-                      <a href={drive.link} target="_blank" rel="noreferrer" className="rounded-md bg-teal-600 text-white px-2.5 py-1 font-semibold">Abrir pasta</a>
-                      <button onClick={() => { navigator.clipboard?.writeText(drive.link); toast("Link da pasta copiado"); }}
-                        className="rounded-md border border-slate-300 px-2.5 py-1 font-semibold">Copiar link</button>
-                    </div>
-                  </>
-                )}
-                {drive.estado !== "rodando" && drive.estado !== "erro" && (
-                  <p className="mt-2 text-slate-600">Acesso de leitura: {drive.compartilhado.length ? drive.compartilhado.join(", ") : "nenhum gestor"}.</p>
-                )}
-                {drive.sem_email?.length > 0 && <p className="mt-1 text-amber-700">Sem e-mail cadastrado, não receberam acesso: {drive.sem_email.join(", ")}.</p>}
-                {drive.sem_acesso?.length > 0 && <p className="mt-1 text-amber-700">O Google recusou o acesso de: {drive.sem_acesso.map((x) => `${x.nome} (${x.email})`).join(", ")}.</p>}
-                {drive.falhas?.length > 0 && <p className="mt-1 text-rose-700">{drive.falhas.length} arquivo(s) falharam. Clique em enviar de novo.</p>}
-              </div>
-            )}
           </div>
         )}
       </div>
