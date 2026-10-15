@@ -87,4 +87,4 @@ async function quemTemAcesso(drive, fileId) {
 
 const linkPasta = (id) => `https://drive.google.com/drive/folders/${id}`;
 
-module.exports = { credenciaisPresentes, cliente, pastaCaminho, arquivosDaPasta, enviar, compartilhar, quemTemAcesso, linkPasta, RAIZ };
+module.exports = { credenciaisPresentes, cliente, pasta, pastaCaminho, arquivosDaPasta, enviar, compartilhar, quemTemAcesso, linkPasta, RAIZ };
