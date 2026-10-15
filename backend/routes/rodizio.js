@@ -1,1456 +1,1553 @@
-const express = require('express');
-const { consulta, pool } = require('../db');
-const { autenticar, autorizar } = require('../middlewares/auth');
-const { registrarEvento, ipReq, navegadorReq } = require('../lib/auditoria');
-const { gerarPublicacao } = require('../lib/publicacao');
+import { useState, useEffect, useMemo, useCallback } from "react";
+import { toast } from "./Profissional.jsx";
 
-const router = express.Router();
-router.use(autenticar);
+/* 11/10/2026 — RODÍZIO POR UNIDADE
+   Cada Gestor MMG Responsável roda as unidades que assumiu. Três colunas:
+   unidades | unidade aberta | destinos e par. A COR da unidade é a
+   urgência, calculada da apuração; o SELO é o andamento da quinzena.
+   O Gestor MMG Responsável não é o gerente de unidade (que é da empresa
+   tomadora e só assina requisição). */
 
-/* 11/10/2026 — RODÍZIO POR UNIDADE.
-   Cada Gestor MMG Responsável roda as unidades que assumiu, casando
-   trocas entre colaboradores. A quinzena passa por três etapas:
-     montagem  — os gestores resolvem as unidades (finalizar ou manter);
-     ajustes   — a prévia foi enviada; quem muda de unidade responde, e o
-                 que for recusado volta para o gestor da unidade;
-     publicada — a escala definitiva saiu, com número, hora e autor.
-   A COR da unidade (urgência) é calculada da apuração na hora; o que se
-   grava é o andamento (pendente, em andamento, concluída, mantida, ajuste).
-   Não confundir o Gestor MMG Responsável com o gerente de unidade
-   (unidade_gerentes), que é da EMPRESA TOMADORA e só assina requisição.
-
-   14/10/2026 — PRÉVIA POR GESTOR. Cada Gestor MMG Responsável envia a
-   prévia das SUAS unidades quando termina, sem esperar os outros; só os
-   colaboradores delas recebem o pedido de aceite. Cada envio é uma escala
-   em "previa" com o nome do gestor (escalas.previa_gestor_id). A
-   quinzena entra em "ajustes" com a primeira prévia. A escala definitiva
-   é só do administrador e exige: todas as unidades resolvidas e a prévia
-   de cada gestor enviada depois da última mudança nas unidades dele. */
-
-const podeEscrever = autorizar('admin', 'gestor');
-const n = (x) => Math.trunc(Number(x)) || 0;
-const quem = (req) => req.usuario.nome || req.usuario.usuario;
-const erroDeRegra = (e) => e && (e.code === 'P0001' || e.code === '23514' || e.code === '23505');
-const soData = (d) => (d instanceof Date ? d.toISOString() : String(d)).slice(0, 10);
-
-/* ------------------------- datas, sem fuso ------------------------- */
-const D = (s) => new Date(`${s}T12:00:00Z`);
+const dataBR = (d) => {
+  if (!d) return "";
+  const [a, m, dia] = String(d).slice(0, 10).split("-");
+  return a && m && dia ? `${dia}/${m}/${a}` : "";
+};
+const diaMes = (d) => dataBR(d).slice(0, 5);
+const horaBR = (d) => (d ? new Date(d).toLocaleString("pt-BR", { day: "2-digit", month: "2-digit", year: "numeric", hour: "2-digit", minute: "2-digit" }) : "");
+const D = (s) => new Date(`${String(s).slice(0, 10)}T12:00:00Z`);
 const txt = (d) => d.toISOString().slice(0, 10);
 const somaDias = (s, k) => { const d = D(s); d.setUTCDate(d.getUTCDate() + k); return txt(d); };
-const ultimoDiaDoMes = (ano, mes) => new Date(Date.UTC(ano, mes, 0)).getUTCDate(); // mes 1..12
-function hojeSP() { return new Date(Date.now() - 3 * 3600000).toISOString().slice(0, 10); }
+const diasEntre = (a, b) => Math.round((D(b) - D(a)) / 86400000) + 1;
+const primeiroNome = (s) => String(s || "").split(" ")[0];
+const cap = (s) => String(s || "").toLowerCase().replace(/(^|\s)\S/g, (c) => c.toUpperCase());
 
-function quinzenaQueContem(s) {
-  const [a, m, d] = s.split('-').map(Number);
-  const mm = String(m).padStart(2, '0');
-  return d <= 15
-    ? { inicio: `${a}-${mm}-01`, fim: `${a}-${mm}-15`, numero: 1 }
-    : { inicio: `${a}-${mm}-16`, fim: `${a}-${mm}-${ultimoDiaDoMes(a, m)}`, numero: 2 };
-}
-const quinzenaSeguinte = (q) => quinzenaQueContem(somaDias(q.fim, 1));
-
-/* Prévia e publicação: 1ª quinzena, dias do mês anterior; 2ª, do mesmo mês. */
-function calendario(inicio, p) {
-  const [a, m, d] = inicio.split('-').map(Number);
-  let ano = a, mes = m, dPrev, dPub;
-  if (d === 1) {
-    mes = m - 1; if (mes === 0) { mes = 12; ano = a - 1; }
-    dPrev = n(p.previa_q1) || 27; dPub = n(p.publicacao_q1) || 28;
-  } else {
-    dPrev = n(p.previa_q2) || 12; dPub = n(p.publicacao_q2) || 13;
-  }
-  const lim = ultimoDiaDoMes(ano, mes);
-  const f = (dia) => `${ano}-${String(mes).padStart(2, '0')}-${String(Math.min(dia, lim)).padStart(2, '0')}`;
-  return { previa: f(dPrev), publicacao: f(dPub) };
-}
-
-async function criterios() {
-  const { rows: [p] } = await consulta('select * from v_janela limit 1');
-  if (!p) throw new Error('Criterios do sindicato nao encontrados');
-  return p;
-}
-
-/* -------------------------- a quinzena --------------------------- */
-async function acharOuCriarQuinzena(inicio, p, autor) {
-  const q = quinzenaQueContem(inicio);
-  await consulta(`
-    insert into rodizio_quinzenas (sindicato_id, inicio, fim, criado_por)
-    values ($1, $2::date, $3::date, $4)
-    on conflict (sindicato_id, inicio) do nothing
-  `, [p.sindicato_id, q.inicio, q.fim, autor]);
-  const { rows: [r] } = await consulta(
-    'select * from rodizio_quinzenas where sindicato_id = $1 and inicio = $2::date',
-    [p.sindicato_id, q.inicio]);
-  return aberta(r);
-}
-
-/* Escala definitiva CANCELADA (pela tela de Escalas) = quinzena reaberta:
-   volta à etapa de ajustes, com as prévias e as respostas já dadas. A
-   escala cancelada continua no arquivo; a nova publicação ganha outro
-   número. */
-async function aberta(q) {
-  if (q && q.definitiva_escala_id) {
-    const { rows: [e] } = await consulta('select status from escalas where id = $1', [q.definitiva_escala_id]);
-    if (e && e.status === 'cancelada') return { ...q, definitiva_escala_id: null, reaberta: true };
-  }
-  return q;
-}
-
-async function quinzenaPorId(id) {
-  const { rows: [q] } = await consulta('select * from rodizio_quinzenas where id = $1', [id]);
-  return aberta(q);
-}
-
-/* Convocados da prévia que ainda não responderam (enviada ou só vista),
-   em trocas que seguem valendo. */
-async function aguardandoRespostas(qid) {
-  const { rows: [r] } = await consulta(`
-    select count(*)::int as n from (
-      select distinct on (i.troca_id, i.trabalhador_id) c.status
-        from escalas e
-        join escala_itens i on i.escala_id = e.id and i.tipo = 'rodizio'
-        join convocacoes c on c.escala_item_id = i.id
-        join rodizio_trocas t on t.id = i.troca_id and t.estado not in ('desfeita', 'recusada')
-       where e.quinzena_id = $1 and e.status = 'previa'
-       order by i.troca_id, i.trabalhador_id, c.criado_em
-    ) x where x.status in ('enviada', 'vista')
-  `, [qid]);
-  return r.n;
-}
-
-const etapaDe = (q) => (q.definitiva_escala_id ? 'publicada' : q.previa_escala_id ? 'ajustes' : 'montagem');
-
-/* Quem entra na escala: um registro por pessoa, na unidade em que mais
-   trabalhou nos últimos "dias_ativo_escala" dias apurados; incluídos à
-   mão substituem a unidade de origem. Ausentes continuam na lista, com
-   a marca, para o gestor poder desfazer. */
-function basePessoas(dias) {
-  return `
-    anc as (select max(data) as fim from apuracao_dia),
-    ativos as (
-      select distinct on (a.trabalhador_id) a.trabalhador_id, a.unidade_id
-        from apuracao_dia a
-       where a.data > (select fim from anc) - ${n(dias) || 5}
-       group by a.trabalhador_id, a.unidade_id
-       order by a.trabalhador_id, count(*) desc, max(a.data) desc
-    ),
-    incl as (
-      select trabalhador_id, unidade_id from rodizio_pessoas
-       where quinzena_id = $1 and tipo = 'incluido'
-    ),
-    base as (
-      select a.trabalhador_id, a.unidade_id, false as incluido
-        from ativos a where not exists (select 1 from incl i where i.trabalhador_id = a.trabalhador_id)
-      union all
-      select trabalhador_id, unidade_id, true from incl
-    )`;
-}
-
-/* Respostas da prévia: troca com qualquer recusa vira "recusada" e as
-   duas unidades voltam para ajuste; troca com os dois aceites vira
-   "aceita". Roda sempre que a tela pede a quinzena. */
-async function sincronizarRespostas(q, autor) {
-  if (!q.previa_escala_id || q.definitiva_escala_id) return;
-  const { rows } = await consulta(`
-    with r as (
-      select t.id,
-             bool_or(c.status = 'recusada') as recusou,
-             count(*) filter (where c.status = 'aceita') as aceites
-        from rodizio_trocas t
-        join escala_itens i on i.troca_id = t.id and i.tipo = 'rodizio'
-        join escalas e on e.id = i.escala_id and e.quinzena_id = $1 and e.status = 'previa'
-        join convocacoes c on c.escala_item_id = i.id
-       where t.quinzena_id = $1 and t.estado in ('enviada', 'sem_resposta')
-       group by t.id
-    )
-    update rodizio_trocas t
-       set estado = case when r.recusou then 'recusada' else 'aceita' end
-      from r
-     where t.id = r.id and (r.recusou or r.aceites >= 2)
-    returning t.id, t.estado, t.a_unidade_id, t.b_unidade_id
-  `, [q.id]);
-
-  const recusadas = rows.filter((r) => r.estado === 'recusada');
-  for (const r of recusadas) {
-    for (const u of [r.a_unidade_id, r.b_unidade_id]) {
-      await consulta(`
-        insert into rodizio_unidades (quinzena_id, unidade_id, status, motivo, atualizado_por)
-        values ($1, $2, 'ajuste', 'Troca recusada na prévia', $3)
-        on conflict (quinzena_id, unidade_id) do update
-          set status = 'ajuste', motivo = 'Troca recusada na prévia',
-              atualizado_por = excluded.atualizado_por, atualizado_em = now()
-      `, [q.id, u, autor || 'sistema']);
-    }
-  }
-}
-
-/* Unidade passa a "em andamento" quando alguém mexe nela. Unidade em
-   ajuste continua em ajuste até o gestor finalizar ou manter de novo. */
-async function marcarAndamento(cliente, quinzenaId, unidadeId, autor) {
-  await cliente.query(`
-    insert into rodizio_unidades (quinzena_id, unidade_id, status, atualizado_por)
-    values ($1, $2, 'andamento', $3)
-    on conflict (quinzena_id, unidade_id) do update
-      set status = case when rodizio_unidades.status = 'ajuste' then 'ajuste' else 'andamento' end,
-          motivo = case when rodizio_unidades.status = 'ajuste' then rodizio_unidades.motivo else null end,
-          atualizado_por = excluded.atualizado_por, atualizado_em = now()
-  `, [quinzenaId, unidadeId, autor]);
-}
-
-async function gestorDe(unidadeId) {
-  const { rows: [g] } = await consulta(`
-    select g.usuario_id, u.nome from unidade_gestor_mmg g
-      join usuarios u on u.id = g.usuario_id where g.unidade_id = $1`, [unidadeId]);
-  return g || null;
-}
-
-/* Só o Gestor MMG Responsável mexe na unidade. 14/10/2026: o administrador
-   também pode, para resolver o que um gestor deixou parado; a unidade
-   precisa ter gestor, e o nome de quem agiu fica gravado em cada ação
-   (atualizado_por, montada_por, evento da prévia). */
-async function exigirGestor(req, res, unidadeId) {
-  if (!req.usuario.id) {
-    res.status(403).json({ error: 'Entre com o seu acesso pessoal. O login de administração não pode ser Gestor MMG Responsável.' });
-    return false;
-  }
-  const g = await gestorDe(unidadeId);
-  if (!g) {
-    res.status(409).json({ error: 'Esta unidade ainda não tem Gestor MMG Responsável. Assuma a unidade antes.' });
-    return false;
-  }
-  if (g.usuario_id !== req.usuario.id && req.usuario.perfil !== 'admin') {
-    res.status(403).json({ error: `Só ${g.nome}, Gestor MMG Responsável por esta unidade, ou um administrador pode mexer nela.` });
-    return false;
-  }
-  return true;
-}
-
-async function exigirEtapa(res, q, permitidas) {
-  const e = etapaDe(q);
-  if (!permitidas.includes(e)) {
-    const txtE = { montagem: 'em montagem', ajustes: 'com a prévia enviada', publicada: 'com a escala definitiva publicada' }[e];
-    res.status(409).json({ error: `Esta quinzena está ${txtE}. Esta ação não cabe nesta etapa.` });
-    return false;
-  }
-  return true;
-}
-
-
-/* ==================================================================
- * 13/10/2026 — REGRA 9 DO REGIMENTO: RECUSAS E AFASTAMENTO
- *
- * Três recusas que CONTAM (v_recusas_rodizio), dentro da janela, afastam
- * a pessoa da primeira quinzena ainda sem prévia depois da última
- * recusa. Daí em diante ela só pode ser escalada FORA da unidade-mãe, até
- * cumprir um rodízio — confirmado pelo Ponto, nunca pelo clique do
- * aceite. Cumprir um rodízio zera a contagem.
- *
- * "Unidade-mãe" = o LOCAL (empresa/estabelecimento) da unidade em que a
- * pessoa estava quando a recusa que fechou a conta aconteceu. Trocar de
- * setor dentro do mesmo local não conta como sair da mãe.
- *
- * Tudo isto fica DESLIGADO enquanto rodizio_regra_recusa.ativa for false
- * — e, se a estrutura do banco ainda nem existir, o módulo funciona como
- * antes (nenhum destes caminhos derruba a tela).
- * ================================================================ */
-let _regra = { em: 0, v: null };
-async function regraRecusa() {
-  if (Date.now() - _regra.em < 5000) return _regra.v;
-  let v = null;
-  try {
-    const { rows: [x] } = await consulta('select * from rodizio_regra_recusa where id');
-    v = x && x.ativa ? x : null;
-  } catch (e) { v = null; }
-  _regra = { em: Date.now(), v };
-  return v;
-}
-
-async function unidadesPorId(sindicatoId) {
-  const { rows } = await consulta('select id, codigo, local_id from unidades where sindicato_id = $1', [sindicatoId]);
-  return Object.fromEntries(rows.map((u) => [u.id, u]));
-}
-
-/* a unidade u fica dentro da "mãe" da restrição r? */
-const dentroDaMae = (r, u) => !!u && (u.id === r.unidade_mae_id || (!!r.local_mae_id && u.local_id === r.local_mae_id));
-
-/* devolve o texto do impedimento, ou null se a restrição permite esse destino */
-function restricaoImpede(r, un, nome) {
-  const quem = nome || 'Este colaborador';
-  if (r.fase === 'afastado') {
-    return `${quem} está afastado desta quinzena por recusas (regra 9 do regimento) e não entra na escala.`;
-  }
-  if (dentroDaMae(r, un)) {
-    return `${quem} só pode ser escalado FORA da unidade-mãe até cumprir um rodízio (regra 9 do regimento). Escolha uma unidade de outro local.`;
-  }
-  return null;
-}
-
-async function nomeDe(id) {
-  const { rows: [t] } = await consulta('select nome, codigo from trabalhadores where id = $1', [id]);
-  return t ? `${t.nome || 'Sem nome'} (${t.codigo})` : null;
-}
-
-/* restrições em vigor para uma quinzena: { trabalhador_id: {fase, ...} }.
-   fase 'afastado' = é a quinzena do afastamento; 'fora_da_mae' = as seguintes. */
-async function restricoesDaQuinzena(q) {
-  if (!(await regraRecusa())) return {};
-  const { rows } = await consulta(`
-    select af.id, af.trabalhador_id, af.unidade_mae_id, af.local_mae_id, af.tipo,
-           to_char(af.desde_inicio, 'YYYY-MM-DD') as desde_inicio,
-           case when af.desde_inicio = $2::date then 'afastado' else 'fora_da_mae' end as fase
-      from rodizio_afastamentos af
-      join trabalhadores t on t.id = af.trabalhador_id
-     where af.encerrado_em is null and t.sindicato_id = $1 and af.desde_inicio <= $2::date
-  `, [q.sindicato_id, soData(q.inicio)]);
-  return Object.fromEntries(rows.map((x) => [x.trabalhador_id, x]));
-}
-
-/* primeira quinzena DEPOIS de uma data que ainda não tem prévia: escala
-   publicada ou em prévia não se mexe */
-async function primeiraQuinzenaLivre(sindicatoId, depoisDe) {
-  let qz = quinzenaSeguinte(quinzenaQueContem(depoisDe));
-  for (let i = 0; i < 8; i++) {
-    const { rows: [r] } = await consulta(
-      'select previa_escala_id from rodizio_quinzenas where sindicato_id = $1 and inicio = $2::date',
-      [sindicatoId, qz.inicio]);
-    if (!r || !r.previa_escala_id) return qz;
-    qz = quinzenaSeguinte(qz);
-  }
-  return qz;
-}
-
-/* Roda a cada vez que a tela pede a quinzena (e antes da prévia e da
-   publicação): (1) encerra a restrição de quem já cumpriu o rodízio fora
-   da mãe; (2) afasta quem chegou ao limite. Nunca derruba quem chamou. */
-async function aplicarAfastamentos(sindicatoId) {
-  const regra = await regraRecusa();
-  if (!regra) return;
-  try {
-    await consulta(`
-      with c as (
-        select af.id,
-               (select count(distinct a.data)
-                  from apuracao_dia a join unidades u on u.id = a.unidade_id
-                 where a.trabalhador_id = af.trabalhador_id and a.data >= af.desde_inicio
-                   and a.unidade_id is distinct from af.unidade_mae_id
-                   and (af.local_mae_id is null or u.local_id is distinct from af.local_mae_id)) as dias
-          from rodizio_afastamentos af join trabalhadores t on t.id = af.trabalhador_id
-         where af.encerrado_em is null and t.sindicato_id = $1)
-      update rodizio_afastamentos af
-         set encerrado_em = now(), encerrado_por = 'apuração do Ponto',
-             encerrado_motivo = 'Rodízio cumprido: ' || c.dias || ' dias de trabalho fora da unidade-mãe'
-        from c where c.id = af.id and c.dias >= $2
-    `, [sindicatoId, regra.dias_para_cumprir]);
-
-    const { rows: alvos } = await consulta(`
-      select r.trabalhador_id
-        from v_recusas_rodizio r join trabalhadores t on t.id = r.trabalhador_id
-       where t.sindicato_id = $1
-       group by r.trabalhador_id
-      having count(*) >= $2
-         and not exists (select 1 from rodizio_afastamentos af
-                          where af.trabalhador_id = r.trabalhador_id and af.encerrado_em is null)
-    `, [sindicatoId, regra.limite_recusas]);
-
-    for (const a of alvos) {
-      const { rows: ev } = await consulta(`
-        select troca_id, convocacao_id, tipo, motivo_recusa, quando,
-               to_char(quando_dia, 'YYYY-MM-DD') as quando_dia,
-               to_char(data_inicio, 'YYYY-MM-DD') as data_inicio,
-               to_char(data_fim, 'YYYY-MM-DD') as data_fim, unidade_mae_id
-          from v_recusas_rodizio where trabalhador_id = $1 order by quando`, [a.trabalhador_id]);
-      if (!ev.length) continue;
-      const ultimo = ev[ev.length - 1];
-      const qz = await primeiraQuinzenaLivre(sindicatoId, ultimo.quando_dia);
-      const { rows: [mae] } = await consulta('select local_id from unidades where id = $1', [ultimo.unidade_mae_id]);
-      const { rowCount } = await consulta(`
-        insert into rodizio_afastamentos (trabalhador_id, tipo, unidade_mae_id, local_mae_id, desde_inicio, eventos, criado_por)
-        values ($1, 'recusas', $2, $3, $4::date, $5::jsonb, 'sistema')
-        on conflict (trabalhador_id) where encerrado_em is null do nothing
-      `, [a.trabalhador_id, ultimo.unidade_mae_id, mae ? mae.local_id : null, qz.inicio, JSON.stringify(ev)]);
-      if (rowCount) {
-        try {
-          await registrarEvento({
-            tipo: 'rodizio_afastamento', titulo: 'Afastado do rodízio por recusas (regra 9)',
-            descricao: `${await nomeDe(a.trabalhador_id)} · ${ev.length} recusas · afastado a partir de ${qz.inicio}`,
-            ator: 'sistema', atorUsuarioId: null, entidadeTipo: 'trabalhador',
-            entidadeId: a.trabalhador_id, ip: null, navegador: null,
-          });
-        } catch (e) { /* o registro de auditoria geral nunca derruba a regra */ }
-      }
-    }
-  } catch (e) { console.error('afastamentos:', e.message); }
-}
-
-/* trocas e inclusões da quinzena que a restrição não permite */
-async function conflitosDeRestricao(q, soUnidades) {
-  const restr = await restricoesDaQuinzena(q);
-  const ids = Object.keys(restr);
-  if (!ids.length) return [];
-  const un = await unidadesPorId(q.sindicato_id);
-  const { rows: trocas } = await consulta(`
-    select a_trabalhador_id, b_trabalhador_id, a_unidade_id, b_unidade_id from rodizio_trocas
-     where quinzena_id = $1 and estado not in ('desfeita', 'recusada')`, [q.id]);
-  const { rows: incl } = await consulta(
-    "select trabalhador_id, unidade_id from rodizio_pessoas where quinzena_id = $1 and tipo = 'incluido'", [q.id]);
-  const itens = [
-    ...trocas.flatMap((t) => [[t.a_trabalhador_id, t.b_unidade_id, t.a_unidade_id], [t.b_trabalhador_id, t.a_unidade_id, t.b_unidade_id]]),
-    ...incl.map((x) => [x.trabalhador_id, x.unidade_id, x.unidade_id]),
-  ];
+/* Semanas de segunda a sexta que cabem inteiras na quinzena. */
+function semanasDa(inicio, fim) {
   const out = [];
-  for (const [tid, destino, origem] of itens) {
-    if (!restr[tid]) continue;
-    if (soUnidades && !soUnidades.has(origem)) continue;
-    const msg = restricaoImpede(restr[tid], un[destino], await nomeDe(tid));
-    if (msg && !out.includes(msg)) out.push(msg);
-  }
+  let d = inicio;
+  while (D(d).getUTCDay() !== 1) d = somaDias(d, 1);
+  while (somaDias(d, 4) <= fim) { out.push([d, somaDias(d, 4)]); d = somaDias(d, 7); }
   return out;
 }
 
-/* ==================================================================
- * GET /rodizio/quinzena?inicio=AAAA-MM-DD
- * Tudo que a tela precisa de uma vez: unidades, pessoas e trocas.
- * ================================================================ */
-router.get('/quinzena', async (req, res, next) => {
-  try {
-    const p = await criterios();
-    const hoje = hojeSP();
-    const proxima = quinzenaSeguinte(quinzenaQueContem(hoje));
-    const opcoes = [proxima, quinzenaSeguinte(proxima)];
-    const pedida = /^\d{4}-\d{2}-\d{2}$/.test(req.query.inicio || '') ? req.query.inicio : proxima.inicio;
+const SELO = {
+  pendente:  { txt: "Pendente",     cls: "border border-dashed border-slate-300 text-slate-500" },
+  andamento: { txt: "Em andamento", cls: "bg-sky-50 text-sky-700" },
+  concluida: { txt: "Concluída",    cls: "bg-emerald-50 text-emerald-700" },
+  mantida:   { txt: "Mantida",      cls: "bg-teal-50 text-teal-700" },
+  ajuste:    { txt: "Ajuste",       cls: "bg-amber-50 text-amber-700" },
+};
+const MOTIVOS_MANTER = [
+  "Único setor na cidade, sem destino perto",
+  "Efetivo mínimo, sem como repor",
+  "Ninguém deve dias",
+  "Destinos da mesma cidade parados",
+];
 
-    let q = await acharOuCriarQuinzena(pedida, p, quem(req));
-    await sincronizarRespostas(q, quem(req));
-    await aplicarAfastamentos(q.sindicato_id);
-    q = await quinzenaPorId(q.id);
-    const inicio = soData(q.inicio), fim = soData(q.fim);
+function Selo({ status }) {
+  const s = SELO[status] || SELO.pendente;
+  return <span className={`text-[10.5px] font-semibold rounded-md px-2 py-0.5 whitespace-nowrap ${s.cls}`}>{s.txt}</span>;
+}
 
-    const { rows: pessoas } = await consulta(`
-      with ${basePessoas(p.dias_ativo_escala)}
-      select b.trabalhador_id as id, t.codigo, t.nome, t.provisorio,
-             b.unidade_id, b.incluido,
-             coalesce(s.falta, 0)::int      as falta,
-             coalesce(s.dias_fora, 0)::int  as dias_fora,
-             coalesce(s.perfil, 'isento')   as perfil,
-             exists (select 1 from rodizio_pessoas rp
-                      where rp.quinzena_id = $1 and rp.trabalhador_id = b.trabalhador_id
-                        and rp.tipo = 'ausente') as ausente
-        from base b
-        join trabalhadores t on t.id = b.trabalhador_id
-        left join v_situacao s on s.trabalhador_id = b.trabalhador_id
-       order by (coalesce(s.perfil, '') = 'permanente' and coalesce(s.falta, 0) > 0) desc,
-                coalesce(s.falta, 0) desc, t.nome
-    `, [q.id]);
+/* unidade que ainda pede ação do gestor: não foi finalizada nem mantida */
+const precisaAtencao = (u) => (u.gestor_id && !["concluida", "mantida"].includes(u.status) ? 1 : 0);
 
-    const { rows: unidades } = await consulta(`
-      with ${basePessoas(p.dias_ativo_escala)},
-      ids as (
-        select unidade_id from base
-        union select unidade_id from rodizio_unidades where quinzena_id = $1
-        union select r.unidade_id from requisicoes r
-               where r.status in ('aberta', 'em_atendimento')
-                 and r.previsao_inicio <= $3::date
-                 and coalesce(r.previsao_fim, date '9999-12-31') >= $2::date
-      )
-      select u.id, u.codigo, u.setor, u.nome_completo,
-             l.id as local_id, coalesce(l.nome, u.nome_completo) as local_nome,
-             coalesce(l.cidade, u.cidade) as cidade,
-             g.usuario_id as gestor_id, us.nome as gestor_nome, g.desde as gestor_desde,
-             coalesce(ru.status, 'pendente') as status, ru.motivo,
-             ru.atualizado_por, ru.atualizado_em,
-             rq.id as req_id, rq.quantidade as req_qtd, rq.solicitante_nome as req_por,
-             rq.criado_em as req_em,
-             ul.criado_em as ultima_req_em, ul.quantidade as ultima_req_qtd, ul.status as ultima_req_status,
-             exists (
-               select 1 from escala_itens i join escalas e on e.id = i.escala_id
-                where e.status = 'publicada'
-                  and (e.natureza = 'rodizio' or i.tipo = 'rodizio')
-                  and i.data_inicio < $2::date and i.data_fim >= $2::date - 15
-                  and (i.destino_unidade_id = u.id
-                       or i.trabalhador_id in (select trabalhador_id from base where unidade_id = u.id))
-             ) as rodou
-        from unidades u
-        join ids on ids.unidade_id = u.id
-        left join locais l on l.id = u.local_id
-        left join unidade_gestor_mmg g on g.unidade_id = u.id
-        left join usuarios us on us.id = g.usuario_id
-        left join rodizio_unidades ru on ru.quinzena_id = $1 and ru.unidade_id = u.id
-        left join lateral (
-          select r.id, r.quantidade, r.solicitante_nome, r.criado_em
-            from v_requisicoes r
-           where r.unidade_id = u.id and r.status in ('aberta', 'em_atendimento')
-             and r.previsao_inicio <= $3::date
-             and coalesce(r.previsao_fim, date '9999-12-31') >= $2::date
-           order by r.criado_em desc limit 1
-        ) rq on true
-        left join lateral (
-          select r.criado_em, r.quantidade, r.status from v_requisicoes r
-           where r.unidade_id = u.id order by r.criado_em desc limit 1
-        ) ul on true
-       order by u.codigo
-    `, [q.id, inicio, fim]);
+function urgencia(u, pessoas) {
+  const ps = pessoas.filter((p) => p.unidade_id === u.id && !indisponivel(p) && p.perfil === "permanente");
+  const max = Math.max(0, ...ps.map((p) => p.falta));
+  if (max === 0) return { k: "g", barra: "bg-emerald-500", chip: "bg-emerald-50 text-emerald-700", txt: "Ninguém deve dias" };
+  if (max > 5 && !u.rodou) return { k: "r", barra: "bg-rose-500", chip: "bg-rose-50 text-rose-700", txt: `Há quem deva ${max} dias e a unidade não rodou na última quinzena` };
+  return { k: "a", barra: "bg-amber-500", chip: "bg-amber-50 text-amber-700", txt: u.rodou ? `Rodou na última quinzena; ainda há quem deva ${max} dias` : `O maior saldo é de ${max} dias` };
+}
 
-    const { rows: trocas } = await consulta(`
-      select t.id, t.a_trabalhador_id, t.a_unidade_id, t.b_trabalhador_id, t.b_unidade_id,
-             t.data_inicio, t.data_fim, t.rodada, t.estado, t.montada_por, t.montada_em,
-             ra.status as a_resposta, ra.motivo as a_motivo, ra.token as a_token,
-             rb.status as b_resposta, rb.motivo as b_motivo, rb.token as b_token
-        from rodizio_trocas t
-        left join lateral (
-          select c.status, mr.nome as motivo, c.token from escala_itens i
-            join convocacoes c on c.escala_item_id = i.id
-            left join motivos_recusa mr on mr.codigo = c.motivo_recusa
-           where i.troca_id = t.id and i.trabalhador_id = t.a_trabalhador_id
-           order by c.criado_em desc limit 1
-        ) ra on true
-        left join lateral (
-          select c.status, mr.nome as motivo, c.token from escala_itens i
-            join convocacoes c on c.escala_item_id = i.id
-            left join motivos_recusa mr on mr.codigo = c.motivo_recusa
-           where i.troca_id = t.id and i.trabalhador_id = t.b_trabalhador_id
-           order by c.criado_em desc limit 1
-        ) rb on true
-       where t.quinzena_id = $1 and t.estado <> 'desfeita'
-       order by t.montada_em
-    `, [q.id]);
+/* Regra 9 (recusas). A pessoa está "indisponível" na escala quando está ausente
+   ou quando a regra a tira dela (afastada, ou só pode sair da unidade-mãe). */
+const indisponivel = (p) => !!p.ausente || !!p.fora_da_escala;
+/* a unidade x fica dentro da "mãe" da restrição da pessoa p? */
+const impede = (p, x) => {
+  const r = p?.restricao;
+  if (!r || !x) return false;
+  if (r.fase === "afastado") return true;
+  return x.id === r.unidade_mae_id || (!!r.local_mae_id && x.local_id === r.local_mae_id);
+};
 
-    const escalaInfo = async (id) => {
-      if (!id) return null;
-      const { rows: [e] } = await consulta(`
-        select id, numero, ano, status, previa_em, previa_por, previa_hash,
-               publicada_em, publicada_por, hash_publicacao
-          from escalas where id = $1`, [id]);
-      return e || null;
-    };
+function TagRestricao({ p }) {
+  const r = p.restricao;
+  return (
+    <>
+      {r?.fase === "afastado" && <span title="Três recusas em 12 meses: fora desta quinzena (regra 9)" className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-rose-50 text-rose-700">Afastado · recusas</span>}
+      {r?.fase === "fora_da_mae" && <span title="Só pode ser escalado fora da unidade-mãe até cumprir um rodízio (regra 9)" className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-amber-50 text-amber-800">Só fora da unidade-mãe</span>}
+      {!r && p.recusas > 0 && <span title="Recusas que contam nos últimos 12 meses" className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-orange-50 text-orange-700">{p.recusas} recusa{p.recusas > 1 ? "s" : ""}</span>}
+    </>
+  );
+}
 
-    /* regra 9: recusas contadas, restrições e afastados */
-    const regraRec = await regraRecusa();
-    let contagens = {}, afastados = [];
-    const restr = await restricoesDaQuinzena(q);
-    if (regraRec) {
-      try {
-        const { rows: cs } = await consulta(`
-          select r.trabalhador_id, count(*)::int as n
-            from v_recusas_rodizio r join trabalhadores t on t.id = r.trabalhador_id
-           where t.sindicato_id = $1 group by 1`, [q.sindicato_id]);
-        contagens = Object.fromEntries(cs.map((x) => [x.trabalhador_id, x.n]));
-        const { rows: af } = await consulta(`
-          select af.id, af.tipo, to_char(af.desde_inicio, 'YYYY-MM-DD') as desde_inicio,
-                 af.criado_em, af.eventos, t.id as trabalhador_id, t.codigo, t.nome,
-                 um.codigo as mae_codigo, coalesce(lm.nome, um.nome_completo) as mae_nome
-            from rodizio_afastamentos af
-            join trabalhadores t on t.id = af.trabalhador_id
-            left join unidades um on um.id = af.unidade_mae_id
-            left join locais lm on lm.id = af.local_mae_id
-           where af.encerrado_em is null and t.sindicato_id = $1
-           order by af.desde_inicio, t.nome`, [q.sindicato_id]);
-        afastados = af.map((x) => ({
-          ...x, fase: x.desde_inicio === inicio ? 'afastado' : x.desde_inicio < inicio ? 'fora_da_mae' : 'futuro',
-        }));
-      } catch (e) { console.error('regra 9 (leitura):', e.message); }
-    }
-    const unById = Object.fromEntries(unidades.map((u) => [u.id, u]));
-    const emTroca = new Set();
-    trocas.filter((t) => t.estado !== 'recusada').forEach((t) => { emTroca.add(t.a_trabalhador_id); emTroca.add(t.b_trabalhador_id); });
-    const pessoasRegra = pessoas.map((p) => {
-      const rs = restr[p.id];
-      const fora = !rs ? false
-        : rs.fase === 'afastado' ? true
-        : !emTroca.has(p.id) && dentroDaMae(rs, unById[p.unidade_id]);
-      return {
-        ...p,
-        recusas: contagens[p.id] || 0,
-        restricao: rs ? { fase: rs.fase, desde_inicio: rs.desde_inicio, unidade_mae_id: rs.unidade_mae_id, local_mae_id: rs.local_mae_id } : null,
-        fora_da_escala: fora,
-      };
-    });
+function TagPessoa({ p }) {
+  return <><TagRestricao p={p} /><TagBase p={p} /></>;
+}
 
-    /* prévia por gestor: situação de cada um e as convocações feitas.
-       O gestor vê as dele; o administrador vê todas. */
-    let gestores = [], convocados = [];
+function TagBase({ p }) {
+  if (p.ausente) return <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-slate-100 text-slate-600">Ausente na quinzena</span>;
+  if (p.perfil === "permanente" && p.falta > 0) return <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-amber-50 text-amber-700">Deve {p.falta} dias</span>;
+  if (p.perfil === "permanente") return <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-emerald-50 text-emerald-700">Em dia</span>;
+  return <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-slate-100 text-slate-600">{p.perfil === "safrista" ? "Safrista" : "Isento"}</span>;
+}
+
+const RESPOSTA = { aceita: "Aceitou", recusada: "Recusou", vista: "Viu, sem responder", enviada: "Sem resposta" };
+
+/* =================================================================== */
+export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
+  const [inicio, setInicio] = useState(null);
+  const [d, setD] = useState(null);
+  const [erro, setErro] = useState("");
+  const [ocupado, setOcupado] = useState(false);
+
+  const [vista, setVista] = useState("unidades");
+  const [filtro, setFiltro] = useState("minhas");
+  const [cidade, setCidade] = useState("Todas");
+  const [busca, setBusca] = useState("");
+  /* 11/10: em "Minhas" o bloco de cidades começa recolhido; nas outras abas, aberto */
+  const [cidadesAbertas, setCidadesAbertas] = useState(false);
+  const [uSel, setUSel] = useState(null);
+  const [pSel, setPSel] = useState(null);
+  const [dSel, setDSel] = useState(null);
+  const [parSel, setParSel] = useState(null);
+  const [periodo, setPeriodo] = useState(0);
+  const [pIni, setPIni] = useState("");
+  const [pFim, setPFim] = useState("");
+  const [buscaOutra, setBuscaOutra] = useState(null);
+  const [painel, setPainel] = useState(null);
+  const [motivoManter, setMotivoManter] = useState("");
+  const [motivoPub, setMotivoPub] = useState("");
+  const [gerandoPub, setGerandoPub] = useState(false);
+  const [drive, setDrive] = useState(null);
+  const [verId, setVerId] = useState(null);      /* gestor cujas unidades estou vendo (null = eu) */
+  const [soAtencao, setSoAtencao] = useState(false);
+  const [confirmar, setConfirmar] = useState(null);
+  const [encerrando, setEncerrando] = useState(null);
+  const [motivoEnc, setMotivoEnc] = useState("");
+
+  const carregar = useCallback(async () => {
     try {
-      gestores = await situacaoGestores(q, p);
-      const { rows: cv } = await consulta(`
-        select distinct on (i.troca_id, i.trabalhador_id)
-               c.id, c.token, c.status, c.criado_em, c.vista_em, c.respondida_em,
-               mr.nome as motivo, c.motivo_texto,
-               t.id as trabalhador_id, t.codigo, t.nome,
-               to_char(i.data_inicio, 'YYYY-MM-DD') as data_inicio,
-               to_char(i.data_fim, 'YYYY-MM-DD') as data_fim,
-               u.codigo as destino_codigo, coalesce(l.nome, u.nome_completo) as destino_nome, u.setor as destino_setor,
-               e.previa_gestor_id as gestor_id, us.nome as gestor_nome
-          from escalas e
-          join escala_itens i on i.escala_id = e.id and i.tipo = 'rodizio'
-          join convocacoes c on c.escala_item_id = i.id
-          join rodizio_trocas tr on tr.id = i.troca_id and tr.estado <> 'desfeita'
-          join trabalhadores t on t.id = i.trabalhador_id
-          join unidades u on u.id = i.destino_unidade_id
-          left join locais l on l.id = u.local_id
-          left join usuarios us on us.id = e.previa_gestor_id
-          left join motivos_recusa mr on mr.codigo = c.motivo_recusa
-         where e.quinzena_id = $1 and e.status = 'previa'
-         order by i.troca_id, i.trabalhador_id, c.criado_em
-      `, [q.id]);
-      const admin = req.usuario.perfil === 'admin';
-      convocados = cv.filter((x) => admin || (req.usuario.id && x.gestor_id === req.usuario.id))
-        .sort((a, b) => String(a.nome || '').localeCompare(String(b.nome || '')));
-    } catch (e) { console.error('prévia por gestor (leitura):', e.message); }
+      const r = await pedir(`/rodizio/quinzena${inicio ? `?inicio=${inicio}` : ""}`, token);
+      setD(r); setErro("");
+    } catch (e) { setErro(e.message); }
+  }, [inicio, token, pedir]);
+  useEffect(() => { carregar(); }, [carregar]);
+  /* quem foi ao WhatsApp mandar os links e voltou vê as respostas novas */
+  useEffect(() => {
+    const aoVoltar = () => { if (!document.hidden) carregar(); };
+    document.addEventListener("visibilitychange", aoVoltar);
+    window.addEventListener("focus", aoVoltar);
+    return () => { document.removeEventListener("visibilitychange", aoVoltar); window.removeEventListener("focus", aoVoltar); };
+  }, [carregar]);
 
-    /* link universal de requisição, para o botão "Fazer requisição" */
-    const { rows: [link] } = await consulta(`
-      select token from links_publicos
-       where tipo = 'requisicao' and unidade_id is null and ativo
-       limit 1`).catch(() => ({ rows: [] }));
-
-    res.json({
-      link_requisicao: link ? link.token : null,
-      quinzena: { id: q.id, inicio, fim, numero: n(inicio.slice(8)) === 1 ? 1 : 2, etapa: etapaDe(q), reaberta: !!q.reaberta,
-                  aguardando: q.previa_escala_id && !q.definitiva_escala_id ? await aguardandoRespostas(q.id).catch(() => 0) : 0 },
-      calendario: { hoje, ...calendario(inicio, p) },
-      opcoes,
-      previa: await escalaInfo(q.previa_escala_id),
-      definitiva: await escalaInfo(q.definitiva_escala_id),
-      regras: { dias_ativo_escala: n(p.dias_ativo_escala) || 5, dias_por_mes: n(p.dias_por_mes) || 5,
-                ultimo_dia_apurado: (await consulta('select max(data) as d from apuracao_dia')).rows[0].d,
-                punicao: regraRec
-                  ? { ativa: true, limite: regraRec.limite_recusas, janela_meses: regraRec.janela_meses, dias_para_cumprir: regraRec.dias_para_cumprir }
-                  : { ativa: false } },
-      eu: { id: req.usuario.id || null, nome: quem(req), perfil: req.usuario.perfil },
-      unidades, pessoas: pessoasRegra, trocas, afastados, gestores, convocados,
-    });
-  } catch (e) { next(e); }
-});
-
-/* ==================================================================
- * GESTOR MMG RESPONSÁVEL
- * ================================================================ */
-router.post('/unidades/:id/assumir', podeEscrever, async (req, res, next) => {
-  try {
-    if (!req.usuario.id) {
-      return res.status(403).json({ error: 'Entre com o seu acesso pessoal. O login de administração não pode ser Gestor MMG Responsável.' });
-    }
-    const atual = await gestorDe(req.params.id);
-    if (atual) {
-      if (atual.usuario_id === req.usuario.id) return res.json({ ok: true });
-      return res.status(409).json({ error: `Esta unidade já tem Gestor MMG Responsável: ${atual.nome}.` });
-    }
-    await consulta(
-      'insert into unidade_gestor_mmg (unidade_id, usuario_id, atribuido_por) values ($1, $2, $3)',
-      [req.params.id, req.usuario.id, quem(req)]);
-    await registrarEvento({
-      tipo: 'rodizio_gestor', titulo: 'Assumiu unidade como Gestor MMG Responsável',
-      ator: quem(req), atorUsuarioId: req.usuario.id, entidadeTipo: 'unidade',
-      entidadeId: req.params.id, unidadeId: req.params.id, ip: ipReq(req), navegador: navegadorReq(req),
-    });
-    res.json({ ok: true });
-  } catch (e) {
-    if (erroDeRegra(e)) return res.status(409).json({ error: e.message });
-    next(e);
+  async function agir(caminho, corpo, ok) {
+    setOcupado(true);
+    try {
+      const r = await gravar(caminho, token, corpo || {}, "POST");
+      if (ok) toast(typeof ok === "function" ? ok(r) : ok);
+      await carregar();
+      return r;
+    } catch (e) { toast(e.message, "erro"); return null; }
+    finally { setOcupado(false); }
   }
-});
 
-router.post('/unidades/:id/deixar', podeEscrever, async (req, res, next) => {
-  const cliente = await pool.connect();
-  try {
-    const atual = await gestorDe(req.params.id);
-    if (!atual) return res.json({ ok: true });
-    if (atual.usuario_id !== req.usuario.id && req.usuario.perfil !== 'admin') {
-      return res.status(403).json({ error: `Só ${atual.nome} ou um administrador pode tirar esta unidade dele.` });
-    }
-    await cliente.query('begin');
-    await cliente.query("select set_config('mmg.quem', $1, true)", [quem(req)]);
-    await cliente.query('delete from unidade_gestor_mmg where unidade_id = $1', [req.params.id]);
-    await cliente.query('commit');
-    await registrarEvento({
-      tipo: 'rodizio_gestor', titulo: 'Deixou de ser Gestor MMG Responsável',
-      descricao: atual.usuario_id === req.usuario.id ? null : `Retirado de ${atual.nome}`,
-      ator: quem(req), atorUsuarioId: req.usuario.id || null, entidadeTipo: 'unidade',
-      entidadeId: req.params.id, unidadeId: req.params.id, ip: ipReq(req), navegador: navegadorReq(req),
-    });
-    res.json({ ok: true });
-  } catch (e) {
-    await cliente.query('rollback').catch(() => {});
-    next(e);
-  } finally { cliente.release(); }
-});
+  const eu = d?.eu || {};
+  const q = d?.quinzena;
+  const unidades = d?.unidades || [];
+  const pessoas = d?.pessoas || [];
+  const trocasVivas = useMemo(() => (d?.trocas || []).filter((t) => t.estado !== "recusada"), [d]);
+  const uDe = (id) => unidades.find((u) => u.id === id);
+  const pDe = (id) => pessoas.find((p) => p.id === id);
+  /* 14/10/2026 — clicar num gestor mostra as unidades dele. O administrador,
+     além de ver, age em nome dele (a API registra quem fez). */
+  const admin = eu.perfil === "admin";
+  const alvoId = verId || eu.id;
+  const gAlvo = (d?.gestores || []).find((g) => g.id === alvoId);
+  const noAlvo = (u) => !!u && !!alvoId && u.gestor_id === alvoId;
+  const minha = (u) => !!u && !!eu.id && u.gestor_id === (admin ? alvoId : eu.id);
+  const trocaDe = (id) => trocasVivas.find((t) => t.a_trabalhador_id === id || t.b_trabalhador_id === id);
+  const recusadaDe = (id) => (d?.trocas || []).find((t) => t.estado === "recusada" && (t.a_trabalhador_id === id || t.b_trabalhador_id === id));
+  const editavel = (u) => podeEditar && minha(u) && q && q.etapa !== "publicada";
 
-/* ==================================================================
- * ANDAMENTO DA UNIDADE: finalizar, manter, reabrir
- * ================================================================ */
-router.post('/quinzenas/:qid/unidades/:uid/status', podeEscrever, async (req, res, next) => {
-  try {
-    const q = await quinzenaPorId(req.params.qid);
-    if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
-    if (!(await exigirEtapa(res, q, ['montagem', 'ajustes']))) return;
-    if (!(await exigirGestor(req, res, req.params.uid))) return;
+  const semanas = useMemo(() => (q ? semanasDa(q.inicio, q.fim) : []), [q]);
+  useEffect(() => { if (q) { setPIni(semanas[0]?.[0] || q.inicio); setPFim(semanas[0]?.[0] ? somaDias(semanas[0][0], 2) : q.inicio); } }, [q?.id]); // eslint-disable-line
 
-    const { status } = req.body || {};
-    const motivo = String((req.body || {}).motivo || '').trim();
-    if (!['concluida', 'mantida', 'andamento'].includes(status)) {
-      return res.status(400).json({ error: 'Status inválido' });
-    }
-    if (status === 'mantida' && motivo.length < 5) {
-      return res.status(400).json({ error: 'Para manter os colaboradores, informe o motivo.' });
-    }
-    await consulta(`
-      insert into rodizio_unidades (quinzena_id, unidade_id, status, motivo, atualizado_por)
-      values ($1, $2, $3, $4, $5)
-      on conflict (quinzena_id, unidade_id) do update
-        set status = excluded.status, motivo = excluded.motivo,
-            atualizado_por = excluded.atualizado_por, atualizado_em = now()
-    `, [q.id, req.params.uid, status, status === 'mantida' ? motivo : null, quem(req)]);
-    res.json({ ok: true });
-  } catch (e) {
-    if (erroDeRegra(e)) return res.status(409).json({ error: e.message });
-    next(e);
+  useEffect(() => {
+    if (eu.perfil !== "admin" || q?.etapa !== "publicada") return;
+    pedir(`/rodizio/quinzenas/${q.id}/publicacao/drive`, token)
+      .then((j) => { if (j && j.estado !== "nenhum") { setDrive(j); if (j.estado === "rodando") acompanharDrive(q.id); } })
+      .catch(() => {});
+  }, [q?.id, q?.etapa, eu.perfil]); // eslint-disable-line
+
+  if (erro && !d) return <p className="text-sm text-rose-600">{erro}</p>;
+  if (!d) return <p className="text-sm text-slate-400">Carregando…</p>;
+
+  /* ---------------- números da quinzena ---------------- */
+  const resolvidas = unidades.filter((u) => u.gestor_id && ["concluida", "mantida"].includes(u.status)).length;
+  const semGestor = unidades.filter((u) => !u.gestor_id).length;
+  const conta = (s) => unidades.filter((u) => u.status === s).length;
+  const faltam = unidades.length - resolvidas;
+  const recusas = (d.trocas || []).filter((t) => t.estado === "recusada").length;
+  const cidades = ["Todas", ...[...new Set(unidades.map((u) => u.cidade).filter(Boolean))].sort()];
+  const regras = d.regras || {};
+  const limiteBloco = regras.dias_por_mes || 5;
+
+  const etapas = [
+    ["montagem", `Até ${diaMes(d.calendario.previa)}`, "Cada gestor roda as suas unidades"],
+    ["previa", diaMes(d.calendario.previa), "Cada gestor envia a prévia das suas unidades"],
+    ["ajustes", `${diaMes(d.calendario.publicacao)} · manhã`, "Ajustar o que foi recusado"],
+    ["publicada", diaMes(d.calendario.publicacao), "Administrador publica a escala definitiva"],
+  ];
+  const idxEtapa = q.etapa === "montagem" ? 0 : q.etapa === "ajustes" ? 2 : 3;
+
+  /* ---------------- ações ---------------- */
+  const abrirUnidade = (id) => { setUSel(id); setPSel(null); setDSel(null); setParSel(null); setPainel(null); setBuscaOutra(null); };
+  const assumir = (u) => agir(`/rodizio/unidades/${u.id}/assumir`, {}, `Você agora é o Gestor MMG Responsável pela ${u.codigo}`);
+  const deixar = (u) => agir(`/rodizio/unidades/${u.id}/deixar`, {}, `A ${u.codigo} ficou sem Gestor MMG Responsável`);
+  const status = (u, s, motivo) => agir(`/rodizio/quinzenas/${q.id}/unidades/${u.id}/status`, { status: s, motivo },
+    s === "concluida" ? `Unidade ${u.codigo} finalizada` : s === "mantida" ? `Unidade ${u.codigo}: colaboradores mantidos` : `Unidade ${u.codigo} reaberta`)
+    .then((r) => { if (r) { setPainel(null); setMotivoManter(""); } });
+  const ausente = (p, sim) => agir(`/rodizio/quinzenas/${q.id}/ausente`, { trabalhador_id: p.id, unidade_id: p.unidade_id, ausente: sim });
+  const desfazer = (t, motivo) => agir(`/rodizio/trocas/${t.id}/desfazer`, { motivo }, "Troca desfeita. As duas unidades precisam ser revistas.");
+
+  const periodoAtual = periodo < semanas.length ? semanas[periodo] : [pIni, pFim];
+  const diasPeriodo = periodoAtual[0] && periodoAtual[1] ? diasEntre(periodoAtual[0], periodoAtual[1]) : 0;
+  const periodoValido = periodoAtual[0] && periodoAtual[1] && periodoAtual[0] <= periodoAtual[1]
+    && periodoAtual[0] >= q.inicio && periodoAtual[1] <= q.fim && diasPeriodo <= limiteBloco;
+
+  async function validarTroca() {
+    const a = pDe(pSel), b = pDe(parSel);
+    const r = await agir(`/rodizio/quinzenas/${q.id}/trocas`, {
+      a_trabalhador_id: a.id, a_unidade_id: a.unidade_id, b_trabalhador_id: b.id, b_unidade_id: b.unidade_id,
+      data_inicio: periodoAtual[0], data_fim: periodoAtual[1],
+    }, (r) => `Troca validada: ${cap(primeiroNome(a.nome))} ⇄ ${cap(primeiroNome(b.nome))}${r.outro_gestor ? ` · ${r.outro_gestor} verá a troca na unidade dele` : ""}`);
+    if (r) { setPSel(null); setDSel(null); setParSel(null); setBuscaOutra(null); }
   }
-});
 
-/* ==================================================================
- * PESSOAS: ausente na quinzena, incluir quem não está nos ativos
- * ================================================================ */
-router.post('/quinzenas/:qid/ausente', podeEscrever, async (req, res, next) => {
-  const cliente = await pool.connect();
-  try {
-    const q = await quinzenaPorId(req.params.qid);
-    if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
-    if (!(await exigirEtapa(res, q, ['montagem', 'ajustes']))) return;
-    const { trabalhador_id, unidade_id, ausente } = req.body || {};
-    if (!trabalhador_id || !unidade_id) return res.status(400).json({ error: 'Faltam a pessoa ou a unidade' });
-    if (!(await exigirGestor(req, res, unidade_id))) return;
+  /* =================================================================
+   * TOPO, ETAPAS E PROGRESSO
+   * =============================================================== */
+  const topo = (
+    <div className="bg-slate-900 text-white rounded-2xl p-4 flex flex-wrap gap-4 items-center justify-between">
+      <div className="min-w-0">
+        <div className="flex items-center gap-2 flex-wrap">
+          <h2 className="text-[17px] font-semibold">Rodízio por Unidade</h2>
+          <select value={q.inicio} onChange={(e) => { setInicio(e.target.value); abrirUnidade(null); }}
+            className="!bg-slate-800 !text-white !border-slate-700 border rounded-lg px-2 py-1 text-[12.5px]">
+            {[...(d.opcoes || []), ...((d.opcoes || []).some((o) => o.inicio === q.inicio) ? [] : [{ inicio: q.inicio, fim: q.fim, numero: q.numero }])]
+              .map((o) => <option key={o.inicio} value={o.inicio}>{o.numero === 1 ? "1ª" : "2ª"} quinzena · {diaMes(o.inicio)} a {dataBR(o.fim)}</option>)}
+          </select>
+        </div>
+        <p className="text-[12px] text-slate-400 mt-1">
+          Ativos para a escala: últimos {regras.dias_ativo_escala} dias apurados (até {dataBR(regras.ultimo_dia_apurado)}) · bloco de rodízio de até {limiteBloco} dias
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {etapas.map(([k, quando, oque], i) => (
+          <span key={k} className={`rounded-full px-3 py-1 text-[11.5px] border ${
+            i === idxEtapa ? "bg-teal-600 border-teal-600 text-white" : i < idxEtapa ? "border-teal-800 text-teal-300" : "border-slate-700 text-slate-400"}`}>
+            <b className="font-semibold">{quando}</b> {oque}
+          </span>
+        ))}
+      </div>
+    </div>
+  );
 
-    if (ausente) {
-      const { rows: [t] } = await consulta(`
-        select 1 from rodizio_trocas where quinzena_id = $1
-           and estado not in ('desfeita', 'recusada')
-           and $2 in (a_trabalhador_id, b_trabalhador_id) limit 1`, [q.id, trabalhador_id]);
-      if (t) return res.status(409).json({ error: 'Esta pessoa está numa troca. Desfaça a troca antes de marcar ausência.' });
-    }
-    await cliente.query('begin');
-    if (ausente) {
-      await cliente.query(`
-        insert into rodizio_pessoas (quinzena_id, trabalhador_id, tipo, unidade_id, motivo, registrado_por)
-        values ($1, $2, 'ausente', $3, $4, $5)
-        on conflict (quinzena_id, trabalhador_id, tipo) do nothing
-      `, [q.id, trabalhador_id, unidade_id, String((req.body || {}).motivo || '').trim() || null, quem(req)]);
-    } else {
-      await cliente.query(
-        "delete from rodizio_pessoas where quinzena_id = $1 and trabalhador_id = $2 and tipo = 'ausente'",
-        [q.id, trabalhador_id]);
-    }
-    await marcarAndamento(cliente, q.id, unidade_id, quem(req));
-    await cliente.query('commit');
-    res.json({ ok: true });
-  } catch (e) {
-    await cliente.query('rollback').catch(() => {});
-    next(e);
-  } finally { cliente.release(); }
-});
+  /* 14/10/2026 — prévia por gestor; definitiva só do administrador */
+  const gestores = d.gestores || [];
+  const souAdmin = eu.perfil === "admin";
+  const meu = gestores.find((g) => g.id === (souAdmin ? alvoId : eu.id));
+  const agindoPor = souAdmin && verId && verId !== eu.id ? gestores.find((g) => g.id === verId) : null;
+  const nomeAlvo = primeiroNome(cap(agindoPor?.nome || ""));
+  const emDia = gestores.filter((g) => g.em_dia).length;
+  const prontoPublicar = q.etapa === "ajustes" && faltam === 0 && gestores.length > 0 && emDia === gestores.length;
 
-/* GET /rodizio/pessoas/buscar?q= — código, nome ou começo do código */
-router.get('/pessoas/buscar', async (req, res, next) => {
-  try {
-    const t = String(req.query.q || '').trim();
-    if (t.length < 2) return res.json([]);
-    const semAcento = (x) => `translate(lower(${x}), 'áàâãäéèêëíìîïóòôõöúùûüç', 'aaaaaeeeeiiiiooooouuuuc')`;
-    const { rows } = await consulta(`
-      select t.id, t.codigo, t.nome, t.provisorio, t.ultimo_dia,
-             (select u.codigo from apuracao_dia a join unidades u on u.id = a.unidade_id
-               where a.trabalhador_id = t.id order by a.data desc limit 1) as ultima_unidade
-        from trabalhadores t
-       where t.codigo like $1 || '%'
-          or ${semAcento('t.nome')} like '%' || ${semAcento('$2')} || '%'
-       order by (t.codigo = $1) desc, t.ultimo_dia desc nulls last
-       limit 15
-    `, [t.replace(/\D/g, '') || '§', t]);
-    /* regra 9: quem está afastado ou só pode ir para fora da unidade-mãe */
-    if (rows.length && (await regraRecusa())) {
-      try {
-        const { rows: af } = await consulta(`
-          select trabalhador_id, to_char(desde_inicio, 'YYYY-MM-DD') as desde_inicio
-            from rodizio_afastamentos
-           where encerrado_em is null and trabalhador_id = any($1::uuid[])`, [rows.map((x) => x.id)]);
-        const m = Object.fromEntries(af.map((x) => [x.trabalhador_id, x.desde_inicio]));
-        rows.forEach((x) => { x.restricao_desde = m[x.id] || null; });
-      } catch (e) { /* sem a tabela, sem a etiqueta */ }
-    }
-    res.json(rows);
-  } catch (e) { next(e); }
-});
-
-/* POST /rodizio/quinzenas/:qid/incluir
-   { unidade_id, trabalhador_id }  — quem já existe
-   { unidade_id, codigo, nome }    — código que ainda não veio no Ponto:
-                                     nasce como provisório */
-router.post('/quinzenas/:qid/incluir', podeEscrever, async (req, res, next) => {
-  const cliente = await pool.connect();
-  try {
-    const q = await quinzenaPorId(req.params.qid);
-    if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
-    if (!(await exigirEtapa(res, q, ['montagem', 'ajustes']))) return;
-    const { unidade_id } = req.body || {};
-    if (!unidade_id) return res.status(400).json({ error: 'Falta a unidade' });
-    if (!(await exigirGestor(req, res, unidade_id))) return;
-
-    await cliente.query('begin');
-    let id = (req.body || {}).trabalhador_id;
-    if (!id) {
-      const codigo = String((req.body || {}).codigo || '').replace(/\D/g, '');
-      const nome = String((req.body || {}).nome || '').trim().replace(/\s+/g, ' ');
-      if (!codigo) { await cliente.query('rollback'); return res.status(400).json({ error: 'Informe o código do colaborador' }); }
-      const { rows: [ja] } = await cliente.query(
-        'select id from trabalhadores where sindicato_id = $1 and codigo = $2', [q.sindicato_id, codigo]);
-      if (ja) id = ja.id;
-      else {
-        if (nome.split(' ').length < 2) {
-          await cliente.query('rollback');
-          return res.status(400).json({ error: 'Código novo: informe o nome completo para cadastrar como provisório.' });
-        }
-        const { rows: [novo] } = await cliente.query(`
-          insert into trabalhadores (sindicato_id, codigo, nome, provisorio, provisorio_por, provisorio_em)
-          values ($1, $2, $3, true, $4, now()) returning id
-        `, [q.sindicato_id, codigo, nome.toUpperCase(), quem(req)]);
-        id = novo.id;
-      }
-    }
-    const rsInc = (await restricoesDaQuinzena(q))[id];
-    if (rsInc) {
-      const un = await unidadesPorId(q.sindicato_id);
-      const bloqueio = restricaoImpede(rsInc, un[unidade_id], await nomeDe(id));
-      if (bloqueio) { await cliente.query('rollback'); return res.status(409).json({ error: bloqueio }); }
-    }
-    const { rows: [troca] } = await cliente.query(`
-      select 1 from rodizio_trocas where quinzena_id = $1
-         and estado not in ('desfeita', 'recusada')
-         and $2 in (a_trabalhador_id, b_trabalhador_id) limit 1`, [q.id, id]);
-    if (troca) {
-      await cliente.query('rollback');
-      return res.status(409).json({ error: 'Esta pessoa já está numa troca nesta quinzena.' });
-    }
-    await cliente.query(`
-      insert into rodizio_pessoas (quinzena_id, trabalhador_id, tipo, unidade_id, registrado_por)
-      values ($1, $2, 'incluido', $3, $4)
-      on conflict (quinzena_id, trabalhador_id, tipo) do update
-        set unidade_id = excluded.unidade_id, registrado_por = excluded.registrado_por, registrado_em = now()
-    `, [q.id, id, unidade_id, quem(req)]);
-    await cliente.query(
-      "delete from rodizio_pessoas where quinzena_id = $1 and trabalhador_id = $2 and tipo = 'ausente'",
-      [q.id, id]);
-    await marcarAndamento(cliente, q.id, unidade_id, quem(req));
-    await cliente.query('commit');
-    res.json({ ok: true, trabalhador_id: id });
-  } catch (e) {
-    await cliente.query('rollback').catch(() => {});
-    if (erroDeRegra(e)) return res.status(409).json({ error: e.message });
-    next(e);
-  } finally { cliente.release(); }
-});
-
-router.delete('/quinzenas/:qid/incluir/:tid', podeEscrever, async (req, res, next) => {
-  try {
-    const q = await quinzenaPorId(req.params.qid);
-    if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
-    if (!(await exigirEtapa(res, q, ['montagem', 'ajustes']))) return;
-    const { rows: [p] } = await consulta(
-      "select unidade_id from rodizio_pessoas where quinzena_id = $1 and trabalhador_id = $2 and tipo = 'incluido'",
-      [q.id, req.params.tid]);
-    if (!p) return res.json({ ok: true });
-    if (!(await exigirGestor(req, res, p.unidade_id))) return;
-    await consulta(
-      "delete from rodizio_pessoas where quinzena_id = $1 and trabalhador_id = $2 and tipo = 'incluido'",
-      [q.id, req.params.tid]);
-    res.json({ ok: true });
-  } catch (e) { next(e); }
-});
-
-/* ==================================================================
- * TROCAS CASADAS
- * ================================================================ */
-router.post('/quinzenas/:qid/trocas', podeEscrever, async (req, res, next) => {
-  const cliente = await pool.connect();
-  try {
-    const q = await quinzenaPorId(req.params.qid);
-    if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
-    if (!(await exigirEtapa(res, q, ['montagem', 'ajustes']))) return;
-    const { a_trabalhador_id, a_unidade_id, b_trabalhador_id, b_unidade_id, data_inicio, data_fim } = req.body || {};
-    if (!a_trabalhador_id || !a_unidade_id || !b_trabalhador_id || !b_unidade_id || !data_inicio || !data_fim) {
-      return res.status(400).json({ error: 'Faltam dados da troca' });
-    }
-    if (!(await exigirGestor(req, res, a_unidade_id))) return;
-    const gB = await gestorDe(b_unidade_id);
-    if (!gB) return res.status(409).json({ error: 'A unidade de destino ainda não tem Gestor MMG Responsável.' });
-
-    const { rows: aus } = await consulta(`
-      select 1 from rodizio_pessoas where quinzena_id = $1 and tipo = 'ausente'
-         and trabalhador_id in ($2, $3)`, [q.id, a_trabalhador_id, b_trabalhador_id]);
-    if (aus.length) return res.status(409).json({ error: 'Uma das pessoas está marcada como ausente na quinzena.' });
-
-    const restrT = await restricoesDaQuinzena(q);
-    if (restrT[a_trabalhador_id] || restrT[b_trabalhador_id]) {
-      const un = await unidadesPorId(q.sindicato_id);
-      const ea = restrT[a_trabalhador_id] && restricaoImpede(restrT[a_trabalhador_id], un[b_unidade_id], await nomeDe(a_trabalhador_id));
-      const eb = restrT[b_trabalhador_id] && restricaoImpede(restrT[b_trabalhador_id], un[a_unidade_id], await nomeDe(b_trabalhador_id));
-      if (ea || eb) return res.status(409).json({ error: ea || eb });
-    }
-
-    await cliente.query('begin');
-    const { rows: [t] } = await cliente.query(`
-      insert into rodizio_trocas
-        (quinzena_id, a_trabalhador_id, a_unidade_id, b_trabalhador_id, b_unidade_id,
-         data_inicio, data_fim, rodada, montada_por)
-      values ($1, $2, $3, $4, $5, $6::date, $7::date, $8, $9)
-      returning id
-    `, [q.id, a_trabalhador_id, a_unidade_id, b_trabalhador_id, b_unidade_id,
-        data_inicio, data_fim, q.previa_escala_id ? 2 : 1, quem(req)]);
-    await marcarAndamento(cliente, q.id, a_unidade_id, quem(req));
-    await marcarAndamento(cliente, q.id, b_unidade_id, quem(req));
-    await cliente.query('commit');
-    res.status(201).json({ id: t.id, outro_gestor: gB.usuario_id === req.usuario.id ? null : gB.nome });
-  } catch (e) {
-    await cliente.query('rollback').catch(() => {});
-    if (erroDeRegra(e)) return res.status(409).json({ error: e.message });
-    next(e);
-  } finally { cliente.release(); }
-});
-
-router.post('/trocas/:id/desfazer', podeEscrever, async (req, res, next) => {
-  const cliente = await pool.connect();
-  try {
-    const { rows: [t] } = await consulta('select * from rodizio_trocas where id = $1', [req.params.id]);
-    if (!t) return res.status(404).json({ error: 'Troca não encontrada' });
-    const q = await quinzenaPorId(t.quinzena_id);
-    if (!(await exigirEtapa(res, q, ['montagem', 'ajustes']))) return;
-    if (['desfeita', 'recusada'].includes(t.estado)) return res.json({ ok: true });
-
-    const gA = await gestorDe(t.a_unidade_id), gB = await gestorDe(t.b_unidade_id);
-    const ids = [gA && gA.usuario_id, gB && gB.usuario_id];
-    if (!req.usuario.id || (!ids.includes(req.usuario.id) && req.usuario.perfil !== 'admin')) {
-      return res.status(403).json({ error: 'Só o Gestor MMG Responsável por uma das duas unidades, ou um administrador, pode desfazer esta troca.' });
-    }
-    const motivo = String((req.body || {}).motivo || '').trim();
-    if (t.estado !== 'montada' && motivo.length < 5) {
-      return res.status(400).json({ error: 'Esta troca já foi enviada aos colaboradores. Informe o motivo para desfazer.' });
-    }
-    await cliente.query('begin');
-    await cliente.query(`
-      update rodizio_trocas set estado = 'desfeita', desfeita_por = $2, desfeita_em = now(), motivo_desfeita = $3
-       where id = $1`, [t.id, quem(req), motivo || null]);
-    await marcarAndamento(cliente, q.id, t.a_unidade_id, quem(req));
-    await marcarAndamento(cliente, q.id, t.b_unidade_id, quem(req));
-    await cliente.query('commit');
-    res.json({ ok: true });
-  } catch (e) {
-    await cliente.query('rollback').catch(() => {});
-    if (erroDeRegra(e)) return res.status(409).json({ error: e.message });
-    next(e);
-  } finally { cliente.release(); }
-});
-
-/* ==================================================================
- * MONTAGEM DAS LINHAS DA ESCALA
- * Para cada pessoa: quem está numa troca viva ganha a linha de rodízio
- * no período da troca e as linhas de base antes e depois; quem não está
- * permanece na unidade a quinzena inteira. Ausentes ficam de fora.
- * ================================================================ */
-async function montarLinhas(cliente, q, p, estadosVivos) {
-  const inicio = soData(q.inicio), fim = soData(q.fim);
-  const { rows: pessoas } = await cliente.query(`
-    with ${basePessoas(p.dias_ativo_escala)}
-    select b.trabalhador_id, b.unidade_id, u.local_id
-      from base b join unidades u on u.id = b.unidade_id
-     where not exists (select 1 from rodizio_pessoas rp
-                        where rp.quinzena_id = $1 and rp.trabalhador_id = b.trabalhador_id and rp.tipo = 'ausente')
-  `, [q.id]);
-  const { rows: trocas } = await cliente.query(`
-    select * from rodizio_trocas where quinzena_id = $1 and estado = any($2::text[])
-  `, [q.id, estadosVivos]);
-  const { rows: reqs } = await cliente.query(`
-    select distinct on (r.unidade_id) r.unidade_id, r.id from requisicoes r
-     where r.status in ('aberta', 'em_atendimento')
-       and r.previsao_inicio <= $2::date and coalesce(r.previsao_fim, date '9999-12-31') >= $1::date
-     order by r.unidade_id, r.criado_em desc
-  `, [inicio, fim]);
-  const reqDe = Object.fromEntries(reqs.map((r) => [r.unidade_id, r.id]));
-
-  const trocaDe = {};
-  for (const t of trocas) {
-    trocaDe[t.a_trabalhador_id] = { t, destino: t.b_unidade_id };
-    trocaDe[t.b_trabalhador_id] = { t, destino: t.a_unidade_id };
+  /* Publicação: .zip com a Escala Geral, uma por empresa e uma por unidade */
+  async function baixarPublicacao() {
+    setGerandoPub(true);
+    try {
+      const r = await pedir(`/rodizio/quinzenas/${q.id}/publicacao`, token);
+      const bin = atob(r.zip_base64);
+      const bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+      const url = URL.createObjectURL(new Blob([bytes], { type: "application/zip" }));
+      const a = document.createElement("a");
+      a.href = url; a.download = r.nome;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      toast(`Publicação gerada: ${r.pessoas} trabalhadores · ${r.empresas} empresas · ${r.unidades} unidades`);
+    } catch (e) { toast(e.message || "Não foi possível gerar a publicação", "erro"); }
+    finally { setGerandoPub(false); }
   }
-  /* regra 9: afastado não entra; quem só pode ir para fora da mãe não
-     "permanece" nela nem tem linha de base nela */
-  const restr = await restricoesDaQuinzena(q);
-  const un = Object.keys(restr).length ? await unidadesPorId(q.sindicato_id) : {};
 
-  const linhas = [];
-  const add = (pp, destino, ini, f, tipo, trocaId) => {
-    if (ini > f) return;
-    linhas.push({
-      trabalhador_id: pp.trabalhador_id, origem_local_id: pp.local_id, destino_unidade_id: destino,
-      data_inicio: ini, data_fim: f, tipo, troca_id: trocaId || null,
-      requisicao_id: reqDe[destino] || null, unidade_base: pp.unidade_id,
-    });
+  /* Google Drive: envia os PDFs, dá acesso só aos gestores e devolve o link */
+  async function acompanharDrive(qid) {
+    for (let i = 0; i < 240; i++) {
+      const j = await pedir(`/rodizio/quinzenas/${qid}/publicacao/drive`, token);
+      setDrive(j);
+      if (j.estado !== "rodando") return j;
+      await new Promise((f) => setTimeout(f, 2500));
+    }
+  }
+  async function enviarAoDrive() {
+    try {
+      const j = await gravar(`/rodizio/quinzenas/${q.id}/publicacao/drive`, token, {}, "POST");
+      setDrive(j);
+      const fim = await acompanharDrive(q.id);
+      if (fim?.estado === "concluido") toast("Publicação enviada ao Google Drive");
+      else if (fim?.estado === "parcial") toast(`Enviada, mas ${fim.falhas.length} arquivo(s) falharam`, "erro");
+      else if (fim?.estado === "erro") toast(fim.erro || "Não foi possível enviar ao Drive", "erro");
+    } catch (e) { toast(e.message || "Não foi possível enviar ao Drive", "erro"); }
+  }
+
+  let acao;
+  if (q.etapa !== "publicada") {
+    const minhasFaltam = meu ? meu.unidades - meu.resolvidas : 0;
+    acao = (
+      <div className="flex flex-col items-end gap-2">
+        {meu && (
+          <div className="flex flex-col items-end gap-0.5">
+            <button disabled={!podeEditar || ocupado || minhasFaltam > 0 || meu.em_dia} onClick={() => setConfirmar("previa")}
+              className={`rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-40 ${meu.em_dia ? "bg-emerald-50 text-emerald-700 border border-emerald-200" : "bg-teal-600 text-white"}`}>
+              {meu.em_dia ? "Prévia enviada ✓"
+                : agindoPor ? `${meu.ultima ? "Reenviar" : "Enviar"} prévia em nome de ${nomeAlvo}`
+                : meu.ultima ? "Reenviar minha prévia" : "Enviar minha prévia"}
+            </button>
+            <span className="text-[11.5px] text-slate-500">
+              {minhasFaltam > 0 ? `Faltam ${minhasFaltam} ${agindoPor ? `das ${meu.unidades} de ${nomeAlvo}` : `das suas ${meu.unidades} unidades`}`
+                : meu.em_dia ? `Enviada em ${horaBR(meu.ultima)} · ${meu.convocados} convocados`
+                : meu.desatualizada ? (agindoPor ? `As unidades de ${nomeAlvo} mudaram depois da prévia` : "Suas unidades mudaram depois da prévia")
+                : `${agindoPor ? `As ${meu.unidades} unidades de ${nomeAlvo}` : `Suas ${meu.unidades} unidades`} estão resolvidas`}
+            </span>
+          </div>
+        )}
+        {souAdmin && (
+          <div className="flex flex-col items-end gap-0.5">
+            <button disabled={!podeEditar || ocupado || !prontoPublicar} onClick={() => setConfirmar("publicar")}
+              className="bg-slate-900 text-white rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-40">
+              Publicar escala definitiva
+            </button>
+            <span className="text-[11.5px] text-slate-500">
+              {faltam ? `Faltam ${faltam} ${faltam === 1 ? "unidade" : "unidades"}${semGestor ? `, ${semGestor} sem Gestor MMG Responsável` : ""}`
+                : q.aguardando ? `${q.aguardando} ${q.aguardando === 1 ? "convocado sem responder" : "convocados sem responder"}`
+                : `${emDia} de ${gestores.length} gestores com prévia em dia`}
+            </span>
+          </div>
+        )}
+        {!meu && !souAdmin && (
+          <span className="text-[11.5px] text-slate-500 max-w-[240px] text-right">
+            Você não tem unidade nesta quinzena. A escala definitiva é publicada pelo administrador.
+          </span>
+        )}
+      </div>
+    );
+  } else {
+    acao = (
+      <div className="text-right">
+        <p className="text-[13px] font-semibold">Escala {String(d.definitiva.numero).padStart(3, "0")}/{d.definitiva.ano} publicada</p>
+        <p className="text-[11.5px] text-slate-500">{horaBR(d.definitiva.publicada_em)} por {d.definitiva.publicada_por} · não se altera</p>
+        {souAdmin && (
+          <div className="mt-2 flex flex-col items-end gap-0.5">
+            <button disabled={gerandoPub} onClick={baixarPublicacao}
+              className="inline-flex items-center gap-2 bg-slate-900 text-white rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-50">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16" /></svg>
+              {gerandoPub ? "Gerando os arquivos…" : "Publicação"}
+            </button>
+            <span className="text-[11.5px] text-slate-500 max-w-[260px]">.zip com a Escala Geral, uma escala por empresa e uma por unidade (mural)</span>
+            <button disabled={drive?.estado === "rodando"} onClick={enviarAoDrive}
+              className="mt-2 inline-flex items-center gap-2 bg-white text-slate-800 border border-slate-300 rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-60">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M12 16V4m0 0l-4 4m4-4l4 4M4 20h16" /></svg>
+              {drive?.estado === "rodando" ? `Enviando ao Drive… ${drive.feito}/${drive.total}` : drive?.link ? "Enviar de novo ao Drive" : "Enviar ao Google Drive"}
+            </button>
+            {drive && drive.estado !== "nenhum" && (
+              <div className="mt-2 w-[300px] rounded-xl border border-slate-200 bg-white p-3 text-left text-[12px]">
+                {drive.estado === "rodando" && (
+                  <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden mb-2">
+                    <div className="h-full bg-teal-500 transition-all" style={{ width: `${drive.total ? (100 * drive.feito) / drive.total : 0}%` }} />
+                  </div>
+                )}
+                {drive.estado === "erro" && <p className="text-rose-700 font-medium">{drive.erro}</p>}
+                {drive.link && (
+                  <>
+                    <p className="font-semibold text-slate-800">Pasta {drive.pasta} · {drive.feito} de {drive.total} arquivos</p>
+                    <div className="mt-1.5 flex gap-2">
+                      <a href={drive.link} target="_blank" rel="noreferrer" className="rounded-md bg-teal-600 text-white px-2.5 py-1 font-semibold">Abrir pasta</a>
+                      <button onClick={() => { navigator.clipboard?.writeText(drive.link); toast("Link da pasta copiado"); }}
+                        className="rounded-md border border-slate-300 px-2.5 py-1 font-semibold">Copiar link</button>
+                    </div>
+                  </>
+                )}
+                {drive.estado !== "rodando" && drive.estado !== "erro" && (
+                  <p className="mt-2 text-slate-600">Acesso de leitura: {drive.compartilhado.length ? drive.compartilhado.join(", ") : "nenhum gestor"}.</p>
+                )}
+                {drive.sem_email?.length > 0 && <p className="mt-1 text-amber-700">Sem e-mail cadastrado, não receberam acesso: {drive.sem_email.join(", ")}.</p>}
+                {drive.sem_acesso?.length > 0 && <p className="mt-1 text-amber-700">O Google recusou o acesso de: {drive.sem_acesso.map((x) => `${x.nome} (${x.email})`).join(", ")}.</p>}
+                {drive.falhas?.length > 0 && <p className="mt-1 text-rose-700">{drive.falhas.length} arquivo(s) falharam. Clique em enviar de novo.</p>}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  const segs = [["concluida", "bg-emerald-500"], ["mantida", "bg-teal-500"], ["andamento", "bg-sky-500"], ["ajuste", "bg-amber-500"]];
+  const progresso = (
+    <div className="bg-white border border-slate-200 rounded-2xl p-4 flex flex-wrap gap-4 items-center">
+      <div className="flex-1 min-w-[240px]">
+        <div className="flex justify-between gap-2 mb-1.5">
+          <b className="text-[13.5px]">{resolvidas} de {unidades.length} unidades resolvidas</b>
+          <span className="text-[11.5px] text-slate-500">{trocasVivas.length} trocas · {pessoas.filter((p) => p.ausente).length} ausentes · {recusas} recusas</span>
+        </div>
+        <div className="h-2 rounded-full bg-slate-100 border border-slate-200 overflow-hidden flex">
+          {segs.map(([k, c]) => <i key={k} className={`block h-full ${c}`} style={{ width: `${unidades.length ? conta(k) / unidades.length * 100 : 0}%` }} />)}
+        </div>
+        <div className="flex flex-wrap gap-3 mt-1.5 text-[11.5px] text-slate-500">
+          {segs.map(([k, c]) => <span key={k} className="flex items-center gap-1.5"><i className={`w-2 h-2 rounded-full ${c}`} />{SELO[k].txt} {conta(k)}</span>)}
+          <span className="flex items-center gap-1.5"><i className="w-2 h-2 rounded-full bg-slate-300" />Pendente {conta("pendente")}</span>
+        </div>
+      </div>
+      <div className="flex gap-1 bg-slate-50 border border-slate-200 rounded-xl p-1">
+        {[["unidades", "Unidades"], ["escala", "Escala geral"]].map(([k, r]) => (
+          <button key={k} onClick={() => setVista(k)}
+            className={`px-3 py-1.5 rounded-lg text-[12.5px] font-semibold ${vista === k ? "bg-white shadow-sm text-slate-900" : "text-slate-500"}`}>{r}</button>
+        ))}
+      </div>
+      {acao}
+    </div>
+  );
+
+  const escolherGestor = (g) => {
+    const proprio = g.id === eu.id;
+    setVerId(proprio ? null : g.id); setFiltro("minhas"); setSoAtencao(g.unidades - g.resolvidas > 0);
+    setVista("unidades"); abrirUnidade(null); setCidade("Todas");
+    setTimeout(() => document.getElementById("rod-unidades")?.scrollIntoView({ behavior: "smooth", block: "start" }), 80);
   };
-  for (const pp of pessoas) {
-    const tr = trocaDe[pp.trabalhador_id];
-    const rs = restr[pp.trabalhador_id];
-    if (rs) {
-      if (rs.fase === 'afastado') continue;
-      if (!tr && dentroDaMae(rs, un[pp.unidade_id])) continue;
-      if (tr) {
-        add(pp, tr.destino, soData(tr.t.data_inicio), soData(tr.t.data_fim), 'rodizio', tr.t.id);
-        continue;
-      }
-    }
-    if (!tr) { add(pp, pp.unidade_id, inicio, fim, 'permanece'); continue; }
-    const di = soData(tr.t.data_inicio), df = soData(tr.t.data_fim);
-    add(pp, pp.unidade_id, inicio, somaDias(di, -1), 'base');
-    add(pp, tr.destino, di, df, 'rodizio', tr.t.id);
-    add(pp, pp.unidade_id, somaDias(df, 1), fim, 'base');
+  const painelGestores = q.etapa !== "publicada" && <SituacaoGestores gestores={gestores} euId={eu.id} aberto={souAdmin} verId={alvoId} aoEscolher={escolherGestor} />;
+  const faixaAgindo = q.etapa !== "publicada" && verId && verId !== eu.id && (
+    <div className="bg-amber-50 border border-amber-300 rounded-2xl px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+      <p className="text-[12.5px] text-amber-900 leading-relaxed max-w-3xl">
+        <b>Você está vendo as unidades de {cap(gAlvo?.nome || "")}.</b>{" "}
+        {souAdmin ? "Como administrador, você pode resolvê-las e enviar a prévia em nome dele; cada ação fica registrada com o seu nome."
+          : "Você só consulta: quem resolve e envia é o próprio gestor."}
+      </p>
+      <button onClick={() => { setVerId(null); setSoAtencao(false); abrirUnidade(null); }}
+        className="border border-amber-400 bg-white text-amber-900 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold">Voltar às minhas unidades</button>
+    </div>
+  );
+  const painelConv = <MeusConvocados convocados={d.convocados || []} admin={souAdmin} />;
+
+  /* Regra 9: quem está afastado por recusas. O Gestor vê; só o admin encerra. */
+  const afastados = d.afastados || [];
+  const painelAf = afastados.length > 0 && (
+    <details className="bg-white border border-slate-200 rounded-2xl group">
+      <summary className="cursor-pointer list-none px-4 py-3 flex items-center justify-between gap-2">
+        <span className="text-[13px] font-semibold">
+          {afastados.length} colaborador{afastados.length > 1 ? "es" : ""} com restrição por recusas
+          <span className="text-slate-400 font-normal"> · regra 9 do regimento</span>
+        </span>
+        <span className="text-[11.5px] text-slate-500 group-open:rotate-180 transition-transform">▾</span>
+      </summary>
+      <div className="px-4 pb-4 space-y-2">
+        <p className="text-[11.5px] text-slate-500 leading-relaxed">
+          Três recusas em {regras.punicao?.janela_meses || 12} meses afastam da escala seguinte; depois, só fora da unidade-mãe até cumprir um rodízio
+          ({regras.punicao?.dias_para_cumprir || 5} dias de Ponto fora dela).
+        </p>
+        {afastados.map((a) => (
+          <div key={a.id} className="border border-slate-200 rounded-xl px-3 py-2 flex flex-wrap items-center justify-between gap-2">
+            <span className="min-w-0 text-[12.5px]">
+              <b>{cap(a.nome) || "Sem nome"}</b> <span className="text-slate-400 tabular-nums">{a.codigo}</span>
+              <span className="block text-[11px] text-slate-500">
+                {a.fase === "afastado" ? "Fora desta quinzena" : a.fase === "fora_da_mae" ? "Só fora da unidade-mãe" : "Começa em " + dataBR(a.desde_inicio)}
+                {" · desde "}{dataBR(a.desde_inicio)}{a.mae_codigo ? ` · mãe: ${a.mae_codigo}` : ""}
+              </span>
+            </span>
+            {eu.perfil === "admin" && (encerrando === a.id ? (
+              <span className="flex gap-1.5 items-center flex-wrap">
+                <input value={motivoEnc} onChange={(e) => setMotivoEnc(e.target.value)} placeholder="Motivo (mín. 5 letras)"
+                  className="border border-slate-200 rounded-lg px-2 py-1 text-[12px]" />
+                <button disabled={ocupado || motivoEnc.trim().length < 5}
+                  onClick={async () => {
+                    const r = await agir(`/rodizio/afastamentos/${a.id}/encerrar`, { motivo: motivoEnc.trim() }, "Afastamento encerrado");
+                    if (r) { setEncerrando(null); setMotivoEnc(""); }
+                  }}
+                  className="bg-rose-600 text-white rounded-lg px-2.5 py-1 text-[12px] font-semibold disabled:opacity-40">Encerrar</button>
+                <button onClick={() => { setEncerrando(null); setMotivoEnc(""); }} className="text-[12px] text-slate-500">Voltar</button>
+              </span>
+            ) : (
+              <button onClick={() => { setEncerrando(a.id); setMotivoEnc(""); }} className="text-[11.5px] text-slate-600 font-semibold border border-slate-300 rounded-lg px-2.5 py-1">Encerrar com motivo</button>
+            ))}
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+
+  const caixaConfirmar = typeof confirmar === "string" && (
+    <div className="bg-white border-2 border-teal-500 rounded-2xl p-4 flex flex-col gap-2">
+      <b className="text-[14px]">{confirmar === "previa"
+        ? (agindoPor ? `${meu?.ultima ? "Reenviar" : "Enviar"} a prévia das unidades de ${nomeAlvo}, em nome dele?` : meu?.ultima ? "Reenviar a prévia das suas unidades?" : "Enviar a prévia das suas unidades?")
+        : "Publicar a escala definitiva?"}</b>
+      <p className="text-[12.5px] text-slate-600 leading-relaxed max-w-2xl">
+        {confirmar === "previa"
+          ? (agindoPor ? `A prévia sai em nome de ${agindoPor.nome}, e o registro mostra que foi enviada por você, administrador. ` : "") + "A prévia fica registrada com data, hora e o seu nome e não pode mais ser alterada. Só quem muda de unidade, nas suas unidades, recebe o pedido de aceite: os links aparecem em “Meus convocados”, prontos para o WhatsApp. Se algo mudar depois, você reenvia — quem já recebeu o link não recebe outro."
+          : "Junta as prévias de todos os gestores numa escala só, com número, hora e autor; ela não pode mais ser alterada, e corrigir depois só por retificação."}
+      </p>
+      {confirmar === "publicar" && q.aguardando > 0 && (
+        <div className="bg-amber-50 border border-amber-200 rounded-xl p-3 max-w-2xl">
+          <p className="text-[12.5px] text-amber-900 leading-relaxed">
+            {q.aguardando === 1 ? "Ainda falta 1 convocado responder." : `Ainda faltam ${q.aguardando} convocados responderem.`}{" "}
+            {(d.calendario?.hoje || "") >= String(q.inicio).slice(0, 10)
+              ? "O período já começou: você pode publicar mesmo assim, informando o motivo. Quem não respondeu continua escalado, marcado como sem resposta."
+              : "A escala definitiva só sai depois que todos responderem. A partir do início do período você poderá publicar mesmo assim, com motivo."}
+          </p>
+          {(d.calendario?.hoje || "") >= String(q.inicio).slice(0, 10) && (
+            <input value={motivoPub} onChange={(e) => setMotivoPub(e.target.value)} placeholder="Motivo para publicar sem todas as respostas"
+              className="mt-2 w-full border border-amber-300 rounded-lg px-3 py-2 text-[13px] bg-white" />
+          )}
+        </div>
+      )}
+      <div className="flex gap-2">
+        <button disabled={ocupado} onClick={async () => {
+          const r = await agir(`/rodizio/quinzenas/${q.id}/${confirmar === "previa" ? "previa" : "publicar"}`, confirmar === "publicar" ? { motivo: motivoPub } : (agindoPor ? { em_nome_de: agindoPor.id } : {}),
+            (r) => confirmar === "previa" ? `Prévia enviada: ${r.linhas} linhas, ${r.convocacoes} pedidos de aceite novos` : `Escala ${String(r.numero).padStart(3, "0")}/${r.ano} publicada`);
+          if (r) { if (confirmar === "publicar") { setVista("escala"); setMotivoPub(""); } setConfirmar(null); }
+        }} className="bg-teal-600 text-white rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-40">
+          {ocupado ? "Aguarde…" : confirmar === "previa" ? (meu?.ultima ? "Reenviar prévia" : "Enviar prévia") : "Publicar"}
+        </button>
+        <button onClick={() => setConfirmar(null)} className="border border-slate-300 rounded-lg px-3 py-2 text-[13px] text-slate-600">Voltar</button>
+      </div>
+    </div>
+  );
+
+  if (vista === "escala") {
+    return (
+      <div className="space-y-3">
+        {topo}{progresso}{caixaConfirmar}{painelGestores}{faixaAgindo}{painelConv}{painelAf}
+        <EscalaGeral token={token} pedir={pedir} d={d} pessoas={pessoas} trocas={trocasVivas} uDe={uDe} />
+      </div>
+    );
   }
-  return linhas;
-}
 
-async function inserirLinhas(cliente, escalaId, linhas) {
-  if (!linhas.length) return 0;
-  const col = (k) => linhas.map((l) => l[k]);
-  await cliente.query(`
-    insert into escala_itens
-      (escala_id, trabalhador_id, origem_local_id, destino_unidade_id, data_inicio, data_fim,
-       tipo, troca_id, requisicao_id, convocacao_previa_id, motivo, ordem)
-    select $1, x.trabalhador_id, x.origem_local_id, x.destino_unidade_id, x.data_inicio, x.data_fim,
-           x.tipo, x.troca_id, x.requisicao_id, x.convocacao_previa_id,
-           case x.tipo when 'rodizio' then 'rodizio: troca casada'
-                       when 'base' then 'na unidade de origem, fora do periodo da troca'
-                       else 'permanece na unidade' end,
-           row_number() over ()
-      from unnest($2::uuid[], $3::uuid[], $4::uuid[], $5::date[], $6::date[],
-                  $7::text[], $8::uuid[], $9::uuid[], $10::uuid[])
-        as x(trabalhador_id, origem_local_id, destino_unidade_id, data_inicio, data_fim,
-             tipo, troca_id, requisicao_id, convocacao_previa_id)
-  `, [escalaId, col('trabalhador_id'), col('origem_local_id'), col('destino_unidade_id'),
-      col('data_inicio'), col('data_fim'), col('tipo'), col('troca_id'), col('requisicao_id'),
-      linhas.map((l) => l.convocacao_previa_id || null)]);
-  return linhas.length;
-}
+  /* =================================================================
+   * COLUNA 1 — UNIDADES
+   * =============================================================== */
+  const t = busca.trim().toLowerCase();
+  const lista = unidades.filter((u) =>
+    (filtro === "todas" || (filtro === "minhas" ? noAlvo(u) && (!soAtencao || precisaAtencao(u)) : !u.gestor_id)) &&
+    (cidade === "Todas" || u.cidade === cidade) &&
+    (!t || u.codigo.includes(t) || (u.local_nome || "").toLowerCase().includes(t) || (u.setor || "").toLowerCase().includes(t)))
+    .sort((a, b) => (filtro === "minhas" ? (precisaAtencao(b) - precisaAtencao(a)) : 0));
+  const nMinhas = unidades.filter(noAlvo).length;
+  const nAtencao = unidades.filter((u) => noAlvo(u) && precisaAtencao(u)).length;
+  const rotuloMinhas = verId && verId !== eu.id ? primeiroNome(cap(gAlvo?.nome || "gestor")) : "Minhas";
 
-/* O que ainda impede a quinzena de seguir: unidade sem gestor ou que
-   não foi finalizada nem mantida. 14/10/2026: o conjunto de unidades é o
-   mesmo da tela — quem tem gente ativa, quem já foi mexido na quinzena e
-   quem tem requisição viva no período (mesmo sem ninguém ativo ainda). */
-async function pendencias(q, p) {
-  const { rows } = await consulta(`
-    with ${basePessoas(p.dias_ativo_escala)},
-    ids as (
-      select unidade_id from base
-      union select unidade_id from rodizio_unidades where quinzena_id = $1
-      union select r.unidade_id from requisicoes r
-             where r.status in ('aberta', 'em_atendimento')
-               and r.previsao_inicio <= $3::date
-               and coalesce(r.previsao_fim, date '9999-12-31') >= $2::date
-    )
-    select u.id, u.codigo, g.usuario_id is null as sem_gestor, coalesce(ru.status, 'pendente') as status
-      from ids join unidades u on u.id = ids.unidade_id
-      left join unidade_gestor_mmg g on g.unidade_id = u.id
-      left join rodizio_unidades ru on ru.quinzena_id = $1 and ru.unidade_id = u.id
-     where g.usuario_id is null or coalesce(ru.status, 'pendente') not in ('concluida', 'mantida')
-     order by u.codigo
-  `, [q.id, soData(q.inicio), soData(q.fim)]);
-  return rows;
-}
-function textoPendencias(rows) {
-  const sem = rows.filter((r) => r.sem_gestor).length;
-  const lista = rows.slice(0, 8).map((r) => r.codigo).join(', ');
-  return `Faltam ${rows.length} ${rows.length === 1 ? 'unidade' : 'unidades'}`
-    + (sem ? ` (${sem} sem Gestor MMG Responsável)` : '')
-    + `: ${lista}${rows.length > 8 ? '…' : ''}.`;
-}
+  const col1 = (
+    <aside id="rod-unidades" className="scroll-mt-4 bg-white border border-slate-200 rounded-2xl flex flex-col min-w-0">
+      <div className="p-3 border-b border-slate-100 space-y-2">
+        <p className="text-[13.5px] font-semibold">Unidades</p>
+        <div className="flex gap-1">
+          {[["minhas", `${rotuloMinhas} ${nMinhas}`], ["semgestor", `Sem gestor ${semGestor}`], ["todas", "Todas"]].map(([k, r]) => (
+            <button key={k} onClick={() => { setFiltro(k); setCidadesAbertas(k !== "minhas"); }}
+              className={`flex-1 rounded-lg px-2 py-1.5 text-[11.5px] font-semibold border ${filtro === k ? "bg-slate-900 text-white border-slate-900" : "bg-slate-50 text-slate-500 border-slate-200"}`}>{r}</button>
+          ))}
+        </div>
+        {filtro === "minhas" && nMinhas > 0 && (
+          <button onClick={() => setSoAtencao((v) => !v)}
+            className={`w-full flex items-center justify-between rounded-lg px-3 py-1.5 text-[12px] border ${soAtencao ? "bg-amber-50 border-amber-300 text-amber-900 font-semibold" : "bg-white border-slate-200 text-slate-600"}`}>
+            <span>{soAtencao ? "Mostrando só as que pedem atenção" : "Mostrar só as que pedem atenção"}</span>
+            <b className={nAtencao ? "text-amber-700" : "text-emerald-700"}>{nAtencao}</b>
+          </button>
+        )}
+        <input value={busca} onChange={(e) => setBusca(e.target.value)} placeholder="Número ou nome da unidade"
+          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+        <div className="flex items-center gap-2 flex-wrap">
+          <button onClick={() => setCidadesAbertas((v) => !v)}
+            className="flex items-center gap-1.5 text-[12px] font-semibold text-slate-600 border border-slate-200 rounded-lg px-2.5 py-1 hover:border-slate-400">
+            <span className={`inline-block transition-transform ${cidadesAbertas ? "rotate-90" : ""}`}>›</span>
+            {cidadesAbertas ? "Ocultar cidades" : "Filtrar por cidade"}
+          </button>
+          {!cidadesAbertas && cidade !== "Todas" && (
+            <span className="flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11.5px] border border-teal-500 bg-teal-50 text-teal-700 font-semibold">
+              {cidade}
+              <button onClick={() => setCidade("Todas")} aria-label="Tirar filtro de cidade" className="leading-none ml-0.5">×</button>
+            </span>
+          )}
+        </div>
+        {cidadesAbertas && (
+          <div className="flex flex-wrap gap-1">
+            {cidades.map((c) => (
+              <button key={c} onClick={() => setCidade(c)}
+                className={`rounded-full px-2.5 py-0.5 text-[11.5px] border ${cidade === c ? "border-teal-500 bg-teal-50 text-teal-700 font-semibold" : "border-slate-200 text-slate-500"}`}>{c}</button>
+            ))}
+          </div>
+        )}
+      </div>
+      <div className="p-2 space-y-1.5 overflow-y-auto max-h-[calc(100vh-260px)]">
+        {lista.length === 0 && (
+          <p className="text-[12.5px] text-slate-500 border border-dashed border-slate-300 rounded-xl p-4 text-center">
+            {filtro === "minhas" && nMinhas === 0
+              ? (verId && verId !== eu.id ? "Este gestor não tem unidade nesta quinzena." : "Você ainda não é Gestor MMG Responsável por nenhuma unidade. Abra a aba \"Sem gestor\" para assumir as suas.")
+              : filtro === "minhas" && soAtencao ? "Nenhuma unidade pede atenção. Tudo resolvido por aqui."
+              : "Nenhuma unidade com esse filtro."}
+          </p>
+        )}
+        {lista.map((u) => {
+          const ur = urgencia(u, pessoas);
+          const n = pessoas.filter((p) => p.unidade_id === u.id && !indisponivel(p)).length;
+          return (
+            <button key={u.id} onClick={() => abrirUnidade(u.id)}
+              className={`relative w-full text-left border rounded-xl pl-4 pr-3 py-2.5 transition ${
+                uSel === u.id ? "border-teal-500 ring-1 ring-teal-500" : "border-slate-200 hover:border-slate-400"} ${u.gestor_id && !minha(u) ? "opacity-70" : ""}`}>
+              <i className={`absolute left-0 top-2 bottom-2 w-1 rounded-r ${ur.barra}`} />
+              <span className="flex items-baseline gap-2">
+                <b className="text-[12.5px] tabular-nums">{u.codigo}</b>
+                <span className="text-[12.5px] font-semibold flex-1 min-w-0 truncate">{cap(u.local_nome)} · {cap(u.setor)}</span>
+                <Selo status={u.status} />
+              </span>
+              <span className="block text-[11.5px] text-slate-500 mt-0.5">
+                {u.cidade || "sem cidade"} · {n} {n === 1 ? "ativo" : "ativos"} · {u.req_qtd ? `pede ${u.req_qtd}` : <span className="text-rose-600">sem requisição</span>}
+              </span>
+              <span className="block text-[11.5px] mt-0.5">
+                {u.gestor_id
+                  ? <span className="text-slate-500">{u.gestor_id === eu.id ? "Você é o Gestor MMG Responsável" : `Gestor MMG Responsável: ${cap(u.gestor_nome)}`}</span>
+                  : <span className="text-amber-700 font-semibold">Sem Gestor MMG Responsável</span>}
+              </span>
+            </button>
+          );
+        })}
+      </div>
+    </aside>
+  );
 
-/* ==================================================================
- * PRÉVIA POR GESTOR — situação de cada gestor e convocações já feitas
- * ================================================================ */
-async function unidadesDoGestor(usuarioId) {
-  const { rows } = await consulta('select unidade_id from unidade_gestor_mmg where usuario_id = $1', [usuarioId]);
-  return new Set(rows.map((r) => r.unidade_id));
-}
+  /* =================================================================
+   * COLUNA 2 — UNIDADE ABERTA
+   * =============================================================== */
+  const u = uDe(uSel);
+  let col2;
+  if (!u) {
+    col2 = (
+      <section className="bg-white border border-slate-200 rounded-2xl p-6 min-w-0">
+        <p className="text-[14px] font-semibold">Escolha uma unidade à esquerda</p>
+        <p className="text-[12.5px] text-slate-500 mt-1 leading-relaxed max-w-lg">
+          A faixa colorida mostra a urgência, que vem da apuração: vermelho quando há quem deva mais de {limiteBloco} dias
+          e a unidade não rodou na última quinzena, âmbar quando ainda há saldo, verde quando ninguém deve.
+          O selo mostra o andamento desta quinzena.
+        </p>
+        {!eu.id && (
+          <p className="text-[12.5px] text-amber-700 bg-amber-50 rounded-lg p-3 mt-3">
+            Você entrou pelo login de administração. Para ser Gestor MMG Responsável, entre com o seu acesso pessoal.
+          </p>
+        )}
+      </section>
+    );
+  } else {
+    const ur = urgencia(u, pessoas);
+    const ps = pessoas.filter((p) => p.unidade_id === u.id);
+    const presentes = ps.filter((p) => !indisponivel(p)).length;
+    const pode = editavel(u);
+    const fechada = u.status === "concluida" || u.status === "mantida";
 
-/* convocação já feita, em qualquer prévia da quinzena, para cada troca+pessoa */
-async function convocacoesDaQuinzena(cliente, qid) {
-  const { rows } = await cliente.query(`
-    select distinct on (i.troca_id, i.trabalhador_id) i.troca_id, i.trabalhador_id, c.id
-      from escalas e
-      join escala_itens i on i.escala_id = e.id and i.tipo = 'rodizio' and i.troca_id is not null
-      join convocacoes c on c.escala_item_id = i.id
-     where e.quinzena_id = $1 and e.status = 'previa'
-     order by i.troca_id, i.trabalhador_id, c.criado_em`, [qid]);
-  return Object.fromEntries(rows.map((c) => [`${c.troca_id}|${c.trabalhador_id}`, c.id]));
-}
+    col2 = (
+      <section className="bg-white border border-slate-200 rounded-2xl flex flex-col min-w-0">
+        <div className="p-4 border-b border-slate-100 space-y-3">
+          <div className="flex flex-wrap gap-2 items-start justify-between">
+            <div className="min-w-0">
+              <p className="text-[15.5px] font-semibold">{u.codigo} · {cap(u.local_nome)}</p>
+              <p className="text-[12px] text-slate-500">
+                {cap(u.setor)} · {u.cidade || "sem cidade"} · {u.gestor_id ? `Gestor MMG Responsável: ${u.gestor_id === eu.id ? "você" : cap(u.gestor_nome)}` : "sem Gestor MMG Responsável"}
+              </p>
+            </div>
+            <div className="flex gap-1.5 flex-wrap">
+              <span className={`text-[11.5px] font-semibold rounded-md px-2 py-0.5 ${ur.chip}`}>{ur.txt}</span>
+              <Selo status={u.status} />
+            </div>
+          </div>
+          {u.req_qtd ? (
+            <div className="flex flex-wrap gap-4 items-center bg-slate-50 border border-slate-200 rounded-xl px-3 py-2.5">
+              <div className="min-w-0">
+                <p className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold">Requisição da quinzena</p>
+                <p className="text-[11.5px] text-slate-500">pedido em {dataBR(u.req_em)}{u.req_por ? ` por ${u.req_por}` : ""}</p>
+              </div>
+              <div className="flex gap-5 ml-auto">
+                <div><p className="text-xl font-bold tabular-nums">{u.req_qtd}</p><p className="text-[11px] text-slate-500">pedidos</p></div>
+                <div><p className={`text-xl font-bold tabular-nums ${presentes < u.req_qtd ? "text-rose-600" : ""}`}>{presentes}</p><p className="text-[11px] text-slate-500">escalados</p></div>
+              </div>
+            </div>
+          ) : (
+            <div className="flex flex-wrap gap-3 items-center border border-dashed border-slate-300 rounded-xl px-3 py-2.5">
+              <div className="min-w-0">
+                <p className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold">Sem requisição aberta para a quinzena</p>
+                <p className="text-[11.5px] text-slate-500">
+                  {u.ultima_req_em ? `Última requisição em ${dataBR(u.ultima_req_em)} (${u.ultima_req_qtd} pessoas, ${String(u.ultima_req_status || "").replace("_", " ")}).` : "Nenhuma requisição registrada."}
+                </p>
+              </div>
+              {pode && (
+                <a href={`/?r=${d.link_requisicao || ""}`} onClick={(e) => { if (!d.link_requisicao) { e.preventDefault(); toast("Não achei o link universal de requisição. Use o da aba Requisições.", "erro"); } else toast(`Escolha a unidade ${u.codigo} no formulário que abriu.`); }}
+                  target="_blank" rel="noreferrer"
+                  className="ml-auto bg-teal-600 text-white rounded-lg px-3 py-1.5 text-[12px] font-semibold">Fazer requisição</a>
+              )}
+            </div>
+          )}
+        </div>
 
-/* Uma linha por Gestor MMG Responsável com unidade na quinzena:
-   unidades, resolvidas, última prévia, se mexeu depois dela e as
-   respostas das convocações que ele enviou. */
-async function situacaoGestores(q, p) {
-  const { rows } = await consulta(`
-    with ${basePessoas(p.dias_ativo_escala)},
-    ids as (
-      select unidade_id from base
-      union select unidade_id from rodizio_unidades where quinzena_id = $1
-      union select r.unidade_id from requisicoes r
-             where r.status in ('aberta', 'em_atendimento')
-               and r.previsao_inicio <= $3::date
-               and coalesce(r.previsao_fim, date '9999-12-31') >= $2::date
-    ),
-    uni as (
-      select g.usuario_id, ids.unidade_id, coalesce(ru.status, 'pendente') as status, ru.atualizado_em
-        from ids join unidade_gestor_mmg g on g.unidade_id = ids.unidade_id
-        left join rodizio_unidades ru on ru.quinzena_id = $1 and ru.unidade_id = ids.unidade_id
-    ),
-    ag as (
-      select usuario_id, count(*)::int as unidades,
-             count(*) filter (where status in ('concluida', 'mantida'))::int as resolvidas,
-             max(atualizado_em) as mexeu_em
-        from uni group by usuario_id
-    ),
-    pv as (
-      select previa_gestor_id as usuario_id, max(previa_em) as ultima, count(*)::int as envios
-        from escalas where quinzena_id = $1 and status = 'previa' and previa_gestor_id is not null
-       group by 1
-    ),
-    lg as (
-      select max(previa_em) as ultima
-        from escalas where quinzena_id = $1 and status = 'previa' and previa_gestor_id is null
-    ),
-    cv as (
-      select x.usuario_id, count(*)::int as convocados,
-             count(*) filter (where x.status = 'aceita')::int   as aceitas,
-             count(*) filter (where x.status = 'recusada')::int as recusadas,
-             count(*) filter (where x.status = 'vista')::int    as vistas,
-             count(*) filter (where x.status = 'enviada')::int  as sem_resposta
-        from (
-          select distinct on (i.troca_id, i.trabalhador_id) e.previa_gestor_id as usuario_id, c.status
-            from escalas e
-            join escala_itens i on i.escala_id = e.id and i.tipo = 'rodizio'
-            join convocacoes c on c.escala_item_id = i.id
-            join rodizio_trocas t on t.id = i.troca_id and t.estado <> 'desfeita'
-           where e.quinzena_id = $1 and e.status = 'previa' and e.previa_gestor_id is not null
-           order by i.troca_id, i.trabalhador_id, c.criado_em
-        ) x group by x.usuario_id
-    )
-    select ag.usuario_id as id, us.nome, ag.unidades, ag.resolvidas, ag.mexeu_em,
-           coalesce(pv.ultima, lg.ultima) as ultima, coalesce(pv.envios, 0) as envios,
-           coalesce(cv.convocados, 0) as convocados, coalesce(cv.aceitas, 0) as aceitas,
-           coalesce(cv.recusadas, 0) as recusadas, coalesce(cv.vistas, 0) as vistas,
-           coalesce(cv.sem_resposta, 0) as sem_resposta
-      from ag join usuarios us on us.id = ag.usuario_id
-      cross join lg
-      left join pv on pv.usuario_id = ag.usuario_id
-      left join cv on cv.usuario_id = ag.usuario_id
-     order by us.nome
-  `, [q.id, soData(q.inicio), soData(q.fim)]);
-  const prazo = calendario(soData(q.inicio), p).previa;
-  const hoje = hojeSP();
-  return rows.map((g) => {
-    const desatualizada = !!g.ultima && !!g.mexeu_em && new Date(g.mexeu_em) > new Date(g.ultima);
-    const resolvido = g.resolvidas >= g.unidades;
-    return {
-      ...g, desatualizada,
-      em_dia: !!g.ultima && !desatualizada && resolvido,
-      atrasado: !g.ultima && hoje > prazo,
-      prazo,
-    };
-  });
-}
+        <div className="p-3 space-y-2 flex-1">
+          {painel === "manter" && (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
+              <b className="text-[13px]">Manter os colaboradores desta unidade nesta quinzena</b>
+              <p className="text-[11.5px] text-slate-500">O motivo fica registrado e vira estatística.</p>
+              <div className="flex flex-wrap gap-1.5">
+                {MOTIVOS_MANTER.map((m) => (
+                  <button key={m} onClick={() => setMotivoManter(m)}
+                    className={`rounded-full px-2.5 py-1 text-[11.5px] border ${motivoManter === m ? "border-teal-500 bg-teal-50 text-teal-700 font-semibold" : "border-slate-200 text-slate-600 bg-white"}`}>{m}</button>
+                ))}
+              </div>
+              <input value={motivoManter} onChange={(e) => setMotivoManter(e.target.value)} placeholder="Ou escreva o motivo"
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+              <div className="flex gap-2">
+                <button disabled={ocupado || motivoManter.trim().length < 5} onClick={() => status(u, "mantida", motivoManter.trim())}
+                  className="bg-teal-600 text-white rounded-lg px-3 py-1.5 text-[12.5px] font-semibold disabled:opacity-40">Confirmar e manter</button>
+                <button onClick={() => setPainel(null)} className="border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px] text-slate-600">Voltar</button>
+              </div>
+            </div>
+          )}
+          {painel === "incluir" && (
+            <Incluir token={token} pedir={pedir} unidade={u} quinzena={q} ocupado={ocupado}
+              aoIncluir={(corpo) => agir(`/rodizio/quinzenas/${q.id}/incluir`, { unidade_id: u.id, ...corpo }, "Colaborador incluído").then((r) => { if (r) setPainel(null); })}
+              aoVoltar={() => setPainel(null)} />
+          )}
 
-/* ==================================================================
- * POST /rodizio/quinzenas/:qid/previa — o gestor envia a prévia das
- * unidades DELE. Pode reenviar quando mudar algo depois (troca nova,
- * ajuste de recusa); quem já foi convocado não recebe link de novo.
- * ================================================================ */
-router.post('/quinzenas/:qid/previa', podeEscrever, async (req, res, next) => {
-  if (!req.usuario.id) {
-    return res.status(403).json({ error: 'Entre com o seu acesso pessoal: a prévia sai em nome do Gestor MMG Responsável.' });
+          <p className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold px-1">
+            Ativos nos últimos {regras.dias_ativo_escala} dias apurados · {ps.length}
+          </p>
+          {ps.length === 0 && <p className="text-[12.5px] text-slate-500 border border-dashed border-slate-300 rounded-xl p-4 text-center">Ninguém ativo nesta unidade.</p>}
+          {ps.map((p) => {
+            const tr = trocaDe(p.id), rec = recusadaDe(p.id);
+            const afastado = p.restricao?.fase === "afastado";
+            const clicavel = pode && !tr && !p.ausente && !afastado && !fechada;
+            let faixa = null;
+            if (tr) {
+              const ehA = tr.a_trabalhador_id === p.id;
+              const outro = pDe(ehA ? tr.b_trabalhador_id : tr.a_trabalhador_id);
+              const destino = uDe(ehA ? tr.b_unidade_id : tr.a_unidade_id);
+              const resp = ehA ? tr.a_resposta : tr.b_resposta;
+              faixa = (
+                <div className="col-span-2 flex flex-wrap justify-between gap-2 bg-sky-50 text-sky-800 rounded-lg px-2.5 py-1.5 text-[11.5px]">
+                  <span>Vai para <b>{destino?.codigo}</b> de {diaMes(tr.data_inicio)} a {dataBR(tr.data_fim)} · par com {cap(outro?.nome)}</span>
+                  <span className="flex gap-2 items-center">
+                    {resp && <span>{RESPOSTA[resp] || resp}</span>}
+                    {pode && (
+                      <span role="button" onClick={(e) => { e.stopPropagation(); setConfirmar({ desfazer: tr }); }}
+                        className="font-semibold underline cursor-pointer">Desfazer</span>
+                    )}
+                  </span>
+                </div>
+              );
+            } else if (rec) {
+              const ehA = rec.a_trabalhador_id === p.id;
+              const quemRecusou = rec.a_resposta === "recusada" ? pDe(rec.a_trabalhador_id) : pDe(rec.b_trabalhador_id);
+              faixa = (
+                <div className="col-span-2 bg-rose-50 text-rose-700 rounded-lg px-2.5 py-1.5 text-[11.5px]">
+                  Troca com a {uDe(ehA ? rec.b_unidade_id : rec.a_unidade_id)?.codigo} recusada por {cap(quemRecusou?.nome)}
+                  {(rec.a_motivo || rec.b_motivo) ? ` · ${rec.a_motivo || rec.b_motivo}` : ""}. Remonte ou mantenha.
+                </div>
+              );
+            }
+            return (
+              <div key={p.id} onClick={() => clicavel && (setPSel(p.id), setDSel(null), setParSel(null), setBuscaOutra(null))}
+                className={`grid grid-cols-[minmax(0,1fr)_auto] gap-x-3 gap-y-1 items-center border rounded-xl px-3 py-2 ${
+                  pSel === p.id ? "border-teal-500 ring-1 ring-teal-500" : "border-slate-200"} ${clicavel ? "cursor-pointer hover:border-slate-400" : ""} ${p.ausente || afastado ? "opacity-60" : ""}`}>
+                <span className="min-w-0">
+                  <span className="text-[13px] font-semibold">{cap(p.nome) || "Sem cadastro"}</span>{" "}
+                  <span className="text-[11.5px] text-slate-400 tabular-nums">{p.codigo}</span>
+                </span>
+                <span className="flex gap-1 flex-wrap justify-end">
+                  {p.provisorio && <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-teal-50 text-teal-700">Provisório</span>}
+                  {p.incluido && !p.provisorio && <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-teal-50 text-teal-700">Incluído</span>}
+                  <TagPessoa p={p} />
+                </span>
+                <span className="text-[11.5px] text-slate-500">{p.dias_fora} dias fora na janela</span>
+                <span className="text-right">
+                  {pode && !tr && !fechada && (
+                    <span role="button" onClick={(e) => { e.stopPropagation(); ausente(p, !p.ausente); }}
+                      className="text-[11.5px] text-teal-700 font-semibold cursor-pointer">{p.ausente ? "Volta a contar" : "Marcar ausente"}</span>
+                  )}
+                  {pode && p.incluido && !tr && !fechada && (
+                    <span role="button" onClick={(e) => { e.stopPropagation(); agir(`/rodizio/quinzenas/${q.id}/incluir/${p.id}`, {}, "Inclusão retirada"); }}
+                      className="text-[11.5px] text-rose-600 font-semibold cursor-pointer ml-3">Retirar</span>
+                  )}
+                </span>
+                {faixa}
+              </div>
+            );
+          })}
+          {pode && !fechada && ps.length > 0 && (
+            <p className="text-[11.5px] text-slate-500 px-1">Clique em quem vai rodar. Quem deve dias aparece primeiro, com a etiqueta âmbar.</p>
+          )}
+        </div>
+
+        <div className="p-3 border-t border-slate-100 flex flex-wrap gap-2 items-center">
+          {!u.gestor_id && podeEditar && (
+            <>
+              <button disabled={ocupado || !eu.id} onClick={() => assumir(u)}
+                className="bg-teal-600 text-white rounded-lg px-4 py-2 text-[13px] font-semibold disabled:opacity-40">Assumir como Gestor MMG Responsável</button>
+              <span className="text-[11.5px] text-slate-500 flex-1 min-w-[200px]">
+                Abrir a unidade não faz de ninguém o responsável; só este botão faz. A unidade continua sua nas próximas quinzenas.
+              </span>
+            </>
+          )}
+          {u.gestor_id && !minha(u) && (
+            <span className="text-[12px] text-slate-500">O Gestor MMG Responsável por esta unidade é {u.gestor_nome}. Só ele finaliza ou mantém.</span>
+          )}
+          {pode && (fechada ? (
+            <>
+              <span className="text-[12px] text-slate-600">{u.status === "mantida" ? `Mantida · ${u.motivo || ""}` : "Finalizada"} {u.atualizado_por ? `por ${u.atualizado_por}` : ""}</span>
+              <button disabled={ocupado} onClick={() => status(u, "andamento")} className="border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px]">Reabrir</button>
+            </>
+          ) : (
+            <>
+              <button onClick={() => setPainel("incluir")} className="border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold">+ Incluir colaborador</button>
+              <button onClick={() => { setPainel("manter"); setMotivoManter(""); }} className="border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold">Manter colaboradores</button>
+              <button disabled={ocupado} onClick={() => status(u, "concluida")} className="bg-teal-600 text-white rounded-lg px-3 py-1.5 text-[12.5px] font-semibold disabled:opacity-40">Finalizar unidade</button>
+            </>
+          ))}
+          {u.gestor_id && (minha(u) || eu.perfil === "admin") && podeEditar && (
+            <button onClick={() => setConfirmar({ deixar: u })} className="ml-auto text-[11.5px] text-teal-700 font-semibold">
+              {u.gestor_id === eu.id ? "Deixar de ser o Gestor MMG Responsável" : "Retirar o Gestor MMG Responsável"}
+            </button>
+          )}
+        </div>
+      </section>
+    );
   }
-  const cliente = await pool.connect();
-  try {
-    const p = await criterios();
-    let q = await quinzenaPorId(req.params.qid);
-    if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
-    if (!(await exigirEtapa(res, q, ['montagem', 'ajustes']))) return;
-    await sincronizarRespostas(q, quem(req));
-    await aplicarAfastamentos(q.sindicato_id);
-    q = await quinzenaPorId(q.id);
 
-    /* o administrador pode enviar a prévia em nome de um gestor (fica registrado) */
-    const emNomeDe = String((req.body || {}).em_nome_de || '');
-    if (emNomeDe && emNomeDe !== req.usuario.id && req.usuario.perfil !== 'admin') {
-      return res.status(403).json({ error: 'Só o administrador envia a prévia em nome de outro gestor.' });
+  /* =================================================================
+   * COLUNA 3 — DESTINOS E PAR
+   * =============================================================== */
+  const p = pDe(pSel);
+  let col3;
+  if (!p) {
+    col3 = (
+      <section className="bg-white border border-slate-200 rounded-2xl flex flex-col min-w-0 xl:col-span-1 lg:col-span-2 xl:col-start-3">
+        <div className="p-3 border-b border-slate-100">
+          <p className="text-[13.5px] font-semibold">Trocas desta quinzena</p>
+          <p className="text-[11.5px] text-slate-500">Toda troca é casada: quem sai é reposto por quem vem.</p>
+        </div>
+        <div className="p-3 space-y-2 overflow-y-auto max-h-[calc(100vh-260px)]">
+          {(d.trocas || []).length === 0 && (
+            <p className="text-[12.5px] text-slate-500 border border-dashed border-slate-300 rounded-xl p-4 text-center">
+              Nenhuma troca ainda. Abra uma unidade sua e clique em um colaborador.
+            </p>
+          )}
+          {(d.trocas || []).map((t) => {
+            const a = pDe(t.a_trabalhador_id), b = pDe(t.b_trabalhador_id);
+            const cor = t.estado === "recusada" ? "bg-rose-50 text-rose-700" : t.estado === "aceita" ? "bg-emerald-50 text-emerald-700" : "bg-sky-50 text-sky-700";
+            const rot = { montada: "Montada", enviada: "Na prévia", aceita: "Aceita", recusada: "Recusada", sem_resposta: "Sem resposta" }[t.estado];
+            return (
+              <div key={t.id} className="border border-slate-200 rounded-xl p-2.5">
+                <div className="flex justify-between gap-2">
+                  <b className="text-[12.5px] tabular-nums">{uDe(t.a_unidade_id)?.codigo} ⇄ {uDe(t.b_unidade_id)?.codigo}</b>
+                  <span className={`text-[10.5px] font-semibold rounded-md px-2 py-0.5 ${cor}`}>{rot}{t.rodada === 2 ? " · ajuste" : ""}</span>
+                </div>
+                <p className="text-[11.5px] text-slate-600 mt-0.5">{cap(a?.nome)} vai para {uDe(t.b_unidade_id)?.codigo} · {cap(b?.nome)} vai para {uDe(t.a_unidade_id)?.codigo}</p>
+                <p className="text-[11px] text-slate-400">{diaMes(t.data_inicio)} a {dataBR(t.data_fim)} · montada por {t.montada_por}</p>
+              </div>
+            );
+          })}
+        </div>
+      </section>
+    );
+  } else {
+    const origem = uDe(p.unidade_id);
+    const nivel = (x) => (x.local_id && x.local_id === origem.local_id ? 1 : x.cidade && x.cidade === origem.cidade ? 2 : 3);
+    const comGente = (x) => pessoas.some((pp) => pp.unidade_id === x.id && !indisponivel(pp));
+    const dests = unidades.filter((x) => x.id !== origem.id && !impede(p, x) && minha(x) && comGente(x) && (cidade === "Todas" || x.cidade === cidade || x.local_id === origem.local_id))
+      .map((x) => ({ x, n: nivel(x) })).sort((a, b) => a.n - b.n || a.x.codigo.localeCompare(b.x.codigo));
+    const grupos = [[1, "No mesmo local · outro setor"], [2, `Em ${origem.cidade || "mesma cidade"} · outro local`], [3, "Em outra cidade"]];
+    const dest = uDe(dSel);
+    const qo = (buscaOutra || "").trim().toLowerCase();
+    const outras = buscaOutra === null ? [] : unidades.filter((x) => x.id !== origem.id && !impede(p, x) && !minha(x) && comGente(x) &&
+      (!qo || x.codigo.includes(qo) || (x.local_nome || "").toLowerCase().includes(qo) || (x.cidade || "").toLowerCase().includes(qo))).slice(0, 20);
+    const cand = dest ? pessoas.filter((x) => x.unidade_id === dest.id && !x.ausente && x.restricao?.fase !== "afastado" && !impede(x, origem) && !trocaDe(x.id))
+      .sort((a, b) => (b.perfil === "permanente" && b.falta > 0) - (a.perfil === "permanente" && a.falta > 0) || b.falta - a.falta) : [];
+    const BotaoDestino = ({ x }) => (
+      <button onClick={() => { if (x.gestor_id) { setDSel(x.id); setParSel(null); } }} disabled={!x.gestor_id}
+        className={`w-full text-left border rounded-xl px-3 py-2 flex justify-between gap-2 items-center ${
+          dSel === x.id ? "border-sky-500 ring-1 ring-sky-500" : "border-slate-200 hover:border-slate-400"} disabled:opacity-50`}>
+        <span className="min-w-0">
+          <b className="text-[12.5px] tabular-nums">{x.codigo}</b> <span className="text-[12.5px]">{cap(x.local_nome)} · {cap(x.setor)}</span>
+          <span className="block text-[11px] text-slate-500">
+            {minha(x) ? `${pessoas.filter((pp) => pp.unidade_id === x.id && !indisponivel(pp)).length} ativos · ${x.req_qtd ? `pede ${x.req_qtd}` : "sem requisição"}`
+              : x.gestor_id ? `${x.cidade || ""} · Gestor MMG Responsável: ${x.gestor_nome}` : `${x.cidade || ""} · sem Gestor MMG Responsável; precisa ser assumida antes`}
+          </span>
+        </span>
+        <i className={`w-2.5 h-2.5 rounded-full shrink-0 ${urgencia(x, pessoas).barra}`} />
+      </button>
+    );
+
+    col3 = (
+      <section className="bg-white border border-slate-200 rounded-2xl flex flex-col min-w-0 xl:col-span-1 lg:col-span-2 xl:col-start-3">
+        <div className="p-3 border-b border-slate-100">
+          <p className="text-[13.5px] font-semibold">Para onde {cap(primeiroNome(p.nome))} pode ir</p>
+          <p className="text-[11.5px] text-slate-500">Sai da {origem.codigo} · {p.perfil === "permanente" && p.falta > 0 ? `deve ${p.falta} dias` : "em dia"} · {cidade === "Todas" ? "todas as cidades" : `filtro ${cidade}`}</p>
+        </div>
+        <div className="p-3 space-y-3 overflow-y-auto max-h-[calc(100vh-260px)]">
+          {grupos.map(([n, rot]) => {
+            const g = dests.filter((x) => x.n === n);
+            if (!g.length) return null;
+            return (
+              <div key={n} className="space-y-1.5">
+                <p className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold">{rot}</p>
+                {g.map(({ x }) => <BotaoDestino key={x.id} x={x} />)}
+              </div>
+            );
+          })}
+          {dests.length === 0 && <p className="text-[12px] text-slate-500 border border-dashed border-slate-300 rounded-xl p-3 text-center">Nenhuma unidade sua serve de destino com este filtro.{p.restricao?.fase === "fora_da_mae" ? " Pela regra 9, " + cap(primeiroNome(p.nome)) + " só pode ir para fora da unidade-mãe." : ""}</p>}
+
+          {buscaOutra === null ? (
+            <button onClick={() => setBuscaOutra("")} className="border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px] font-semibold">Buscar outra unidade</button>
+          ) : (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-2.5 space-y-1.5">
+              <b className="text-[12.5px]">Buscar outra unidade</b>
+              <input autoFocus value={buscaOutra} onChange={(e) => setBuscaOutra(e.target.value)} placeholder="Número, nome ou cidade"
+                className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+              {outras.map((x) => <BotaoDestino key={x.id} x={x} />)}
+              {outras.length === 0 && <p className="text-[12px] text-slate-500">Nenhuma unidade com isso.</p>}
+            </div>
+          )}
+          <p className="text-[11px] text-slate-400">Aparecem só as suas unidades. As de outro Gestor MMG Responsável entram pela busca.</p>
+
+          {dest && (
+            <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
+              <b className="text-[13px]">Com quem {cap(primeiroNome(p.nome))} troca na {dest.codigo}?</b>
+              <p className="text-[11.5px] text-slate-500">Quem também precisa rodar aparece primeiro: a troca resolve os dois.</p>
+              <div className="space-y-1.5">
+                {cand.map((x) => (
+                  <button key={x.id} onClick={() => setParSel(x.id)}
+                    className={`w-full text-left border rounded-lg px-3 py-2 flex justify-between gap-2 items-center bg-white ${parSel === x.id ? "border-sky-500 ring-1 ring-sky-500" : "border-slate-200"}`}>
+                    <span className="text-[12.5px]"><b>{cap(x.nome)}</b> <span className="text-slate-400 tabular-nums">{x.codigo}</span></span>
+                    <TagPessoa p={x} />
+                  </button>
+                ))}
+                {cand.length === 0 && <p className="text-[12px] text-slate-500">Todos daqui já estão em troca ou ausentes.</p>}
+              </div>
+
+              <p className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold pt-1">Período da troca</p>
+              <div className="flex gap-1.5 flex-wrap">
+                {semanas.map(([a, b], i) => (
+                  <button key={a} onClick={() => setPeriodo(i)}
+                    className={`flex-1 min-w-[90px] border rounded-lg py-1.5 text-[12px] font-semibold ${periodo === i ? "border-teal-500 bg-teal-50 text-teal-700" : "border-slate-300 bg-white"}`}>
+                    {diaMes(a)} a {diaMes(b)}
+                  </button>
+                ))}
+                <button onClick={() => setPeriodo(semanas.length)}
+                  className={`flex-1 min-w-[90px] border rounded-lg py-1.5 text-[12px] font-semibold ${periodo >= semanas.length ? "border-teal-500 bg-teal-50 text-teal-700" : "border-slate-300 bg-white"}`}>
+                  Outro período
+                </button>
+              </div>
+              {periodo >= semanas.length && (
+                <div className="grid grid-cols-2 gap-2">
+                  <label className="text-[11.5px] text-slate-500">De
+                    <input type="date" value={pIni} min={q.inicio} max={q.fim} onChange={(e) => { setPIni(e.target.value); if (pFim < e.target.value) setPFim(e.target.value); }}
+                      className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-[13px] mt-0.5" />
+                  </label>
+                  <label className="text-[11.5px] text-slate-500">Até
+                    <input type="date" value={pFim} min={pIni || q.inicio} max={q.fim} onChange={(e) => setPFim(e.target.value)}
+                      className="w-full border border-slate-200 rounded-lg px-2 py-1.5 text-[13px] mt-0.5" />
+                  </label>
+                  <p className={`col-span-2 text-[11.5px] ${diasPeriodo > limiteBloco || !periodoValido ? "text-rose-600" : "text-slate-500"}`}>
+                    {diasPeriodo} {diasPeriodo === 1 ? "dia" : "dias"} · o limite é o critério "Bloco de rodízio" ({limiteBloco} dias). Dentro dele, o Gestor MMG decide.
+                  </p>
+                </div>
+              )}
+              <button disabled={!parSel || !periodoValido || ocupado} onClick={validarTroca}
+                className="w-full bg-teal-600 text-white rounded-lg py-2 text-[13px] font-semibold disabled:opacity-40">Validar troca</button>
+              {parSel && (
+                <p className="text-[11.5px] text-slate-500 leading-relaxed">
+                  {cap(p.nome)} vai para a {dest.codigo} e {cap(pDe(parSel)?.nome)} vem para a {origem.codigo}, de {diaMes(periodoAtual[0])} a {dataBR(periodoAtual[1])}.
+                  O resto da quinzena cada um fica na sua unidade.
+                  {!minha(dest) && ` A ${dest.codigo} é de ${dest.gestor_nome}: ele verá a troca e ainda precisa finalizar a unidade dele.`}
+                </p>
+              )}
+            </div>
+          )}
+          <button onClick={() => { setPSel(null); setDSel(null); setParSel(null); setBuscaOutra(null); }} className="text-[12px] text-teal-700 font-semibold">Cancelar</button>
+        </div>
+      </section>
+    );
+  }
+
+  /* confirmações pequenas: desfazer troca e deixar a unidade */
+  let confirmaPequeno = null;
+  if (confirmar && confirmar.desfazer) {
+    const tr = confirmar.desfazer;
+    confirmaPequeno = (
+      <ConfirmaDesfazer troca={tr} ocupado={ocupado} aoVoltar={() => setConfirmar(null)}
+        aoConfirmar={async (motivo) => { const r = await desfazer(tr, motivo); if (r) setConfirmar(null); }} />
+    );
+  }
+  if (confirmar && confirmar.deixar) {
+    const x = confirmar.deixar;
+    confirmaPequeno = (
+      <div className="bg-white border-2 border-amber-400 rounded-2xl p-4 flex flex-wrap gap-3 items-center">
+        <span className="text-[13px] flex-1 min-w-[240px]">
+          A {x.codigo} vai ficar sem Gestor MMG Responsável e volta para a lista "Sem gestor". Enquanto ninguém assumir, a prévia não sai.
+        </span>
+        <button disabled={ocupado} onClick={async () => { const r = await deixar(x); if (r) setConfirmar(null); }}
+          className="bg-amber-500 text-white rounded-lg px-3 py-1.5 text-[12.5px] font-semibold">Confirmar</button>
+        <button onClick={() => setConfirmar(null)} className="border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px]">Voltar</button>
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-3">
+      {topo}
+      {progresso}
+      {painelGestores}
+      {faixaAgindo}
+      {painelConv}
+      {painelAf}
+      {caixaConfirmar}
+      {confirmaPequeno}
+      <div className="grid gap-3 items-start grid-cols-1 lg:grid-cols-[280px_minmax(0,1fr)] xl:grid-cols-[290px_minmax(0,1fr)_350px]">
+        {col1}{col2}{col3}
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+function ConfirmaDesfazer({ troca, ocupado, aoVoltar, aoConfirmar }) {
+  const [motivo, setMotivo] = useState("");
+  const exige = troca.estado !== "montada";
+  return (
+    <div className="bg-white border-2 border-amber-400 rounded-2xl p-4 space-y-2">
+      <b className="text-[13.5px]">Desfazer esta troca?</b>
+      <p className="text-[12.5px] text-slate-600">
+        As duas unidades voltam para "Em andamento" e precisam ser revistas. A troca fica no histórico, com quem desfez.
+        {exige && " Ela já foi enviada aos colaboradores, então o motivo é obrigatório."}
+      </p>
+      {exige && (
+        <input value={motivo} onChange={(e) => setMotivo(e.target.value)} placeholder="Motivo"
+          className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+      )}
+      <div className="flex gap-2">
+        <button disabled={ocupado || (exige && motivo.trim().length < 5)} onClick={() => aoConfirmar(motivo.trim())}
+          className="bg-amber-500 text-white rounded-lg px-3 py-1.5 text-[12.5px] font-semibold disabled:opacity-40">Desfazer troca</button>
+        <button onClick={aoVoltar} className="border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px]">Voltar</button>
+      </div>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
+function Incluir({ token, pedir, unidade, ocupado, aoIncluir, aoVoltar }) {
+  const [q, setQ] = useState("");
+  const [res, setRes] = useState([]);
+  const [novoNome, setNovoNome] = useState("");
+
+  useEffect(() => {
+    if (q.trim().length < 2) { setRes([]); return; }
+    const h = setTimeout(() => {
+      pedir(`/rodizio/pessoas/buscar?q=${encodeURIComponent(q.trim())}`, token).then(setRes).catch(() => setRes([]));
+    }, 300);
+    return () => clearTimeout(h);
+  }, [q, token, pedir]);
+
+  const soNumero = /^\d{3,}$/.test(q.trim());
+  const codigoNovo = soNumero && !res.some((r) => r.codigo === q.trim());
+
+  return (
+    <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
+      <b className="text-[13px]">Incluir na {unidade.codigo} quem não aparece nos ativos</b>
+      <input autoFocus value={q} onChange={(e) => setQ(e.target.value)} placeholder="Código ou nome"
+        className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+      {res.map((r) => (
+        <button key={r.id} disabled={ocupado} onClick={() => aoIncluir({ trabalhador_id: r.id })}
+          className="w-full text-left bg-white border border-slate-200 rounded-lg px-3 py-2 flex justify-between gap-2 items-center hover:border-slate-400">
+          <span className="text-[12.5px] min-w-0">
+            <b>{cap(r.nome) || "Sem cadastro"}</b> <span className="text-slate-400 tabular-nums">{r.codigo}</span>
+            <span className="block text-[11px] text-slate-500">
+              {r.restricao_desde ? "Afastado por recusas · só entra fora da unidade-mãe · " : ""}{r.provisorio ? "Provisório · ainda não veio no Ponto" : r.ultimo_dia ? `Último dia apurado ${dataBR(r.ultimo_dia)}${r.ultima_unidade ? ` na ${r.ultima_unidade}` : ""}` : "Sem dia apurado"}
+            </span>
+          </span>
+          <span className="text-[12px] font-semibold text-teal-700">Incluir</span>
+        </button>
+      ))}
+      {codigoNovo && (
+        <div className="bg-white border border-dashed border-teal-400 rounded-lg p-2.5 space-y-1.5">
+          <p className="text-[12px]">O código <b>{q.trim()}</b> ainda não existe aqui. Para quem está em contratação, informe o nome completo e ele entra como provisório até vir no Ponto.</p>
+          <input value={novoNome} onChange={(e) => setNovoNome(e.target.value)} placeholder="Nome completo"
+            className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
+          <button disabled={ocupado || novoNome.trim().split(/\s+/).length < 2} onClick={() => aoIncluir({ codigo: q.trim(), nome: novoNome.trim() })}
+            className="bg-teal-600 text-white rounded-lg px-3 py-1.5 text-[12.5px] font-semibold disabled:opacity-40">Incluir como provisório</button>
+        </div>
+      )}
+      <button onClick={aoVoltar} className="border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px] text-slate-600">Voltar</button>
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------
+ * 14/10/2026 — PRÉVIA POR GESTOR
+ * SituacaoGestores: uma linha por Gestor MMG Responsável, para o
+ * administrador saber quem já terminou e cobrar quem passou do prazo.
+ * MeusConvocados: os pedidos de aceite que o gestor mandou, com o link
+ * de cada pessoa para copiar ou abrir no WhatsApp.
+ * ---------------------------------------------------------------- */
+const iniciais = (s) => String(s || "?").split(/\s+/).filter(Boolean).slice(0, 2).map((x) => x[0]).join("").toUpperCase();
+
+function estadoGestor(g) {
+  if (g.em_dia) return { txt: "Prévia em dia", cls: "bg-emerald-50 text-emerald-700 border-emerald-200" };
+  if (g.desatualizada) return { txt: "Mudou depois da prévia · reenviar", cls: "bg-amber-50 text-amber-800 border-amber-200" };
+  if (g.ultima) return { txt: "Unidades pendentes", cls: "bg-amber-50 text-amber-800 border-amber-200" };
+  if (g.atrasado) return { txt: "Atrasado · não enviou", cls: "bg-rose-50 text-rose-700 border-rose-200" };
+  return { txt: "Ainda não enviou", cls: "bg-slate-50 text-slate-600 border-slate-200" };
+}
+
+function SituacaoGestores({ gestores, euId, aberto, verId, aoEscolher }) {
+  if (!gestores.length) return null;
+  const emDia = gestores.filter((g) => g.em_dia).length;
+  const atrasados = gestores.filter((g) => g.atrasado).length;
+  const prazo = gestores[0]?.prazo;
+  return (
+    <details open={aberto} className="bg-white border border-slate-200 rounded-2xl group">
+      <summary className="cursor-pointer list-none px-4 py-3 flex flex-wrap items-center justify-between gap-2">
+        <span className="flex items-center gap-3 min-w-0">
+          <span className="text-[13.5px] font-semibold">Situação dos gestores</span>
+          <span className="text-[11.5px] text-slate-500">
+            <b className={emDia === gestores.length ? "text-emerald-700" : "text-slate-700"}>{emDia} de {gestores.length}</b> com prévia em dia
+            {prazo && ` · prazo da prévia ${diaMes(prazo)}`}
+          </span>
+          {atrasados > 0 && <span className="text-[10.5px] font-semibold rounded-full px-2 py-0.5 bg-rose-600 text-white">{atrasados} atrasado{atrasados > 1 ? "s" : ""}</span>}
+        </span>
+        <span className="text-[11.5px] text-slate-400 group-open:rotate-180 transition-transform">▾</span>
+      </summary>
+      <div className="px-4 pb-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+        {gestores.map((g) => {
+          const st = estadoGestor(g);
+          const pct = g.unidades ? Math.round((g.resolvidas / g.unidades) * 100) : 0;
+          return (
+            <button type="button" key={g.id} onClick={() => aoEscolher && aoEscolher(g)}
+              aria-label={`Ver as unidades de ${cap(g.nome)}`}
+              className={`text-left border rounded-xl p-3 transition cursor-pointer hover:shadow-sm hover:border-slate-400 ${g.atrasado ? "border-rose-300 bg-rose-50/40" : "border-slate-200 bg-white"} ${g.id === verId ? "ring-2 ring-teal-500 border-teal-500" : g.id === euId ? "ring-1 ring-teal-500" : ""}`}>
+              <div className="flex items-start gap-2.5">
+                <span className="w-8 h-8 rounded-full bg-slate-900 text-white text-[11px] font-semibold flex items-center justify-center shrink-0">{iniciais(g.nome)}</span>
+                <div className="min-w-0 flex-1">
+                  <p className="text-[13px] font-semibold truncate">{cap(g.nome)}{g.id === euId && <span className="text-teal-700 font-normal"> · você</span>}</p>
+                  <span className={`inline-block mt-0.5 text-[10.5px] font-semibold rounded-md border px-2 py-0.5 ${st.cls}`}>{st.txt}</span>
+                </div>
+              </div>
+              <div className="mt-2.5">
+                <div className="flex justify-between text-[11px] text-slate-500 mb-1">
+                  <span>{g.resolvidas} de {g.unidades} unidades resolvidas</span>
+                  <span>{g.ultima ? `prévia ${horaBR(g.ultima)}` : "sem prévia"}</span>
+                </div>
+                <div className="h-1.5 rounded-full bg-slate-100 overflow-hidden">
+                  <i className={`block h-full ${pct === 100 ? "bg-emerald-500" : "bg-amber-500"}`} style={{ width: `${pct}%` }} />
+                </div>
+              </div>
+              <div className="flex items-center justify-between mt-2 text-[11.5px]">
+                {g.unidades - g.resolvidas > 0
+                  ? <b className="text-amber-700">{g.unidades - g.resolvidas} {g.unidades - g.resolvidas === 1 ? "unidade pede" : "unidades pedem"} atenção</b>
+                  : <span className="text-emerald-700 font-semibold">Todas as unidades resolvidas</span>}
+                <span className="text-teal-700 font-semibold">Ver unidades ›</span>
+              </div>
+              {g.convocados > 0 && (
+                <div className="flex flex-wrap gap-x-3 gap-y-0.5 mt-2 text-[11px]">
+                  <span className="text-slate-500">{g.convocados} convocados:</span>
+                  <span className="text-emerald-700">{g.aceitas} aceitaram</span>
+                  {g.recusadas > 0 && <span className="text-rose-700">{g.recusadas} recusaram</span>}
+                  {g.vistas > 0 && <span className="text-amber-700">{g.vistas} viram</span>}
+                  {g.sem_resposta > 0 && <span className="text-slate-500">{g.sem_resposta} sem abrir</span>}
+                </div>
+              )}
+            </button>
+          );
+        })}
+      </div>
+    </details>
+  );
+}
+
+const CONV_FILTRO = [
+  ["pendentes", "Faltam responder", (c) => c.status === "enviada" || c.status === "vista"],
+  ["aceita", "Aceitaram", (c) => c.status === "aceita"],
+  ["recusada", "Recusaram", (c) => c.status === "recusada"],
+  ["todos", "Todos", () => true],
+];
+const CONV_SELO = {
+  enviada:  { txt: "Não abriu",          cls: "bg-slate-100 text-slate-600" },
+  vista:    { txt: "Viu, sem responder", cls: "bg-amber-50 text-amber-800" },
+  aceita:   { txt: "Aceitou",            cls: "bg-emerald-50 text-emerald-700" },
+  recusada: { txt: "Recusou",            cls: "bg-rose-50 text-rose-700" },
+};
+
+function MeusConvocados({ convocados, admin }) {
+  const [filtro, setFiltro] = useState("pendentes");
+  const [copiado, setCopiado] = useState("");
+  const [todos, setTodos] = useState(false);
+  if (!convocados.length) return null;
+  const url = (c) => `${window.location.origin}/?c=${c.token}`;
+  const mensagem = (c) =>
+    `Olá, ${cap(primeiroNome(c.nome)) || "colaborador"}! Você está na escala de rodízio do Sindicato: ` +
+    `${c.destino_codigo} · ${cap(c.destino_nome)}${c.destino_setor ? ` (${cap(c.destino_setor)})` : ""}, ` +
+    `de ${diaMes(c.data_inicio)} a ${diaMes(c.data_fim)}. Confirme ou recuse por este link: ${url(c)}`;
+  async function copiar(c) {
+    try { await navigator.clipboard.writeText(mensagem(c)); setCopiado(c.id); setTimeout(() => setCopiado(""), 1800); }
+    catch { window.prompt("Copie a mensagem:", mensagem(c)); }
+  }
+  const conta = (f) => convocados.filter(f).length;
+  const atual = CONV_FILTRO.find(([k]) => k === filtro) || CONV_FILTRO[0];
+  const lista = convocados.filter(atual[2]);
+  const vis = todos ? lista : lista.slice(0, 8);
+  const pend = conta(CONV_FILTRO[0][2]);
+
+  return (
+    <section className="bg-white border border-slate-200 rounded-2xl">
+      <div className="px-4 py-3 border-b border-slate-100 flex flex-wrap items-center justify-between gap-2">
+        <div>
+          <p className="text-[13.5px] font-semibold">{admin ? "Convocados pelos gestores" : "Meus convocados"}</p>
+          <p className="text-[11.5px] text-slate-500">
+            {pend ? <><b className="text-slate-700">{pend}</b> ainda não responderam · mande a mensagem pelo WhatsApp</> : "Todos responderam"}
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-1.5">
+          {CONV_FILTRO.map(([k, rot, f]) => (
+            <Chip key={k} ativo={filtro === k} n={conta(f)} onClick={() => { setFiltro(k); setTodos(false); }}
+              tom={k === "pendentes" ? "amber" : "slate"}>{rot}</Chip>
+          ))}
+        </div>
+      </div>
+      <div className="divide-y divide-slate-100">
+        {vis.map((c) => {
+          const sel = CONV_SELO[c.status] || CONV_SELO.enviada;
+          return (
+            <div key={c.id} className="px-4 py-2.5 grid gap-x-4 gap-y-1.5 items-center grid-cols-1 md:grid-cols-[minmax(0,1fr)_minmax(0,1.2fr)_9.5rem_15rem]">
+              <span className="min-w-0">
+                <span className="text-[13px] font-semibold">{cap(c.nome) || "Sem nome"}</span>{" "}
+                <span className="text-[11.5px] text-slate-400 tabular-nums">{c.codigo}</span>
+                {admin && c.gestor_nome && <span className="block text-[11px] text-slate-500">por {cap(c.gestor_nome)}</span>}
+              </span>
+              <span className="min-w-0 text-[12px] text-slate-600">
+                <b className="tabular-nums text-slate-800">{c.destino_codigo}</b> {cap(c.destino_nome)}{c.destino_setor ? ` · ${cap(c.destino_setor)}` : ""}
+                <span className="block text-[11px] text-slate-500">{diaMes(c.data_inicio)} a {diaMes(c.data_fim)}</span>
+              </span>
+              <span className="flex flex-col items-start md:items-end">
+                <span className={`text-[10.5px] font-semibold rounded-md px-2 py-0.5 whitespace-nowrap ${sel.cls}`}>{sel.txt}</span>
+                {c.status === "recusada" && c.motivo && <span className="text-[10.5px] text-slate-500 mt-0.5">{c.motivo}</span>}
+              </span>
+              <span className="flex gap-1.5 md:justify-end">
+                {(c.status === "enviada" || c.status === "vista") ? (
+                  <>
+                    <button onClick={() => copiar(c)}
+                      className="border border-slate-300 rounded-lg px-2.5 py-1 text-[11.5px] font-semibold text-slate-700 hover:border-slate-500 whitespace-nowrap">
+                      {copiado === c.id ? "Copiado ✓" : "Copiar mensagem"}
+                    </button>
+                    <a href={`https://wa.me/?text=${encodeURIComponent(mensagem(c))}`} target="_blank" rel="noreferrer"
+                      className="rounded-lg px-2.5 py-1 text-[11.5px] font-semibold text-white bg-[#1f9d55] hover:bg-[#188a49] whitespace-nowrap">
+                      WhatsApp
+                    </a>
+                  </>
+                ) : (
+                  <span className="text-[11px] text-slate-400 whitespace-nowrap">{c.respondida_em ? `respondeu ${horaBR(c.respondida_em)}` : ""}</span>
+                )}
+              </span>
+            </div>
+          );
+        })}
+        {lista.length === 0 && <p className="px-4 py-5 text-center text-[12.5px] text-slate-400">Ninguém neste filtro.</p>}
+      </div>
+      {lista.length > 8 && (
+        <button onClick={() => setTodos(!todos)} className="w-full border-t border-slate-100 py-2 text-[12px] font-semibold text-teal-700">
+          {todos ? "Mostrar menos" : `Mostrar todos (${lista.length})`}
+        </button>
+      )}
+    </section>
+  );
+}
+
+/* ------------------------------------------------------------------
+ * ESCALA GERAL — a mesma lista vista pelo sindicato, pelo fiscal de
+ * uma unidade e pelo colaborador. Antes da prévia é um rascunho
+ * calculado na tela; depois, as linhas gravadas no banco.
+ *
+ * 13/10/2026 — FILTROS. Tipo, resposta, "sem nome" e busca por código,
+ * nome ou unidade. Os filtros se somam e valem para a visão do
+ * Sindicato e a do Fiscal; na visão do Colaborador, a busca e o
+ * "sem nome" encurtam a lista de pessoas. Cada botão mostra quantas
+ * linhas ele traria, já considerando os outros filtros.
+ * ---------------------------------------------------------------- */
+const TIPOS_FILTRO = [
+  ["todos", "Todos"],
+  ["rodizio", "Rodízio"],
+  ["permanece", "Permanece"],
+  ["base", "Na unidade de origem"],
+];
+const RESPOSTAS_FILTRO = [
+  ["todas", "Todas"],
+  ["aceita", "Aceitou"],
+  ["recusada", "Recusou"],
+  ["vista", "Viu, sem responder"],
+  ["enviada", "Sem resposta"],
+  ["sem_convocacao", "Prévia não enviada"],
+  ["nao_precisa", "Não precisa"],
+];
+const semNomeDe = (l) => !String(l.nome || "").trim();
+const chaveResposta = (l) => (l.tipo !== "rodizio" ? "nao_precisa" : (l.resposta || "sem_convocacao"));
+const semAcento = (s) => String(s || "").toLowerCase().normalize("NFD").replace(/[̀-ͯ]/g, "");
+
+function Chip({ ativo, onClick, children, n, tom = "slate" }) {
+  const cores = {
+    slate: ativo ? "bg-slate-900 text-white border-slate-900" : "bg-white text-slate-600 border-slate-200 hover:border-slate-400",
+    amber: ativo ? "bg-amber-500 text-white border-amber-500" : "bg-white text-amber-700 border-amber-200 hover:border-amber-400",
+  };
+  return (
+    <button onClick={onClick}
+      className={`inline-flex items-center gap-1.5 rounded-full border px-3 py-1 text-[12px] font-semibold transition-colors ${cores[tom]}`}>
+      {children}
+      {n != null && (
+        <span className={`tabular-nums text-[10.5px] rounded-full px-1.5 ${ativo ? "bg-white/20" : "bg-slate-100 text-slate-500"}`}>{n}</span>
+      )}
+    </button>
+  );
+}
+
+function EscalaGeral({ token, pedir, d, pessoas, trocas, uDe }) {
+  const [linhasBanco, setLinhasBanco] = useState(null);
+  const [verComo, setVerComo] = useState("sindicato");
+  const [fiscal, setFiscal] = useState("");
+  const [pessoa, setPessoa] = useState("");
+  const [copiado, setCopiado] = useState("");
+  const [fTipo, setFTipo] = useState("todos");
+  const [fResposta, setFResposta] = useState("todas");
+  const [fSemNome, setFSemNome] = useState(false);
+  const [fBusca, setFBusca] = useState("");
+  /* antes da definitiva, a escala geral é calculada na tela, com as
+     respostas das prévias de cada gestor aparecendo ao vivo */
+  const escala = d.definitiva;
+  const q = d.quinzena;
+
+  useEffect(() => {
+    if (!escala) { setLinhasBanco(null); return; }
+    pedir(`/rodizio/escala/${escala.id}/linhas`, token).then(setLinhasBanco).catch(() => setLinhasBanco([]));
+  }, [escala?.id, token, pedir]);
+
+  const linhas = useMemo(() => {
+    if (linhasBanco) {
+      return linhasBanco.map((l) => ({ ...l, data_inicio: String(l.data_inicio).slice(0, 10), data_fim: String(l.data_fim).slice(0, 10) }));
     }
-    const gid = emNomeDe || req.usuario.id;
-    const minhas = await unidadesDoGestor(gid);
-    const eu = (await situacaoGestores(q, p)).find((g) => g.id === gid);
-    if (!eu || !minhas.size) {
-      return res.status(409).json({ error: emNomeDe && emNomeDe !== req.usuario.id
-        ? 'Este gestor não tem unidade nesta quinzena.'
-        : 'Você não é Gestor MMG Responsável por nenhuma unidade desta quinzena.' });
+    const out = [];
+    for (const p of pessoas) {
+      if (p.ausente) continue;
+      const emTroca = trocas.some((x) => x.a_trabalhador_id === p.id || x.b_trabalhador_id === p.id);
+      if (p.restricao?.fase === "afastado" || (p.fora_da_escala && !emTroca)) continue;
+      const u0 = uDe(p.unidade_id);
+      const base = { trabalhador_id: p.id, codigo: p.codigo, nome: p.nome };
+      const t = trocas.find((x) => x.a_trabalhador_id === p.id || x.b_trabalhador_id === p.id);
+      const ehA = t && t.a_trabalhador_id === p.id;
+      const resp = t ? { resposta: (ehA ? t.a_resposta : t.b_resposta) || null, token: (ehA ? t.a_token : t.b_token) || null } : {};
+      const L = (u, ini, fim, tipo) => ini <= fim && out.push({ ...base, ...(tipo === "rodizio" ? resp : {}), unidade_id: u.id, unidade_codigo: u.codigo, unidade_nome: u.local_nome, setor: u.setor, data_inicio: ini, data_fim: fim, tipo });
+      if (!t) { L(u0, q.inicio, q.fim, "permanece"); continue; }
+      const di = String(t.data_inicio).slice(0, 10), df = String(t.data_fim).slice(0, 10);
+      const destino = uDe(t.a_trabalhador_id === p.id ? t.b_unidade_id : t.a_unidade_id);
+      if (p.restricao?.fase === "fora_da_mae") { L(destino, di, df, "rodizio"); continue; }
+      L(u0, q.inicio, somaDias(di, -1), "base");
+      L(destino, di, df, "rodizio");
+      L(u0, somaDias(df, 1), q.fim, "base");
     }
-    const nomeGestor = emNomeDe && emNomeDe !== req.usuario.id ? eu.nome : quem(req);
-    const porAdmin = nomeGestor !== quem(req);
-    const pend = (await pendencias(q, p)).filter((r) => minhas.has(r.id));
-    if (pend.length) {
-      return res.status(409).json({
-        error: `Antes de enviar, finalize ou mantenha ${pend.length === 1 ? 'a sua unidade' : `as suas ${pend.length} unidades`}: ${pend.slice(0, 8).map((r) => r.codigo).join(', ')}${pend.length > 8 ? '…' : ''}.`,
-        pendencias: pend,
-      });
-    }
-    if (eu.ultima && !eu.desatualizada) {
-      return res.status(409).json({ error: 'A sua prévia já foi enviada e nada mudou nas suas unidades desde então.' });
-    }
-    const confl = await conflitosDeRestricao(q, minhas);
-    if (confl.length) return res.status(409).json({ error: `Regra 9: ${confl.slice(0, 3).join(' ')} Desfaça a troca ou a inclusão antes de enviar a prévia.` });
+    return out.sort((a, b) => a.unidade_codigo.localeCompare(b.unidade_codigo) || String(a.nome).localeCompare(String(b.nome)));
+  }, [linhasBanco, pessoas, trocas, q]); // eslint-disable-line
 
-    await cliente.query('begin');
-    const { rows: [e] } = await cliente.query(`
-      insert into escalas (sindicato_id, ano, periodo_inicio, periodo_fim, titulo, criado_por, natureza, quinzena_id, previa_gestor_id)
-      values ($1, extract(year from $2::date)::int, $2::date, $3::date, $6, $4, 'quinzena', $5, $7)
-      returning id
-    `, [q.sindicato_id, soData(q.inicio), soData(q.fim), quem(req), q.id,
-        `Prévia de ${nomeGestor}`, gid]);
+  const unidadesLista = [...new Map(linhas.map((l) => [l.unidade_id, l])).values()];
+  const pessoasLista = [...new Map(linhas.map((l) => [l.trabalhador_id, l])).values()].sort((a, b) => String(a.nome).localeCompare(String(b.nome)));
+  const fiscalId = fiscal || unidadesLista[0]?.unidade_id;
+  const daVisao = verComo === "fiscal" ? linhas.filter((l) => l.unidade_id === fiscalId) : linhas;
+  const rotTipo = { permanece: "Permanece", base: "Na unidade de origem", rodizio: "Rodízio" };
+  const titulo = d.definitiva
+    ? `Escala ${String(d.definitiva.numero).padStart(3, "0")}/${d.definitiva.ano} · publicada`
+    : (d.gestores || []).some((g) => g.ultima)
+      ? `Prévias de ${(d.gestores || []).filter((g) => g.ultima).length} de ${(d.gestores || []).length} gestores · respostas ao vivo`
+      : "Rascunho · como vai sair hoje";
 
-    const linhas = (await montarLinhas(cliente, q, p, ['montada', 'enviada', 'aceita']))
-      .filter((l) => minhas.has(l.unidade_base));
-    /* unidade sem ninguém ativo também é declarada: a prévia vale como "terminei" */
-    /* quem já recebeu o pedido de aceite numa prévia anterior não recebe outro */
-    const convDe = await convocacoesDaQuinzena(cliente, q.id);
-    for (const l of linhas) {
-      if (l.tipo === 'rodizio') l.convocacao_previa_id = convDe[`${l.troca_id}|${l.trabalhador_id}`] || null;
-    }
-    await inserirLinhas(cliente, e.id, linhas);
-    const minhasTrocas = [...new Set(linhas.filter((l) => l.troca_id).map((l) => l.troca_id))];
+  /* Cada filtro como função; para contar um botão, aplica todos os outros. */
+  const termo = semAcento(fBusca.trim());
+  const passa = {
+    tipo: (l, v = fTipo) => v === "todos" || l.tipo === v,
+    resposta: (l, v = fResposta) => v === "todas" || chaveResposta(l) === v,
+    semNome: (l) => !fSemNome || semNomeDe(l),
+    busca: (l) => !termo || semAcento(`${l.codigo} ${l.nome} ${l.unidade_codigo} ${l.unidade_nome} ${l.setor}`).includes(termo),
+  };
+  const filtrar = (lista, exceto) => lista.filter((l) =>
+    Object.entries(passa).every(([k, f]) => k === exceto || f(l)));
+  const vis = filtrar(daVisao);
+  const contaTipo = (v) => filtrar(daVisao, "tipo").filter((l) => passa.tipo(l, v)).length;
+  const contaResp = (v) => filtrar(daVisao, "resposta").filter((l) => passa.resposta(l, v)).length;
+  const totalSemNome = filtrar(daVisao, "semNome").filter(semNomeDe).length;
+  const filtrando = fTipo !== "todos" || fResposta !== "todas" || fSemNome || termo;
+  const limpar = () => { setFTipo("todos"); setFResposta("todas"); setFSemNome(false); setFBusca(""); };
 
-    await cliente.query(`
-      update escalas set status = 'previa', previa_em = now(), previa_por = $2, previa_hash = hash_da_escala($1)
-       where id = $1`, [e.id, porAdmin ? `${quem(req)} (administrador, em nome de ${nomeGestor})` : quem(req)]);
-    await cliente.query(
-      "update rodizio_trocas set estado = 'enviada' where quinzena_id = $1 and estado = 'montada' and id = any($2::uuid[])",
-      [q.id, minhasTrocas]);
-    /* a primeira prévia da quinzena marca o início da etapa de ajustes */
-    await cliente.query(
-      'update rodizio_quinzenas set previa_escala_id = $2 where id = $1 and previa_escala_id is null', [q.id, e.id]);
-    const { rows: [c] } = await cliente.query('select gerar_convocacoes($1, $2) as n', [e.id, quem(req)]);
-    await cliente.query(
-      "insert into escala_eventos (escala_id, tipo, descricao, quem) values ($1, 'previa', $2, $3)",
-      [e.id, `Prévia de ${nomeGestor}${porAdmin ? ` enviada pelo administrador ${quem(req)}` : ''} (${minhas.size} unidades) com ${linhas.length} linhas; ${c.n} pedidos de aceite novos`, quem(req)]);
-    await cliente.query('commit');
+  const pessoasFiltradas = pessoasLista.filter((l) => passa.semNome(l) && passa.busca(l));
+  const pessoaId = (pessoasFiltradas.some((l) => l.trabalhador_id === pessoa) ? pessoa : null) || pessoasFiltradas[0]?.trabalhador_id;
 
-    await registrarEvento({
-      tipo: 'rodizio_previa', titulo: porAdmin ? `Prévia de ${nomeGestor} enviada pelo administrador` : (eu.ultima ? 'Prévia reenviada pelo gestor' : 'Prévia enviada pelo gestor'),
-      descricao: `${porAdmin ? `${nomeGestor} (por ${quem(req)})` : quem(req)} · ${soData(q.inicio)} a ${soData(q.fim)} · ${linhas.length} linhas · ${c.n} convocações novas`,
-      ator: quem(req), atorUsuarioId: req.usuario.id || null, entidadeTipo: 'escala', entidadeId: e.id,
-      ip: ipReq(req), navegador: navegadorReq(req),
-    });
-    res.json({ escala_id: e.id, linhas: linhas.length, convocacoes: c.n });
-  } catch (e) {
-    await cliente.query('rollback').catch(() => {});
-    if (erroDeRegra(e)) return res.status(409).json({ error: e.message });
-    next(e);
-  } finally { cliente.release(); }
-});
+  async function copiar(tk) {
+    const url = `${window.location.origin}/?c=${tk}`;
+    try { await navigator.clipboard.writeText(url); setCopiado(tk); setTimeout(() => setCopiado(""), 1800); }
+    catch { window.prompt("Copie o link:", url); }
+  }
 
-/* ==================================================================
- * POST /rodizio/quinzenas/:qid/publicar — escala definitiva
- * Quem não respondeu à prévia continua na escala, marcado "sem
- * resposta": o dever se cumpre ao oferecer. Trocas novas, feitas no
- * ajuste, ganham convocação própria.
- * ================================================================ */
-router.post('/quinzenas/:qid/publicar', autorizar('admin'), async (req, res, next) => {
-  const cliente = await pool.connect();
-  try {
-    const p = await criterios();
-    let q = await quinzenaPorId(req.params.qid);
-    if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
-    if (!(await exigirEtapa(res, q, ['ajustes']))) return;
-    await sincronizarRespostas(q, quem(req));
-    q = await quinzenaPorId(q.id);
-    await aplicarAfastamentos(q.sindicato_id);
-    const pend = await pendencias(q, p);
-    if (pend.length) return res.status(409).json({ error: textoPendencias(pend), pendencias: pend });
-    const confl = await conflitosDeRestricao(q);
-    if (confl.length) return res.status(409).json({ error: `Regra 9: ${confl.slice(0, 3).join(' ')} Desfaça a troca ou a inclusão antes de publicar.` });
-    const atrasados = (await situacaoGestores(q, p)).filter((g) => !g.em_dia);
-    if (atrasados.length) {
-      const nomes = atrasados.slice(0, 5).map((g) => `${g.nome} (${!g.ultima ? 'não enviou' : g.desatualizada ? 'mudou depois da prévia' : 'unidades pendentes'})`).join('; ');
-      return res.status(409).json({ error: `Ainda falta a prévia em dia de ${atrasados.length} ${atrasados.length === 1 ? 'gestor' : 'gestores'}: ${nomes}${atrasados.length > 5 ? '…' : ''}.` });
-    }
+  return (
+    <section className="bg-white border border-slate-200 rounded-2xl">
+      <div className="p-4 border-b border-slate-100 space-y-2">
+        <div className="flex flex-wrap gap-3 justify-between items-center">
+          <div>
+            <p className="text-[14px] font-semibold">Escala geral</p>
+            <p className="text-[11.5px] text-slate-500">
+              {titulo} · {filtrando && verComo !== "colaborador" ? <><b className="text-slate-700">{vis.length}</b> de </> : null}
+              {daVisao.length} linhas · {pessoasLista.length} pessoas
+            </p>
+          </div>
+          <div className="flex gap-1">
+            {[["sindicato", "Sindicato"], ["fiscal", "Fiscal"], ["colaborador", "Colaborador"]].map(([k, r]) => (
+              <button key={k} onClick={() => setVerComo(k)}
+                className={`rounded-lg px-3 py-1.5 text-[12px] font-semibold border ${verComo === k ? "bg-slate-900 text-white border-slate-900" : "bg-slate-50 text-slate-500 border-slate-200"}`}>{r}</button>
+            ))}
+          </div>
+        </div>
+        {verComo === "fiscal" && (
+          <>
+            <select value={fiscalId || ""} onChange={(e) => setFiscal(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
+              {unidadesLista.map((l) => <option key={l.unidade_id} value={l.unidade_id}>Fiscal da {l.unidade_codigo} · {cap(l.unidade_nome)} · {cap(l.setor)}</option>)}
+            </select>
+            <p className="text-[11.5px] text-slate-500">O fiscal recebe só quem trabalha na unidade dele, inclusive quem chega de fora no período da troca.</p>
+          </>
+        )}
+      </div>
 
-    /* a publicação espera as respostas dos convocados. Depois do 1º dia
-       do período o administrador pode publicar mesmo assim, com motivo. */
-    const aguardando = await aguardandoRespostas(q.id);
-    let motivoSemResposta = '';
-    if (aguardando) {
-      motivoSemResposta = String((req.body || {}).motivo || '').trim();
-      const comecou = hojeSP() >= soData(q.inicio);
-      const quem_ = `${aguardando} ${aguardando === 1 ? 'convocado ainda não respondeu' : 'convocados ainda não responderam'}`;
-      if (!comecou) {
-        return res.status(409).json({ error: `Faltam respostas: ${quem_}. A escala definitiva só sai depois que todos responderem; a partir de ${soData(q.inicio).split('-').reverse().join('/')} (início do período) o administrador pode publicar mesmo assim, com motivo.` });
-      }
-      if (motivoSemResposta.length < 5) {
-        return res.status(409).json({ error: `Faltam respostas: ${quem_}. Para publicar assim, informe o motivo.`, precisa_motivo: true });
-      }
-    }
+      {/* ---------- filtros ---------- */}
+      <div className="px-4 py-3 border-b border-slate-100 bg-slate-50/60 space-y-2.5">
+        <div className="flex flex-wrap gap-2 items-center">
+          <div className="relative flex-1 min-w-[220px] max-w-md">
+            <svg className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-slate-400" fill="none" stroke="currentColor" strokeWidth="2" viewBox="0 0 24 24">
+              <circle cx="11" cy="11" r="7" /><path d="m20 20-3.5-3.5" />
+            </svg>
+            <input value={fBusca} onChange={(e) => setFBusca(e.target.value)}
+              placeholder="Buscar código, nome ou unidade…"
+              className="w-full bg-white border border-slate-200 rounded-lg pl-9 pr-8 py-2 text-[13px] focus:outline-none focus:border-slate-400" />
+            {fBusca && (
+              <button onClick={() => setFBusca("")} aria-label="Limpar busca"
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-5 h-5 rounded-full text-slate-400 hover:text-slate-700 hover:bg-slate-200 text-[13px] leading-none">×</button>
+            )}
+          </div>
+          <Chip tom="amber" ativo={fSemNome} onClick={() => setFSemNome(!fSemNome)} n={totalSemNome}>Sem nome</Chip>
+          {filtrando && (
+            <button onClick={limpar}
+              className="rounded-lg border border-slate-300 bg-white px-3 py-1.5 text-[12px] font-semibold text-slate-600 hover:border-slate-500">
+              Limpar filtros
+            </button>
+          )}
+        </div>
 
-    await cliente.query('begin');
-    await cliente.query(
-      "update rodizio_trocas set estado = 'sem_resposta' where quinzena_id = $1 and estado = 'enviada'", [q.id]);
+        {verComo !== "colaborador" && (
+          <>
+            <div className="flex flex-wrap gap-1.5 items-center">
+              <span className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold w-20">Tipo</span>
+              {TIPOS_FILTRO.map(([k, r]) => (
+                <Chip key={k} ativo={fTipo === k} onClick={() => setFTipo(k)} n={contaTipo(k)}>{r}</Chip>
+              ))}
+            </div>
+            <div className="flex flex-wrap gap-1.5 items-center">
+              <span className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold w-20">Resposta</span>
+              {RESPOSTAS_FILTRO.map(([k, r]) => (
+                <Chip key={k} ativo={fResposta === k} onClick={() => setFResposta(k)} n={contaResp(k)}>{r}</Chip>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
 
-    const { rows: [e] } = await cliente.query(`
-      insert into escalas (sindicato_id, ano, periodo_inicio, periodo_fim, titulo, criado_por, natureza, quinzena_id, previa_id)
-      values ($1, extract(year from $2::date)::int, $2::date, $3::date, 'Escala da quinzena', $4, 'quinzena', $5, $6)
-      returning id, sindicato_id, ano
-    `, [q.sindicato_id, soData(q.inicio), soData(q.fim), quem(req), q.id, q.previa_escala_id]);
-
-    const linhas = await montarLinhas(cliente, q, p, ['aceita', 'sem_resposta', 'montada']);
-    const convDe = await convocacoesDaQuinzena(cliente, q.id);
-    for (const l of linhas) {
-      if (l.tipo === 'rodizio') l.convocacao_previa_id = convDe[`${l.troca_id}|${l.trabalhador_id}`] || null;
-    }
-    await inserirLinhas(cliente, e.id, linhas);
-
-    const { rows: [pub] } = await cliente.query(`
-      update escalas set numero = proximo_numero_escala(sindicato_id, ano), status = 'publicada',
-             publicada_em = now(), publicada_por = $2, hash_publicacao = hash_da_escala($1)
-       where id = $1
-      returning numero, ano, publicada_em
-    `, [e.id, quem(req)]);
-    await cliente.query('update rodizio_quinzenas set definitiva_escala_id = $2 where id = $1', [q.id, e.id]);
-    const { rows: [c] } = await cliente.query('select gerar_convocacoes($1, $2) as n', [e.id, quem(req)]);
-    /* as trocas feitas no ajuste ganharam convocação agora */
-    await cliente.query(
-      "update rodizio_trocas set estado = 'enviada' where quinzena_id = $1 and estado = 'montada'", [q.id]);
-    await cliente.query(
-      "insert into escala_eventos (escala_id, tipo, descricao, quem) values ($1, 'publicada', $2, $3)",
-      [e.id, `Escala ${pub.numero}/${pub.ano} da quinzena publicada com ${linhas.length} linhas; ${c.n} convocações novas (trocas do ajuste)${aguardando ? `; publicada com ${aguardando} sem resposta — motivo: ${motivoSemResposta}` : ''}${q.reaberta ? '; republicação após cancelamento da escala anterior' : ''}`, quem(req)]);
-    await cliente.query('commit');
-
-    await registrarEvento({
-      tipo: 'rodizio_publicada', titulo: `Escala ${pub.numero}/${pub.ano} publicada`,
-      descricao: `${soData(q.inicio)} a ${soData(q.fim)} · ${linhas.length} linhas`,
-      ator: quem(req), atorUsuarioId: req.usuario.id || null, entidadeTipo: 'escala', entidadeId: e.id,
-      ip: ipReq(req), navegador: navegadorReq(req),
-    });
-    res.json({ escala_id: e.id, numero: pub.numero, ano: pub.ano, linhas: linhas.length, convocacoes: c.n });
-  } catch (e) {
-    await cliente.query('rollback').catch(() => {});
-    if (erroDeRegra(e)) return res.status(409).json({ error: e.message });
-    next(e);
-  } finally { cliente.release(); }
-});
-
-/* ==================================================================
- * POST /rodizio/afastamentos/:id/encerrar — só administrador, com motivo.
- * Existe para corrigir erro (recusa mal registrada, motivo errado); o
- * afastamento continua no arquivo, com quem encerrou e por quê.
- * ================================================================ */
-router.post('/afastamentos/:id/encerrar', autorizar('admin'), async (req, res, next) => {
-  try {
-    const motivo = String((req.body || {}).motivo || '').trim();
-    if (motivo.length < 5) return res.status(400).json({ error: 'Informe o motivo do encerramento (ao menos 5 letras).' });
-    const { rows: [a] } = await consulta(`
-      update rodizio_afastamentos
-         set encerrado_em = now(), encerrado_por = $2, encerrado_motivo = $3
-       where id = $1 and encerrado_em is null
-       returning trabalhador_id`, [req.params.id, quem(req), motivo]);
-    if (!a) return res.status(409).json({ error: 'Afastamento já encerrado ou inexistente.' });
-    try {
-      await registrarEvento({
-        tipo: 'rodizio_afastamento', titulo: 'Afastamento encerrado pelo administrador',
-        descricao: `${await nomeDe(a.trabalhador_id)} · ${motivo}`,
-        ator: quem(req), atorUsuarioId: req.usuario.id || null, entidadeTipo: 'trabalhador',
-        entidadeId: a.trabalhador_id, ip: ipReq(req), navegador: navegadorReq(req),
-      });
-    } catch (e) { /* auditoria geral é complemento */ }
-    _regra = { em: 0, v: null };
-    res.json({ ok: true });
-  } catch (e) { next(e); }
-});
-
-/* ==================================================================
- * GET /rodizio/escala/:escalaId/linhas — a escala geral, para as vistas
- * do sindicato, do fiscal (por unidade) e do colaborador.
- * ================================================================ */
-router.get('/escala/:escalaId/linhas', async (req, res, next) => {
-  try {
-    const { rows } = await consulta(`
-      select i.id, i.tipo, i.data_inicio, i.data_fim, i.troca_id,
-             t.id as trabalhador_id, t.codigo, t.nome,
-             u.id as unidade_id, u.codigo as unidade_codigo, u.setor,
-             coalesce(l.nome, u.nome_completo) as unidade_nome,
-             coalesce(c.status, cp.status) as resposta,
-             c.token
-        from escala_itens i
-        join trabalhadores t on t.id = i.trabalhador_id
-        join unidades u on u.id = i.destino_unidade_id
-        left join locais l on l.id = u.local_id
-        left join convocacoes c  on c.escala_item_id = i.id
-        left join convocacoes cp on cp.id = i.convocacao_previa_id
-       where i.escala_id = $1
-       order by u.codigo, t.nome, i.data_inicio
-    `, [req.params.escalaId]);
-    res.json(rows);
-  } catch (e) { next(e); }
-});
-
-/* ==================================================================
- * GET /rodizio/quinzenas/:qid/publicacao — pacote de divulgação (.zip)
- * Só o administrador, e só de escala definitiva já publicada: Escala
- * Geral, uma escala por empresa e uma por unidade/setor (mural).
- * Devolve o arquivo em base64 dentro do JSON, para a tela baixar.
- * ================================================================ */
-router.get('/quinzenas/:qid/publicacao', autorizar('admin'), async (req, res, next) => {
-  try {
-    const q = await quinzenaPorId(req.params.qid);
-    if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
-    if (!q.definitiva_escala_id) {
-      return res.status(409).json({ error: 'A publicação só sai de uma escala definitiva já publicada. Publique a escala primeiro.' });
-    }
-    const { rows: [e] } = await consulta(`
-      select numero, ano, status, publicada_em, publicada_por, hash_publicacao
-        from escalas where id = $1`, [q.definitiva_escala_id]);
-    if (!e || e.status !== 'publicada') return res.status(409).json({ error: 'A escala definitiva desta quinzena não está publicada.' });
-
-    const { rows: linhas } = await consulta(`
-      select i.trabalhador_id, t.codigo, t.nome,
-             to_char(i.data_inicio, 'YYYY-MM-DD') as data_inicio,
-             to_char(i.data_fim, 'YYYY-MM-DD') as data_fim,
-             lo.nome as origem_nome, lo.cidade as origem_cidade,
-             u.id as unidade_id, u.codigo as ucodigo, u.setor,
-             l.id as local_id, coalesce(l.nome, u.nome_completo) as empresa,
-             coalesce(l.cidade, u.cidade) as cidade
-        from escala_itens i
-        join trabalhadores t on t.id = i.trabalhador_id
-        join unidades u on u.id = i.destino_unidade_id
-        left join locais l on l.id = u.local_id
-        left join locais lo on lo.id = i.origem_local_id
-       where i.escala_id = $1
-    `, [q.definitiva_escala_id]);
-    if (!linhas.length) return res.status(409).json({ error: 'A escala publicada não tem linhas.' });
-
-    const meta = {
-      rotulo: `${String(e.numero).padStart(3, '0')}/${e.ano}`,
-      inicio: soData(q.inicio), fim: soData(q.fim),
-      publicada_em: e.publicada_em, publicada_por: e.publicada_por, hash: e.hash_publicacao,
-    };
-    const r = await gerarPublicacao(meta, linhas);
-    const nome = `Publicacao Escala ${String(e.numero).padStart(3, '0')}-${e.ano} (${soData(q.inicio)} a ${soData(q.fim)}).zip`;
-
-    await registrarEvento({
-      tipo: 'rodizio_publicacao', titulo: `Publicação da Escala ${meta.rotulo} gerada`,
-      descricao: `${r.empresas} empresas · ${r.unidades} unidades · ${r.pessoas} trabalhadores`,
-      ator: quem(req), atorUsuarioId: req.usuario.id || null, entidadeTipo: 'escala', entidadeId: q.definitiva_escala_id,
-      ip: ipReq(req), navegador: navegadorReq(req),
-    }).catch((err) => console.error('publicação (auditoria):', err.message));
-
-    res.json({ nome, zip_base64: r.zip.toString('base64'), empresas: r.empresas, unidades: r.unidades, pessoas: r.pessoas, arquivos: r.arquivos });
-  } catch (e) { next(e); }
-});
-
-module.exports = router;
+      {verComo === "colaborador" ? (
+        <div className="p-4 space-y-3">
+          {pessoasFiltradas.length > 0 && (
+            <select value={pessoaId || ""} onChange={(e) => setPessoa(e.target.value)} className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]">
+              {pessoasFiltradas.map((l) => <option key={l.trabalhador_id} value={l.trabalhador_id}>{l.nome ? cap(l.nome) : "(sem nome)"} · {l.codigo}</option>)}
+            </select>
+          )}
+          {(() => {
+            const minhas = linhas.filter((l) => l.trabalhador_id === pessoaId).sort((a, b) => a.data_inicio.localeCompare(b.data_inicio));
+            const pp = minhas[0];
+            if (!pp) return <p className="text-[12.5px] text-slate-500">{linhas.length ? "Ninguém com esses filtros." : "Ninguém na escala ainda."}</p>;
+            return (
+              <div className="max-w-sm border border-slate-200 rounded-2xl p-4 shadow-sm space-y-2">
+                <p className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold">O que {pp.nome ? cap(primeiroNome(pp.nome)) : "o colaborador"} vê</p>
+                <p className="text-[16px] font-semibold">{pp.nome ? cap(pp.nome) : <span className="text-amber-700">Sem nome no cadastro</span>}</p>
+                <p className="text-[11.5px] text-slate-500">Código {pp.codigo} · {diaMes(q.inicio)} a {dataBR(q.fim)}</p>
+                {minhas.map((l, i) => (
+                  <div key={i} className="flex justify-between gap-3 border-t border-slate-100 pt-2 text-[12.5px]">
+                    <span>{diaMes(l.data_inicio)} a {diaMes(l.data_fim)}</span>
+                    <b className="text-right">{l.unidade_codigo} · {cap(l.unidade_nome)}</b>
+                  </div>
+                ))}
+                <p className="text-[11px] text-slate-400">Ele não vê colegas nem a escala da unidade. Só o que é dele.</p>
+              </div>
+            );
+          })()}
+        </div>
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-[12.5px]">
+            <thead className="bg-slate-50 text-slate-500 text-[10.5px] uppercase tracking-wider">
+              <tr>
+                <th className="text-left px-3 py-2">Código</th><th className="text-left px-3 py-2">Colaborador</th>
+                <th className="text-left px-3 py-2">Unidade</th><th className="text-left px-3 py-2">Período</th>
+                <th className="text-left px-3 py-2">Tipo</th><th className="text-left px-3 py-2">Resposta</th>
+              </tr>
+            </thead>
+            <tbody>
+              {vis.map((l, i) => (
+                <tr key={i} className="border-t border-slate-100">
+                  <td className="px-3 py-2 tabular-nums">{l.codigo}</td>
+                  <td className="px-3 py-2">
+                    {semNomeDe(l)
+                      ? <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-amber-50 text-amber-700">Sem nome</span>
+                      : cap(l.nome)}
+                  </td>
+                  <td className="px-3 py-2"><b className="tabular-nums">{l.unidade_codigo}</b> {cap(l.unidade_nome)} · {cap(l.setor)}</td>
+                  <td className="px-3 py-2 whitespace-nowrap">{diaMes(l.data_inicio)} a {diaMes(l.data_fim)}</td>
+                  <td className="px-3 py-2">
+                    {l.tipo === "rodizio"
+                      ? <span className="text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-sky-50 text-sky-700">Rodízio</span>
+                      : <span className="text-slate-500">{rotTipo[l.tipo] || l.tipo}</span>}
+                  </td>
+                  <td className="px-3 py-2 text-slate-600">
+                    {l.tipo !== "rodizio" ? <span className="text-slate-400">Não precisa</span> : (
+                      <span className="flex gap-2 items-center flex-wrap">
+                        {l.resposta ? (RESPOSTA[l.resposta] || l.resposta) : <span className="text-slate-400">{d.definitiva ? "—" : "Prévia não enviada"}</span>}
+                        {l.token && (
+                          <button onClick={() => copiar(l.token)} className="text-[11.5px] text-teal-700 font-semibold">
+                            {copiado === l.token ? "Link copiado" : "Copiar link"}
+                          </button>
+                        )}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+              {vis.length === 0 && (
+                <tr><td colSpan="6" className="px-3 py-6 text-center text-slate-400">
+                  {daVisao.length === 0 ? "Ninguém na escala ainda." : (
+                    <>Nenhuma linha com esses filtros. <button onClick={limpar} className="text-teal-700 font-semibold">Limpar filtros</button></>
+                  )}
+                </td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
