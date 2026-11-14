@@ -64,6 +64,8 @@ function urgencia(u, pessoas) {
 /* Regra 9 (recusas). A pessoa está "indisponível" na escala quando está ausente
    ou quando a regra a tira dela (afastada, ou só pode sair da unidade-mãe). */
 const indisponivel = (p) => !!p.ausente || !!p.fora_da_escala;
+/* 14/11/2026 — envio sem par (só ida): escolhido no lugar de um colaborador */
+const ENVIO = "__envio__";
 /* a unidade x fica dentro da "mãe" da restrição da pessoa p? */
 const impede = (p, x) => {
   const r = p?.restricao;
@@ -219,11 +221,15 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
     && periodoAtual[0] >= q.inicio && periodoAtual[1] <= q.fim && diasPeriodo <= limiteBloco;
 
   async function validarTroca() {
-    const a = pDe(pSel), b = pDe(parSel);
+    const a = pDe(pSel);
+    const envio = parSel === ENVIO;
+    const b = envio ? null : pDe(parSel);
+    const dU = uDe(dSel);
     const r = await agir(`/rodizio/quinzenas/${q.id}/trocas`, {
-      a_trabalhador_id: a.id, a_unidade_id: a.unidade_id, b_trabalhador_id: b.id, b_unidade_id: b.unidade_id,
+      a_trabalhador_id: a.id, a_unidade_id: a.unidade_id, b_trabalhador_id: envio ? null : b.id, b_unidade_id: envio ? dU.id : b.unidade_id,
       data_inicio: periodoAtual[0], data_fim: periodoAtual[1],
-    }, (r) => `Troca validada: ${cap(primeiroNome(a.nome))} ⇄ ${cap(primeiroNome(b.nome))}${r.outro_gestor ? ` · ${r.outro_gestor} verá a troca na unidade dele` : ""}`);
+    }, (r) => (envio ? `Envio validado: ${cap(primeiroNome(a.nome))} vai para a ${dU.codigo}` : `Troca validada: ${cap(primeiroNome(a.nome))} ⇄ ${cap(primeiroNome(b.nome))}`)
+      + (r.outro_gestor ? ` · ${r.outro_gestor} verá ${envio ? "o envio" : "a troca"} na unidade dele` : ""));
     if (r) { setPSel(null); setDSel(null); setParSel(null); setBuscaOutra(null); }
   }
 
@@ -736,7 +742,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
               const resp = ehA ? tr.a_resposta : tr.b_resposta;
               faixa = (
                 <div className="col-span-2 flex flex-wrap justify-between gap-2 bg-sky-50 text-sky-800 rounded-lg px-2.5 py-1.5 text-[11.5px]">
-                  <span>Vai para <b>{destino?.codigo}</b> de {diaMes(tr.data_inicio)} a {dataBR(tr.data_fim)} · par com {cap(outro?.nome)}</span>
+                  <span>Vai para <b>{destino?.codigo}</b> de {diaMes(tr.data_inicio)} a {dataBR(tr.data_fim)} · {tr.b_trabalhador_id ? `par com ${cap(outro?.nome)}` : "envio, sem troca"}</span>
                   <span className="flex gap-2 items-center">
                     {resp && <span>{RESPOSTA[resp] || resp}</span>}
                     {pode && (
@@ -751,7 +757,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
               const quemRecusou = rec.a_resposta === "recusada" ? pDe(rec.a_trabalhador_id) : pDe(rec.b_trabalhador_id);
               faixa = (
                 <div className="col-span-2 bg-rose-50 text-rose-700 rounded-lg px-2.5 py-1.5 text-[11.5px]">
-                  Troca com a {uDe(ehA ? rec.b_unidade_id : rec.a_unidade_id)?.codigo} recusada por {cap(quemRecusou?.nome)}
+                  {rec.b_trabalhador_id ? "Troca" : "Envio"} para a {uDe(ehA ? rec.b_unidade_id : rec.a_unidade_id)?.codigo} recusado por {cap(quemRecusou?.nome)}
                   {(rec.a_motivo || rec.b_motivo) ? ` · ${rec.a_motivo || rec.b_motivo}` : ""}. Remonte ou mantenha.
                 </div>
               );
@@ -834,7 +840,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
       <section className="bg-white border border-slate-200 rounded-2xl flex flex-col min-w-0 xl:col-span-1 lg:col-span-2 xl:col-start-3">
         <div className="p-3 border-b border-slate-100">
           <p className="text-[13.5px] font-semibold">Trocas desta quinzena</p>
-          <p className="text-[11.5px] text-slate-500">Toda troca é casada: quem sai é reposto por quem vem.</p>
+          <p className="text-[11.5px] text-slate-500">Troca (⇄): quem sai é reposto por quem vem. Envio (→): só ida, para unidade que pede gente.</p>
         </div>
         <div className="p-3 space-y-2 overflow-y-auto max-h-[calc(100vh-260px)]">
           {(d.trocas || []).length === 0 && (
@@ -849,10 +855,10 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
             return (
               <div key={t.id} className="border border-slate-200 rounded-xl p-2.5">
                 <div className="flex justify-between gap-2">
-                  <b className="text-[12.5px] tabular-nums">{uDe(t.a_unidade_id)?.codigo} ⇄ {uDe(t.b_unidade_id)?.codigo}</b>
+                  <b className="text-[12.5px] tabular-nums">{uDe(t.a_unidade_id)?.codigo} {t.b_trabalhador_id ? "⇄" : "→"} {uDe(t.b_unidade_id)?.codigo}</b>
                   <span className={`text-[10.5px] font-semibold rounded-md px-2 py-0.5 ${cor}`}>{rot}{t.rodada === 2 ? " · ajuste" : ""}</span>
                 </div>
-                <p className="text-[11.5px] text-slate-600 mt-0.5">{cap(a?.nome)} vai para {uDe(t.b_unidade_id)?.codigo} · {cap(b?.nome)} vai para {uDe(t.a_unidade_id)?.codigo}</p>
+                <p className="text-[11.5px] text-slate-600 mt-0.5">{cap(a?.nome)} vai para {uDe(t.b_unidade_id)?.codigo} · {t.b_trabalhador_id ? `${cap(b?.nome)} vai para ${uDe(t.a_unidade_id)?.codigo}` : "envio, sem troca"}</p>
                 <p className="text-[11px] text-slate-400">{diaMes(t.data_inicio)} a {dataBR(t.data_fim)} · montada por {t.montada_por}</p>
               </div>
             );
@@ -863,14 +869,19 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   } else {
     const origem = uDe(p.unidade_id);
     const nivel = (x) => (x.local_id && x.local_id === origem.local_id ? 1 : x.cidade && x.cidade === origem.cidade ? 2 : 3);
-    const comGente = (x) => pessoas.some((pp) => pp.unidade_id === x.id && !indisponivel(pp));
-    const dests = unidades.filter((x) => x.id !== origem.id && !impede(p, x) && minha(x) && comGente(x) && (cidade === "Todas" || x.cidade === cidade || x.local_id === origem.local_id))
+    const genteEm = (x) => pessoas.filter((pp) => pp.unidade_id === x.id && !indisponivel(pp)).length;
+    const comGente = (x) => genteEm(x) > 0;
+    /* unidade que pede mais gente do que tem também é destino: dá para enviar sem troca */
+    const pedeGente = (x) => (x.req_qtd || 0) > genteEm(x);
+    const dests = unidades.filter((x) => x.id !== origem.id && !impede(p, x) && minha(x) && (comGente(x) || pedeGente(x)) && (cidade === "Todas" || x.cidade === cidade || x.local_id === origem.local_id))
       .map((x) => ({ x, n: nivel(x) })).sort((a, b) => a.n - b.n || a.x.codigo.localeCompare(b.x.codigo));
     const grupos = [[1, "No mesmo local · outro setor"], [2, `Em ${origem.cidade || "mesma cidade"} · outro local`], [3, "Em outra cidade"]];
     const dest = uDe(dSel);
     const qo = (buscaOutra || "").trim().toLowerCase();
-    const outras = buscaOutra === null ? [] : unidades.filter((x) => x.id !== origem.id && !impede(p, x) && !minha(x) && comGente(x) &&
-      (!qo || x.codigo.includes(qo) || (x.local_nome || "").toLowerCase().includes(qo) || (x.cidade || "").toLowerCase().includes(qo))).slice(0, 20);
+    /* a busca acha qualquer unidade, inclusive as suas e as sem ninguém ativo */
+    const outras = buscaOutra === null || !qo ? [] : unidades.filter((x) => x.id !== origem.id && !impede(p, x) &&
+      (x.codigo.includes(qo) || (x.local_nome || "").toLowerCase().includes(qo) || (x.cidade || "").toLowerCase().includes(qo)
+        || (x.setor || "").toLowerCase().includes(qo))).slice(0, 20);
     const cand = dest ? pessoas.filter((x) => x.unidade_id === dest.id && !x.ausente && x.restricao?.fase !== "afastado" && !impede(x, origem) && !trocaDe(x.id))
       .sort((a, b) => (b.perfil === "permanente" && b.falta > 0) - (a.perfil === "permanente" && a.falta > 0) || b.falta - a.falta) : [];
     const BotaoDestino = ({ x }) => (
@@ -915,15 +926,15 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
               <input autoFocus value={buscaOutra} onChange={(e) => setBuscaOutra(e.target.value)} placeholder="Número, nome ou cidade"
                 className="w-full border border-slate-200 rounded-lg px-3 py-2 text-[13px]" />
               {outras.map((x) => <BotaoDestino key={x.id} x={x} />)}
-              {outras.length === 0 && <p className="text-[12px] text-slate-500">Nenhuma unidade com isso.</p>}
+              {outras.length === 0 && <p className="text-[12px] text-slate-500">{qo ? "Nenhuma unidade com isso." : "Digite o número, o nome ou a cidade."}</p>}
             </div>
           )}
-          <p className="text-[11px] text-slate-400">Aparecem só as suas unidades. As de outro Gestor MMG Responsável entram pela busca.</p>
+          <p className="text-[11px] text-slate-400">Aparecem as suas unidades com gente para trocar ou que pedem gente. Qualquer outra entra pela busca.</p>
 
           {dest && (
             <div className="bg-slate-50 border border-slate-200 rounded-xl p-3 space-y-2">
               <b className="text-[13px]">Com quem {cap(primeiroNome(p.nome))} troca na {dest.codigo}?</b>
-              <p className="text-[11.5px] text-slate-500">Quem também precisa rodar aparece primeiro: a troca resolve os dois.</p>
+              <p className="text-[11.5px] text-slate-500">Quem também precisa rodar aparece primeiro: a troca resolve os dois. Se a {dest.codigo} só precisa receber gente, use o envio sem troca.</p>
               <div className="space-y-1.5">
                 {cand.map((x) => (
                   <button key={x.id} onClick={() => setParSel(x.id)}
@@ -932,7 +943,12 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
                     <TagPessoa p={x} />
                   </button>
                 ))}
-                {cand.length === 0 && <p className="text-[12px] text-slate-500">Todos daqui já estão em troca ou ausentes.</p>}
+                {cand.length === 0 && <p className="text-[12px] text-slate-500">{genteEm(dest) ? "Todos daqui já estão em troca ou ausentes." : `A ${dest.codigo} não tem ninguém ativo para trocar.`}</p>}
+                <button onClick={() => setParSel(ENVIO)}
+                  className={`w-full text-left border border-dashed rounded-lg px-3 py-2 bg-white ${parSel === ENVIO ? "border-sky-500 ring-1 ring-sky-500" : "border-slate-300"}`}>
+                  <span className="text-[12.5px]"><b>Enviar sem troca</b> <span className="text-slate-500">· {cap(primeiroNome(p.nome))} vai e ninguém vem no lugar</span></span>
+                  <span className="block text-[11px] text-slate-500">{dest.req_qtd ? `A ${dest.codigo} pede ${dest.req_qtd} e tem ${genteEm(dest)} ativo${genteEm(dest) === 1 ? "" : "s"}.` : `A ${dest.codigo} não tem requisição nesta quinzena.`}</span>
+                </button>
               </div>
 
               <p className="text-[10.5px] uppercase tracking-wider text-slate-400 font-semibold pt-1">Período da troca</p>
@@ -964,8 +980,19 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
                 </div>
               )}
               <button disabled={!parSel || !periodoValido || ocupado} onClick={validarTroca}
-                className="w-full bg-teal-600 text-white rounded-lg py-2 text-[13px] font-semibold disabled:opacity-40">Validar troca</button>
-              {parSel && (
+                className="w-full bg-teal-600 text-white rounded-lg py-2 text-[13px] font-semibold disabled:opacity-40">{parSel === ENVIO ? "Validar envio" : "Validar troca"}</button>
+              {parSel === ENVIO && (() => {
+                const ficam = genteEm(origem) - 1, pede = origem.req_qtd || 0;
+                return (
+                  <p className={`text-[11.5px] leading-relaxed ${pede > ficam ? "text-amber-700" : "text-slate-500"}`}>
+                    {cap(p.nome)} vai para a {dest.codigo} de {diaMes(periodoAtual[0])} a {dataBR(periodoAtual[1])} e ninguém vem para a {origem.codigo}.
+                    {" "}Nesse período a {origem.codigo} fica com {ficam} ativo{ficam === 1 ? "" : "s"}{pede ? ` e pede ${pede}` : ""}.
+                    {pede > ficam ? " Ela fica descoberta: inclua alguém na " + origem.codigo + " ou escolha outro período." : ""}
+                    {!minha(dest) && ` A ${dest.codigo} é de ${dest.gestor_nome}: ele verá o envio e ainda precisa finalizar a unidade dele.`}
+                  </p>
+                );
+              })()}
+              {parSel && parSel !== ENVIO && (
                 <p className="text-[11.5px] text-slate-500 leading-relaxed">
                   {cap(p.nome)} vai para a {dest.codigo} e {cap(pDe(parSel)?.nome)} vem para a {origem.codigo}, de {diaMes(periodoAtual[0])} a {dataBR(periodoAtual[1])}.
                   O resto da quinzena cada um fica na sua unidade.

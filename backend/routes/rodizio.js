@@ -155,7 +155,8 @@ async function sincronizarRespostas(q, autor) {
     with r as (
       select t.id,
              bool_or(c.status = 'recusada') as recusou,
-             count(*) filter (where c.status = 'aceita') as aceites
+             count(*) filter (where c.status = 'aceita') as aceites,
+             max(case when t.b_trabalhador_id is null then 1 else 2 end) as precisa
         from rodizio_trocas t
         join escala_itens i on i.troca_id = t.id and i.tipo = 'rodizio'
         join escalas e on e.id = i.escala_id and e.quinzena_id = $1 and e.status = 'previa'
@@ -166,7 +167,7 @@ async function sincronizarRespostas(q, autor) {
     update rodizio_trocas t
        set estado = case when r.recusou then 'recusada' else 'aceita' end
       from r
-     where t.id = r.id and (r.recusou or r.aceites >= 2)
+     where t.id = r.id and (r.recusou or r.aceites >= r.precisa)
     returning t.id, t.estado, t.a_unidade_id, t.b_unidade_id
   `, [q.id]);
 
@@ -394,7 +395,8 @@ async function conflitosDeRestricao(q, soUnidades) {
   const { rows: incl } = await consulta(
     "select trabalhador_id, unidade_id from rodizio_pessoas where quinzena_id = $1 and tipo = 'incluido'", [q.id]);
   const itens = [
-    ...trocas.flatMap((t) => [[t.a_trabalhador_id, t.b_unidade_id, t.a_unidade_id], [t.b_trabalhador_id, t.a_unidade_id, t.b_unidade_id]]),
+    ...trocas.flatMap((t) => [[t.a_trabalhador_id, t.b_unidade_id, t.a_unidade_id], [t.b_trabalhador_id, t.a_unidade_id, t.b_unidade_id]])
+      .filter(([tid]) => tid),
     ...incl.map((x) => [x.trabalhador_id, x.unidade_id, x.unidade_id]),
   ];
   const out = [];
@@ -872,10 +874,15 @@ router.post('/quinzenas/:qid/trocas', podeEscrever, async (req, res, next) => {
     const q = await quinzenaPorId(req.params.qid);
     if (!q) return res.status(404).json({ error: 'Quinzena não encontrada' });
     if (!(await exigirEtapa(res, q, ['montagem', 'ajustes']))) return;
-    const { a_trabalhador_id, a_unidade_id, b_trabalhador_id, b_unidade_id, data_inicio, data_fim } = req.body || {};
-    if (!a_trabalhador_id || !a_unidade_id || !b_trabalhador_id || !b_unidade_id || !data_inicio || !data_fim) {
+    /* 14/11/2026 — sem b_trabalhador_id é um ENVIO (só ida): a pessoa vai
+       para a unidade de destino e ninguém vem no lugar dela. Serve para
+       unidade que pede gente e não tem com quem trocar (unidade nova). */
+    const { a_trabalhador_id, a_unidade_id, b_unidade_id, data_inicio, data_fim } = req.body || {};
+    const b_trabalhador_id = (req.body || {}).b_trabalhador_id || null;
+    if (!a_trabalhador_id || !a_unidade_id || !b_unidade_id || !data_inicio || !data_fim) {
       return res.status(400).json({ error: 'Faltam dados da troca' });
     }
+    if (a_unidade_id === b_unidade_id) return res.status(400).json({ error: 'A unidade de destino é a mesma de origem.' });
     if (!(await exigirGestor(req, res, a_unidade_id))) return;
     const gB = await gestorDe(b_unidade_id);
     if (!gB) return res.status(409).json({ error: 'A unidade de destino ainda não tem Gestor MMG Responsável.' });
@@ -889,7 +896,7 @@ router.post('/quinzenas/:qid/trocas', podeEscrever, async (req, res, next) => {
     if (restrT[a_trabalhador_id] || restrT[b_trabalhador_id]) {
       const un = await unidadesPorId(q.sindicato_id);
       const ea = restrT[a_trabalhador_id] && restricaoImpede(restrT[a_trabalhador_id], un[b_unidade_id], await nomeDe(a_trabalhador_id));
-      const eb = restrT[b_trabalhador_id] && restricaoImpede(restrT[b_trabalhador_id], un[a_unidade_id], await nomeDe(b_trabalhador_id));
+      const eb = b_trabalhador_id && restrT[b_trabalhador_id] && restricaoImpede(restrT[b_trabalhador_id], un[a_unidade_id], await nomeDe(b_trabalhador_id));
       if (ea || eb) return res.status(409).json({ error: ea || eb });
     }
 
@@ -905,7 +912,7 @@ router.post('/quinzenas/:qid/trocas', podeEscrever, async (req, res, next) => {
     await marcarAndamento(cliente, q.id, a_unidade_id, quem(req));
     await marcarAndamento(cliente, q.id, b_unidade_id, quem(req));
     await cliente.query('commit');
-    res.status(201).json({ id: t.id, outro_gestor: gB.usuario_id === req.usuario.id ? null : gB.nome });
+    res.status(201).json({ id: t.id, envio: !b_trabalhador_id, outro_gestor: gB.usuario_id === req.usuario.id ? null : gB.nome });
   } catch (e) {
     await cliente.query('rollback').catch(() => {});
     if (erroDeRegra(e)) return res.status(409).json({ error: e.message });
@@ -975,7 +982,7 @@ async function montarLinhas(cliente, q, p, estadosVivos) {
   const trocaDe = {};
   for (const t of trocas) {
     trocaDe[t.a_trabalhador_id] = { t, destino: t.b_unidade_id };
-    trocaDe[t.b_trabalhador_id] = { t, destino: t.a_unidade_id };
+    if (t.b_trabalhador_id) trocaDe[t.b_trabalhador_id] = { t, destino: t.a_unidade_id };
   }
   /* regra 9: afastado não entra; quem só pode ir para fora da mãe não
      "permanece" nela nem tem linha de base nela */
