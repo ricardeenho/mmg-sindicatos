@@ -54,9 +54,12 @@ async function requisicoesDaQuinzena(inicio, fim, p) {
     select r.id, r.unidade_id, r.unidade_codigo, r.unidade_nome, r.local_nome, r.local_cidade,
            r.quantidade, r.funcoes, r.tipo, r.status, r.fora_do_prazo, r.aditivo,
            r.previsao_inicio, r.previsao_fim, r.encerramento, r.solicitante_nome,
-           coalesce(pu.ativos, 0) as ativos
+           coalesce(pu.ativos, 0) as ativos,
+           em.id as empresa_id, em.nome as empresa_nome
       from v_requisicoes r
       left join por_unidade pu on pu.unidade_id = r.unidade_id
+      left join unidades un on un.id = r.unidade_id
+      left join empresas em on em.id = un.empresa_id
      where r.status in ('aberta', 'em_atendimento')
        and r.previsao_inicio <= $2::date and coalesce(r.previsao_fim, date '9999-12-31') >= $1::date
      order by r.unidade_codigo, r.criado_em desc
@@ -213,6 +216,88 @@ router.get('/destinos/:localId', async (req, res, next) => {
        order by nivel, d.km nulls last, v.codigo
        limit 60
     `, [req.params.localId]);
+    res.json(rows);
+  } catch (e) { next(e); }
+});
+
+/* 24/11/2026 — MONTAGEM DESTRAVADA.
+   A fila continua sendo o primeiro criterio e aparece primeiro. Mas o
+   aditivo corrige a quinzena em curso, e a correcao nem sempre esta na
+   fila nem nos destinos sugeridos: quem monta precisa achar QUALQUER
+   colaborador e QUALQUER unidade ativa. As duas buscas abaixo fazem isso;
+   a tela marca o que veio de fora da fila ou de fora das sugestoes. */
+const SEM_ACENTO_DE = 'áàâãäéèêëíìîïóòôõöúùûüç';
+const SEM_ACENTO_PARA = 'aaaaaeeeeiiiiooooouuuuc';
+const liso = (col) => `translate(lower(coalesce(${col}, '')), '${SEM_ACENTO_DE}', '${SEM_ACENTO_PARA}')`;
+const termoLiso = (s) => String(s || '').trim().toLowerCase()
+  .normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[%_\\]/g, '');
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/* GET /escalas/pessoas?busca= — qualquer colaborador, por nome ou codigo */
+router.get('/pessoas', async (req, res, next) => {
+  try {
+    const termo = termoLiso(req.query.busca);
+    if (termo.length < 2) return res.json([]);
+    const { rows } = await consulta(`
+      select t.id as trabalhador_id, t.codigo::text as codigo, t.nome,
+             s.local_base_id, l.nome as local_base, l.cidade,
+             coalesce(s.dias_fora, 0)::int as dias_fora,
+             coalesce(s.falta, 0)::int     as falta,
+             coalesce(s.perfil, 'isento')  as perfil,
+             coalesce(s.ativo, false)      as ativo
+        from trabalhadores t
+        left join v_situacao s on s.trabalhador_id = t.id
+        left join locais l on l.id = s.local_base_id
+       where ${liso('t.nome')} like $1 or t.codigo::text like $2
+       order by coalesce(s.ativo, false) desc, t.nome
+       limit 40
+    `, [`%${termo}%`, `${termo}%`]);
+    res.json(rows);
+  } catch (e) { next(e); }
+});
+
+/* GET /escalas/unidades?busca=&base=<local> — qualquer unidade ativa.
+   Com a base informada, diz o tipo de movimento e a distancia. */
+router.get('/unidades', async (req, res, next) => {
+  try {
+    const p = await criterios();
+    const termo = termoLiso(req.query.busca);
+    if (termo.length < 2) return res.json([]);
+    const base = UUID.test(String(req.query.base || '')) ? req.query.base : null;
+    const { rows } = await consulta(`
+      with anc as (select max(data) as fim from apuracao_dia),
+      base as (select id, cidade from locais where id = $2::uuid)
+      select u.id, u.codigo, u.nome_completo, u.setor,
+             l.nome as local, l.cidade,
+             (select count(distinct a.trabalhador_id) from apuracao_dia a
+               where a.unidade_id = u.id and a.data > (select fim from anc) - 30)::int as gente_no_mes,
+             coalesce((select max(a.data) from apuracao_dia a where a.unidade_id = u.id)
+                      > (select fim from anc) - ${n(p.dias_unidade_ativa)}, false) as viva,
+             case
+               when $2::uuid is null                                         then 3
+               when u.local_id = $2::uuid                                    then 1
+               when l.cidade is not null
+                and l.cidade = (select cidade from base)                     then 2
+               else 3
+             end as nivel,
+             case
+               when $2::uuid is null                                         then 'outra unidade'
+               when u.local_id = $2::uuid                                    then 'outro setor, mesmo local'
+               when l.cidade is not null
+                and l.cidade = (select cidade from base)                     then 'outro local, mesma cidade'
+               else 'outra cidade'
+             end as tipo_movimento,
+             d.km, d.km_aproximado
+        from unidades u
+        left join locais l on l.id = u.local_id
+        left join v_local_distancia d on d.local_id = $2::uuid and d.destino_id = u.local_id
+       where u.situacao = 'ativa'
+         and (u.codigo::text like $3
+              or ${liso('u.nome_completo')} like $1 or ${liso('l.nome')} like $1
+              or ${liso('l.cidade')} like $1 or ${liso('u.setor')} like $1)
+       order by (u.codigo::text = $4) desc, nivel, u.codigo
+       limit 25
+    `, [`%${termo}%`, base, `${termo}%`, termo]);
     res.json(rows);
   } catch (e) { next(e); }
 });

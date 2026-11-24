@@ -34,6 +34,9 @@ function diasEntre(a, b) {
 const rotuloQuinzena = (q) =>
   `${q.numero === 1 ? "1ª" : "2ª"} quinzena · ${diaMes(q.quinzena_inicio)} a ${dataBR(q.quinzena_fim)}`;
 
+/* comparação sem acento e sem maiúscula: "ceu azul" acha "Céu Azul" */
+const liso = (s) => String(s || "").normalize("NFD").replace(/[\u0300-\u036f]/g, "").toLowerCase().trim();
+
 const NATUREZAS = {
   rodizio: { rotulo: "Rodízio", cor: "bg-teal-50 text-teal-700",
              ajuda: "Quem sai da unidade-base, em blocos de segunda a sexta, na ordem da fila." },
@@ -311,6 +314,16 @@ function Detalhe({ token, id, podeEditar, pedir, gravar, aoVoltar }) {
   const [motivoCancelar, setMotivoCancelar] = useState("");
   const [cancelando, setCancelando] = useState(false);
   const [gerando, setGerando] = useState(false);
+  /* 24/11/2026 — montagem destravada: filtros da fila, busca fora da fila
+     e filtros das requisições */
+  const [fCidade, setFCidade] = useState("");
+  const [fLocal, setFLocal] = useState("");
+  const [fora, setFora] = useState([]);
+  const [buscandoFora, setBuscandoFora] = useState(false);
+  const [rBusca, setRBusca] = useState("");
+  const [rEmpresa, setREmpresa] = useState("");
+  const [rSituacao, setRSituacao] = useState("");
+  const [rAberto, setRAberto] = useState(true);
 
   async function carregar() {
     try { setE(await pedir(`/escalas/${id}`, token)); }
@@ -327,14 +340,59 @@ function Detalhe({ token, id, podeEditar, pedir, gravar, aoVoltar }) {
   const jaNaEscala = useMemo(
     () => new Set((e?.itens || []).map((i) => i.trabalhador_codigo)), [e]);
 
-  const filtrados = useMemo(() => {
-    if (!candidatos) return [];
-    const t = busca.trim().toLowerCase();
-    return candidatos
-      .filter((c) => !jaNaEscala.has(c.codigo))
-      .filter((c) => !t || (c.nome || "").toLowerCase().includes(t) || c.codigo.includes(t))
-      .slice(0, 60);
-  }, [candidatos, busca, jaNaEscala]);
+  const naFila = useMemo(
+    () => (candidatos || []).filter((c) => !jaNaEscala.has(c.codigo)), [candidatos, jaNaEscala]);
+  const cidadesFila = useMemo(
+    () => [...new Set(naFila.map((c) => c.cidade).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR")), [naFila]);
+  const locaisFila = useMemo(
+    () => [...new Set(naFila.filter((c) => !fCidade || c.cidade === fCidade).map((c) => c.local_base).filter(Boolean))]
+      .sort((a, b) => a.localeCompare(b, "pt-BR")), [naFila, fCidade]);
+
+  const casados = useMemo(() => {
+    const t = liso(busca);
+    return naFila
+      .filter((c) => !fCidade || c.cidade === fCidade)
+      .filter((c) => !fLocal || c.local_base === fLocal)
+      .filter((c) => !t || liso(c.nome).includes(t) || String(c.codigo).includes(t));
+  }, [naFila, busca, fCidade, fLocal]);
+  const filtrados = useMemo(() => casados.slice(0, 60), [casados]);
+
+  /* quem não está na fila: a busca vai à API (qualquer colaborador) */
+  useEffect(() => {
+    const t = busca.trim();
+    if (t.length < 2 || !e || e.status !== "rascunho" || e.natureza === "inicial") { setFora([]); return; }
+    let vivo = true;
+    setBuscandoFora(true);
+    const h = setTimeout(() => {
+      pedir(`/escalas/pessoas?busca=${encodeURIComponent(t)}`, token)
+        .then((r) => { if (vivo) setFora(r); })
+        .catch(() => { if (vivo) setFora([]); })
+        .finally(() => { if (vivo) setBuscandoFora(false); });
+    }, 300);
+    return () => { vivo = false; clearTimeout(h); };
+  }, [busca, e?.status, e?.natureza, token]);
+
+  const foraDaFila = useMemo(() => {
+    const naLista = new Set((candidatos || []).map((c) => String(c.codigo)));
+    return fora.filter((c) => !naLista.has(String(c.codigo)) && !jaNaEscala.has(String(c.codigo)));
+  }, [fora, candidatos, jaNaEscala]);
+
+  /* requisições: filtro por texto, empresa e situação */
+  const empresasReq = useMemo(
+    () => [...new Set((e?.requisicoes || []).map((r) => r.empresa_nome).filter(Boolean))].sort((a, b) => a.localeCompare(b, "pt-BR")),
+    [e]);
+  const reqFiltradas = useMemo(() => {
+    const t = liso(rBusca);
+    return (e?.requisicoes || []).filter((r) => {
+      const dif = (r.ativos || 0) - (r.quantidade || 0);
+      if (rEmpresa && r.empresa_nome !== rEmpresa) return false;
+      if (rSituacao === "faltam" && !(dif < 0)) return false;
+      if (rSituacao === "sobram" && !(dif > 0)) return false;
+      if (rSituacao === "bate" && dif !== 0) return false;
+      if (!t) return true;
+      return liso(`${r.unidade_codigo} ${r.unidade_nome} ${r.local_nome || ""} ${r.local_cidade || ""} ${r.empresa_nome || ""}`).includes(t);
+    });
+  }, [e, rBusca, rEmpresa, rSituacao]);
 
   async function remover(itemId) {
     setErro("");
@@ -378,6 +436,108 @@ function Detalhe({ token, id, podeEditar, pedir, gravar, aoVoltar }) {
   const totalPedido = (e.requisicoes || []).reduce((a, r) => a + (r.quantidade || 0), 0);
   const totalAtivos = (e.requisicoes || []).reduce((a, r) => a + (r.ativos || 0), 0);
   const publicarAte = somaDias(String(e.periodo_inicio).slice(0, 10), -(e.antecedencia_divulgacao ?? 2));
+
+  /* ---------- requisições da quinzena (só no rascunho) ----------
+     Na escala inicial ficam em cima (é delas que a escala nasce); no rodízio
+     e no aditivo ficam depois da montagem, para a busca vir primeiro. */
+  const blocoRequisicoes = rascunho && (
+        <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
+          <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
+            <div>
+              <button onClick={() => setRAberto(!rAberto)} className="text-[13px] font-medium text-left">
+                {rAberto ? "▾" : "▸"} Requisições desta quinzena · {(e.requisicoes || []).length}
+              </button>
+              <p className="text-[11px] text-slate-500 mt-0.5">
+                Pedido pelas unidades: {totalPedido} pessoas · ativos hoje nessas unidades: {totalAtivos} ·
+                publicar até {dataBR(publicarAte)}
+              </p>
+            </div>
+            {inicial && podeEditar && (
+              <button onClick={gerarInicial} disabled={gerando || !(e.requisicoes || []).length}
+                className="bg-teal-600 text-white rounded-lg px-4 py-2 text-[13px] font-medium disabled:opacity-40">
+                {gerando ? "Gerando…" : "Gerar com os ativos das unidades"}
+              </button>
+            )}
+          </div>
+          {rAberto && (e.requisicoes || []).length > 0 && (
+            <div className="px-4 py-2.5 border-b border-slate-100 flex gap-2 flex-wrap items-center bg-slate-50/60">
+              <input value={rBusca} onChange={(ev) => setRBusca(ev.target.value)}
+                placeholder="Filtrar por unidade, código ou cidade…"
+                className="flex-1 min-w-[200px] border border-slate-200 rounded-lg px-3 py-1.5 text-[12.5px] bg-white" />
+              {empresasReq.length > 0 && (
+                <select value={rEmpresa} onChange={(ev) => setREmpresa(ev.target.value)}
+                  className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white max-w-[220px]">
+                  <option value="">Todas as empresas</option>
+                  {empresasReq.map((x) => <option key={x} value={x}>{x}</option>)}
+                </select>
+              )}
+              <select value={rSituacao} onChange={(ev) => setRSituacao(ev.target.value)}
+                className="border border-slate-200 rounded-lg px-2 py-1.5 text-[12.5px] bg-white">
+                <option value="">Toda situação</option>
+                <option value="faltam">Faltam pessoas</option>
+                <option value="sobram">Têm a mais</option>
+                <option value="bate">Bate</option>
+              </select>
+              {(rBusca || rEmpresa || rSituacao) && (
+                <button onClick={() => { setRBusca(""); setREmpresa(""); setRSituacao(""); }}
+                  className="text-[12px] text-teal-700 font-medium">Limpar</button>
+              )}
+              <span className="text-[11px] text-slate-500 ml-auto">mostrando {reqFiltradas.length} de {e.requisicoes.length}</span>
+            </div>
+          )}
+          {!rAberto ? null : (e.requisicoes || []).length === 0 ? (
+            <p className="px-4 py-5 text-[13px] text-slate-500 text-center">
+              Nenhuma requisição viva cobre este período. A escala precisa de um pedido por trás.
+            </p>
+          ) : (
+            <div className="overflow-x-auto">
+              <table className="w-full text-[12px]">
+                <thead className="bg-slate-50 text-slate-500">
+                  <tr>
+                    <th className="text-left px-3 py-2">Unidade</th>
+                    <th className="text-left px-3 py-2">Pedido</th>
+                    <th className="text-right px-3 py-2">Pessoas</th>
+                    <th className="text-right px-3 py-2">Ativos</th>
+                    <th className="text-left px-3 py-2">Situação</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {reqFiltradas.map((r) => {
+                    const dif = (r.ativos || 0) - (r.quantidade || 0);
+                    return (
+                      <tr key={r.id} className="border-t border-slate-50 align-top">
+                        <td className="px-3 py-2">
+                          <b>{r.unidade_codigo}</b> {r.unidade_nome}
+                          <span className="block text-slate-500">{r.local_cidade || "—"}{r.empresa_nome ? ` · ${r.empresa_nome}` : ""}</span>
+                        </td>
+                        <td className="px-3 py-2 text-slate-600">
+                          {(r.funcoes || []).length
+                            ? r.funcoes.map((f) => `${f.quantidade} × ${f.nome}`).join(" · ")
+                            : "sem função informada"}
+                          {r.tipo === "avulsa" && (
+                            <span className="block text-slate-400">avulsa · {dataBR(r.previsao_inicio)} a {dataBR(r.previsao_fim)}</span>
+                          )}
+                        </td>
+                        <td className="px-3 py-2 text-right tabular-nums">{r.quantidade}</td>
+                        <td className="px-3 py-2 text-right tabular-nums">{r.ativos}</td>
+                        <td className="px-3 py-2">
+                          <span className={`text-[11px] ${dif < 0 ? "text-amber-700" : dif > 0 ? "text-sky-700" : "text-emerald-700"}`}>
+                            {dif < 0 ? `faltam ${-dif}` : dif > 0 ? `${dif} a mais` : "bate"}
+                          </span>
+                          {r.fora_do_prazo && <span className="block text-[10.5px] text-amber-700">fora do prazo</span>}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {reqFiltradas.length === 0 && (
+                    <tr><td colSpan={5} className="px-3 py-4 text-center text-slate-500">Nenhuma requisição com esse filtro.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      );
 
   return (
     <div className="space-y-4">
@@ -441,72 +601,121 @@ function Detalhe({ token, id, podeEditar, pedir, gravar, aoVoltar }) {
         </div>
       )}
 
-      {/* ---------- requisições da quinzena (só no rascunho) ---------- */}
-      {rascunho && (
-        <div className="bg-white rounded-xl border border-slate-200 overflow-hidden">
-          <div className="px-4 py-3 border-b border-slate-100 flex items-center justify-between gap-3 flex-wrap">
-            <div>
-              <p className="text-[13px] font-medium">Requisições desta quinzena · {(e.requisicoes || []).length}</p>
-              <p className="text-[11px] text-slate-500 mt-0.5">
-                Pedido pelas unidades: {totalPedido} pessoas · ativos hoje nessas unidades: {totalAtivos} ·
-                publicar até {dataBR(publicarAte)}
-              </p>
-            </div>
-            {inicial && podeEditar && (
-              <button onClick={gerarInicial} disabled={gerando || !(e.requisicoes || []).length}
-                className="bg-teal-600 text-white rounded-lg px-4 py-2 text-[13px] font-medium disabled:opacity-40">
-                {gerando ? "Gerando…" : "Gerar com os ativos das unidades"}
-              </button>
+      {inicial && blocoRequisicoes}
+
+      {/* ---------- montagem (rodízio e aditivo) ---------- */}
+      {rascunho && podeEditar && !inicial && (
+        <div className="bg-white rounded-xl border border-slate-200 p-4">
+          <p className="text-[13px] font-medium">{e.natureza === "aditivo" ? "Quem entra neste aditivo" : "Fila de quem precisa rodar"}</p>
+          <p className="text-[11px] text-slate-500 mt-1 mb-3">
+            A fila vem na ordem de quem está há mais tempo sem sair da unidade-base. Este é o primeiro
+            critério, e é ele que sustenta a escala perante o fiscal. A busca também acha quem está fora da fila.
+          </p>
+          <div className="flex gap-2 flex-wrap items-center mb-3">
+            <input value={busca} onChange={(ev) => setBusca(ev.target.value)} autoFocus
+              placeholder="Buscar colaborador por nome ou código…"
+              className="flex-1 min-w-[220px] border border-slate-300 rounded-lg px-3 py-2 text-[13px] focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500" />
+            <select value={fCidade} onChange={(ev) => { setFCidade(ev.target.value); setFLocal(""); }}
+              className="border border-slate-200 rounded-lg px-2 py-2 text-[12.5px] bg-white max-w-[200px]">
+              <option value="">Todas as cidades</option>
+              {cidadesFila.map((x) => <option key={x} value={x}>{x}</option>)}
+            </select>
+            <select value={fLocal} onChange={(ev) => setFLocal(ev.target.value)}
+              className="border border-slate-200 rounded-lg px-2 py-2 text-[12.5px] bg-white max-w-[240px]">
+              <option value="">Todas as unidades-base</option>
+              {locaisFila.map((x) => <option key={x} value={x}>{x}</option>)}
+            </select>
+            {(busca || fCidade || fLocal) && (
+              <button onClick={() => { setBusca(""); setFCidade(""); setFLocal(""); }}
+                className="text-[12px] text-teal-700 font-medium">Limpar</button>
             )}
           </div>
-          {(e.requisicoes || []).length === 0 ? (
-            <p className="px-4 py-5 text-[13px] text-slate-500 text-center">
-              Nenhuma requisição viva cobre este período. A escala precisa de um pedido por trás.
+
+          {!candidatos && <p className="text-[13px] text-slate-400">Carregando a fila…</p>}
+          {candidatos && (
+            <p className="text-[11px] text-slate-500 mb-2">
+              {casados.length} na fila{casados.length > filtrados.length ? ` · mostrando os ${filtrados.length} primeiros; refine a busca para ver os demais` : ""}
             </p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-[12px]">
-                <thead className="bg-slate-50 text-slate-500">
-                  <tr>
-                    <th className="text-left px-3 py-2">Unidade</th>
-                    <th className="text-left px-3 py-2">Pedido</th>
-                    <th className="text-right px-3 py-2">Pessoas</th>
-                    <th className="text-right px-3 py-2">Ativos</th>
-                    <th className="text-left px-3 py-2">Situação</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {e.requisicoes.map((r) => {
-                    const dif = (r.ativos || 0) - (r.quantidade || 0);
-                    return (
-                      <tr key={r.id} className="border-t border-slate-50 align-top">
-                        <td className="px-3 py-2">
-                          <b>{r.unidade_codigo}</b> {r.unidade_nome}
-                          <span className="block text-slate-500">{r.local_cidade || "—"}</span>
-                        </td>
-                        <td className="px-3 py-2 text-slate-600">
-                          {(r.funcoes || []).length
-                            ? r.funcoes.map((f) => `${f.quantidade} × ${f.nome}`).join(" · ")
-                            : "sem função informada"}
-                          {r.tipo === "avulsa" && (
-                            <span className="block text-slate-400">avulsa · {dataBR(r.previsao_inicio)} a {dataBR(r.previsao_fim)}</span>
-                          )}
-                        </td>
-                        <td className="px-3 py-2 text-right tabular-nums">{r.quantidade}</td>
-                        <td className="px-3 py-2 text-right tabular-nums">{r.ativos}</td>
-                        <td className="px-3 py-2">
-                          <span className={`text-[11px] ${dif < 0 ? "text-amber-700" : dif > 0 ? "text-sky-700" : "text-emerald-700"}`}>
-                            {dif < 0 ? `faltam ${-dif}` : dif > 0 ? `${dif} a mais` : "bate"}
-                          </span>
-                          {r.fora_do_prazo && <span className="block text-[10.5px] text-amber-700">fora do prazo</span>}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </div>
           )}
+
+          <div className="space-y-1.5 max-h-[460px] overflow-y-auto">
+            {filtrados.map((c) => (
+              <div key={c.codigo}>
+                <button onClick={() => setEscolhido(escolhido?.codigo === c.codigo ? null : c)}
+                  className={`w-full text-left rounded-lg border p-2.5 ${
+                    escolhido?.codigo === c.codigo ? "border-teal-500 bg-teal-50" : "border-slate-200 hover:border-slate-400"}`}>
+                  <div className="flex items-start gap-2 flex-wrap">
+                    <div className="flex-1 min-w-[180px]">
+                      <p className="text-[13px]">
+                        <b>{c.codigo}</b> {c.nome || <span className="text-amber-700">sem cadastro no MMG+</span>}
+                      </p>
+                      <p className="text-[11px] text-slate-500">{c.local_base} {c.cidade && `· ${c.cidade}`}</p>
+                    </div>
+                    <div className="text-right text-[11px] text-slate-500">
+                      <p>saiu {c.dias_fora} dias em 12 meses</p>
+                      <p className="text-amber-700">faltam {c.falta}</p>
+                    </div>
+                  </div>
+                  {c.ja_escalado_em && (
+                    <p className="text-[10.5px] text-rose-600 mt-1">
+                      já está numa escala publicada a partir de {dataBR(c.ja_escalado_em)}
+                    </p>
+                  )}
+                </button>
+
+                {escolhido?.codigo === c.codigo && (
+                  <Destinos token={token} escala={e} candidato={c}
+                    pedir={pedir} gravar={gravar}
+                    aoIncluir={async () => { setEscolhido(null); await carregar(); }} />
+                )}
+              </div>
+            ))}
+
+            {candidatos && filtrados.length === 0 && foraDaFila.length === 0 && !buscandoFora && (
+              <p className="text-[12.5px] text-slate-500 py-3 text-center">
+                {busca.trim().length >= 2 ? "Ninguém com esse nome ou código." : "Ninguém na fila com esse filtro."}
+              </p>
+            )}
+
+            {busca.trim().length >= 2 && (foraDaFila.length > 0 || buscandoFora) && (
+              <div className="pt-2">
+                <p className="text-[10.5px] uppercase tracking-wide text-slate-500 font-semibold mb-1.5">
+                  Fora da fila {buscandoFora ? "· procurando…" : `· ${foraDaFila.length}`}
+                </p>
+                <div className="space-y-1.5">
+                  {foraDaFila.map((c) => (
+                    <div key={c.codigo}>
+                      <button onClick={() => setEscolhido(escolhido?.codigo === c.codigo ? null : c)}
+                        className={`w-full text-left rounded-lg border p-2.5 ${
+                          escolhido?.codigo === c.codigo ? "border-teal-500 bg-teal-50" : "border-dashed border-slate-300 hover:border-slate-500"}`}>
+                        <div className="flex items-start gap-2 flex-wrap">
+                          <div className="flex-1 min-w-[180px]">
+                            <p className="text-[13px]">
+                              <b>{c.codigo}</b> {c.nome || <span className="text-amber-700">sem cadastro no MMG+</span>}
+                            </p>
+                            <p className="text-[11px] text-slate-500">
+                              {c.local_base || "sem unidade-base conhecida"} {c.cidade && `· ${c.cidade}`}
+                            </p>
+                          </div>
+                          <div className="text-right text-[11px]">
+                            <span className="inline-block rounded-md px-2 py-0.5 bg-slate-100 text-slate-600 font-medium">
+                              {!c.ativo ? "sem movimento recente" : c.falta > 0 ? `faltam ${c.falta}` : c.perfil === "isento" ? "isento" : "em dia"}
+                            </span>
+                          </div>
+                        </div>
+                      </button>
+
+                      {escolhido?.codigo === c.codigo && (
+                        <Destinos token={token} escala={e} candidato={c}
+                          pedir={pedir} gravar={gravar}
+                          aoIncluir={async () => { setEscolhido(null); setBusca(""); await carregar(); }} />
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
@@ -522,7 +731,7 @@ function Detalhe({ token, id, podeEditar, pedir, gravar, aoVoltar }) {
         {(!e.itens || e.itens.length === 0) ? (
           <p className="px-4 py-6 text-[13px] text-slate-500 text-center">
             {inicial ? "Nenhuma pessoa ainda. Gere a partir dos ativos das unidades com requisição."
-                     : "Nenhuma pessoa ainda. Escolha da fila abaixo."}
+                     : "Nenhuma pessoa ainda. Escolha na busca acima."}
           </p>
         ) : (
           <div className="overflow-x-auto">
@@ -587,55 +796,7 @@ function Detalhe({ token, id, podeEditar, pedir, gravar, aoVoltar }) {
         )}
       </div>
 
-      {/* ---------- montagem (rodízio e aditivo) ---------- */}
-      {rascunho && podeEditar && !inicial && (
-        <div className="bg-white rounded-xl border border-slate-200 p-4">
-          <p className="text-[13px] font-medium">Fila de quem precisa rodar</p>
-          <p className="text-[11px] text-slate-500 mt-1 mb-3">
-            Na ordem de quem está há mais tempo sem sair da unidade-base. Este é o primeiro
-            critério, e é ele que sustenta a escala perante o fiscal.
-          </p>
-          <input value={busca} onChange={(ev) => setBusca(ev.target.value)}
-            placeholder="Buscar nome ou código…"
-            className="w-full sm:w-72 border border-slate-200 rounded-lg px-3 py-2 text-[13px] mb-3" />
-
-          {!candidatos && <p className="text-[13px] text-slate-400">Carregando a fila…</p>}
-
-          <div className="space-y-1.5 max-h-[420px] overflow-y-auto">
-            {filtrados.map((c) => (
-              <div key={c.codigo}>
-                <button onClick={() => setEscolhido(escolhido?.codigo === c.codigo ? null : c)}
-                  className={`w-full text-left rounded-lg border p-2.5 ${
-                    escolhido?.codigo === c.codigo ? "border-teal-500 bg-teal-50" : "border-slate-200 hover:border-slate-400"}`}>
-                  <div className="flex items-start gap-2 flex-wrap">
-                    <div className="flex-1 min-w-[180px]">
-                      <p className="text-[13px]">
-                        <b>{c.codigo}</b> {c.nome || <span className="text-amber-700">sem cadastro no MMG+</span>}
-                      </p>
-                      <p className="text-[11px] text-slate-500">{c.local_base} {c.cidade && `· ${c.cidade}`}</p>
-                    </div>
-                    <div className="text-right text-[11px] text-slate-500">
-                      <p>saiu {c.dias_fora} dias em 12 meses</p>
-                      <p className="text-amber-700">faltam {c.falta}</p>
-                    </div>
-                  </div>
-                  {c.ja_escalado_em && (
-                    <p className="text-[10.5px] text-rose-600 mt-1">
-                      já está numa escala publicada a partir de {dataBR(c.ja_escalado_em)}
-                    </p>
-                  )}
-                </button>
-
-                {escolhido?.codigo === c.codigo && (
-                  <Destinos token={token} escala={e} candidato={c}
-                    pedir={pedir} gravar={gravar}
-                    aoIncluir={async () => { setEscolhido(null); await carregar(); }} />
-                )}
-              </div>
-            ))}
-          </div>
-        </div>
-      )}
+      {!inicial && blocoRequisicoes}
 
       {/* ---------- publicar ---------- */}
       {rascunho && podeEditar && (
@@ -858,6 +1019,24 @@ function Destinos({ token, escala, candidato, pedir, gravar, aoIncluir }) {
     ? somaDias(inicioPadrao, Math.min((escala.dias_por_mes || 5) - 1, diasEntre(inicioPadrao, String(escala.periodo_fim).slice(0, 10)) - 1))
     : String(escala.periodo_fim).slice(0, 10));
   const [salvando, setSalvando] = useState(false);
+  /* 24/11/2026 — qualquer unidade ativa serve de destino, não só as sugeridas */
+  const [buscaU, setBuscaU] = useState("");
+  const [achadas, setAchadas] = useState([]);
+  const [buscandoU, setBuscandoU] = useState(false);
+
+  useEffect(() => {
+    const termo = buscaU.trim();
+    if (termo.length < 2) { setAchadas([]); return; }
+    let vivo = true;
+    setBuscandoU(true);
+    const h = setTimeout(() => {
+      pedir(`/escalas/unidades?busca=${encodeURIComponent(termo)}${candidato.local_base_id ? `&base=${candidato.local_base_id}` : ""}`, token)
+        .then((r) => { if (vivo) setAchadas(r); })
+        .catch(() => { if (vivo) setAchadas([]); })
+        .finally(() => { if (vivo) setBuscandoU(false); });
+    }, 300);
+    return () => { vivo = false; clearTimeout(h); };
+  }, [buscaU, candidato.local_base_id, token]);
 
   useEffect(() => {
     if (!candidato.local_base_id) { setLista([]); return; }
@@ -893,7 +1072,11 @@ function Destinos({ token, escala, candidato, pedir, gravar, aoIncluir }) {
     <div className="mt-1.5 ml-2 border-l-2 border-teal-200 pl-3 pb-2">
       {!lista && <p className="text-[12px] text-slate-400">Procurando destinos…</p>}
       {lista && lista.length === 0 && (
-        <p className="text-[12px] text-rose-600">Nenhuma unidade viva serve de destino para esta pessoa hoje.</p>
+        <p className="text-[12px] text-amber-700">
+          {candidato.local_base_id
+            ? "Nenhuma unidade com movimento recente foi sugerida. Procure o destino na busca abaixo."
+            : "Esta pessoa não tem unidade-base conhecida, então não há sugestão. Procure o destino na busca abaixo."}
+        </p>
       )}
 
       {[1, 2, 3].map((n) => porNivel[n].length > 0 && (
@@ -917,8 +1100,38 @@ function Destinos({ token, escala, candidato, pedir, gravar, aoIncluir }) {
         </div>
       ))}
 
+      <div className="mb-2 mt-1">
+        <p className="text-[10.5px] text-slate-500 uppercase tracking-wide mb-1">Buscar outra unidade</p>
+        <input value={buscaU} onChange={(ev) => setBuscaU(ev.target.value)}
+          placeholder="Código, nome, setor ou cidade de qualquer unidade…"
+          className="w-full sm:w-96 border border-slate-300 rounded-lg px-3 py-1.5 text-[12.5px] focus:outline-none focus:ring-2 focus:ring-teal-500/40 focus:border-teal-500" />
+        {buscaU.trim().length >= 2 && (
+          <div className="flex flex-wrap gap-1.5 mt-1.5">
+            {buscandoU && achadas.length === 0 && <p className="text-[12px] text-slate-400">Procurando…</p>}
+            {!buscandoU && achadas.length === 0 && <p className="text-[12px] text-slate-500">Nenhuma unidade ativa com isso.</p>}
+            {achadas.map((d) => (
+              <button key={d.id} onClick={() => setDestino(d)}
+                className={`text-left rounded-lg border px-2.5 py-1.5 text-[11.5px] min-w-[210px] max-w-[300px] ${
+                  destino?.id === d.id ? "bg-teal-600 text-white border-teal-600" : "bg-white border-slate-200 hover:border-slate-400"}`}>
+                <span className="block"><b>{d.codigo}</b> {d.local || d.nome_completo}</span>
+                <span className={`block text-[10.5px] ${destino?.id === d.id ? "text-teal-50" : "text-slate-600"}`}>{d.setor || "—"} · {d.tipo_movimento}</span>
+                <span className={`block text-[10px] ${destino?.id === d.id ? "text-teal-100" : "text-slate-500"}`}>
+                  {d.cidade || "sem cidade"}
+                  {d.km != null && ` · ${Math.round(d.km)} km${d.km_aproximado ? " aprox." : ""}`}
+                  {d.gente_no_mes > 0 ? ` · ${d.gente_no_mes} pessoas no mês` : ""}
+                  {!d.viva && " · sem movimento recente"}
+                </span>
+              </button>
+            ))}
+          </div>
+        )}
+      </div>
+
       {destino && (
         <div className="mt-2 bg-slate-50 rounded-lg p-3">
+          <p className="text-[11.5px] text-slate-600 mb-2">
+            Destino: <b>{destino.codigo}</b> {destino.local || destino.nome_completo}{destino.setor ? ` · ${destino.setor}` : ""}
+          </p>
           <div className="flex gap-2 flex-wrap items-end">
             <div>
               <p className="text-[10.5px] text-slate-500 mb-1">De</p>
