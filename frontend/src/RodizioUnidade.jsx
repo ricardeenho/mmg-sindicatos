@@ -1,5 +1,6 @@
 import { useState, useEffect, useMemo, useCallback } from "react";
 import { toast } from "./Profissional.jsx";
+import EditarUnidade from "./EditarUnidade.jsx";
 
 /* 11/10/2026 — RODÍZIO POR UNIDADE
    Cada Gestor MMG Responsável roda as unidades que assumiu. Três colunas:
@@ -129,6 +130,7 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
   const [confirmar, setConfirmar] = useState(null);
   const [encerrando, setEncerrando] = useState(null);
   const [motivoEnc, setMotivoEnc] = useState("");
+  const [editando, setEditando] = useState(null);   /* admin: editar cadastro da unidade */
 
   const carregar = useCallback(async () => {
     try {
@@ -662,7 +664,14 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
         <div className="p-4 border-b border-slate-100 space-y-3">
           <div className="flex flex-wrap gap-2 items-start justify-between">
             <div className="min-w-0">
-              <p className="text-[15.5px] font-semibold">{u.codigo} · {cap(u.local_nome)}</p>
+              <p className="text-[15.5px] font-semibold">{u.codigo} · {cap(u.local_nome)}
+                {u.situacao && u.situacao !== "ativa" && (
+                  <span className="ml-2 align-middle text-[10.5px] font-semibold rounded-md px-2 py-0.5 bg-amber-50 text-amber-700">{u.situacao === "parada" ? "Parada" : "Encerrada"}</span>
+                )}
+                {admin && podeEditar && (
+                  <button onClick={() => setEditando(u)} className="ml-2 align-middle text-[11px] font-semibold text-teal-700 border border-teal-200 rounded-md px-2 py-0.5 hover:bg-teal-50">Editar unidade</button>
+                )}
+              </p>
               <p className="text-[12px] text-slate-500">
                 {cap(u.setor)} · {u.cidade || "sem cidade"} · {u.gestor_id ? `Gestor MMG Responsável: ${u.gestor_id === eu.id ? "você" : cap(u.gestor_nome)}` : "sem Gestor MMG Responsável"}
               </p>
@@ -1032,6 +1041,10 @@ export default function RodizioUnidade({ token, podeEditar, pedir, gravar }) {
 
   return (
     <div className="space-y-3">
+      {editando && (
+        <EditarUnidade unidade={editando} token={token} pedir={pedir} gravar={gravar}
+          aoFechar={() => setEditando(null)} aoSalvar={carregar} />
+      )}
       {topo}
       {progresso}
       {painelGestores}

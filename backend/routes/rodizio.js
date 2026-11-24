@@ -454,7 +454,7 @@ router.get('/quinzena', async (req, res, next) => {
                  and r.previsao_inicio <= $3::date
                  and coalesce(r.previsao_fim, date '9999-12-31') >= $2::date
       )
-      select u.id, u.codigo, u.setor, u.nome_completo,
+      select u.id, u.codigo, u.setor, u.nome_completo, u.situacao,
              l.id as local_id, coalesce(l.nome, u.nome_completo) as local_nome,
              coalesce(l.cidade, u.cidade) as cidade,
              g.usuario_id as gestor_id, us.nome as gestor_nome, g.desde as gestor_desde,
@@ -489,6 +489,7 @@ router.get('/quinzena', async (req, res, next) => {
           select r.criado_em, r.quantidade, r.status from v_requisicoes r
            where r.unidade_id = u.id order by r.criado_em desc limit 1
         ) ul on true
+       where u.situacao = 'ativa' or u.id in (select unidade_id from base)
        order by u.codigo
     `, [q.id, inicio, fim]);
 
@@ -1575,5 +1576,7 @@ router.post('/quinzenas/:qid/publicacao/drive', autorizar('admin'), async (req, 
 router.get('/quinzenas/:qid/publicacao/drive', autorizar('admin'), (req, res) => {
   res.json(jobsDrive.get(req.params.qid) || { estado: 'nenhum' });
 });
+
+router.use('/admin', require('./unidadesAdmin'));
 
 module.exports = router;
